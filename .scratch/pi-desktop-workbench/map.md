@@ -19,6 +19,8 @@ A standalone, decision-ready product, UX, and technical specification for an uns
 
 ## Decisions so far
 
+- [Research Pi runtime and shared state](issues/01-research-pi-runtime-and-state.md) — Pi supports SDK and RPC desktop integration; auth/settings can share their locking managers, while each session file requires one live writer and safe handoff or forking.
+
 ## Not yet specified
 
 - Capability-specific compatibility and UX questions that only become visible after the Pi runtime and TUI surfaces are inventoried.
