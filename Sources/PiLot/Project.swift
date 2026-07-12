@@ -162,9 +162,8 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    func updateNavigation(selectedSessionID: String, inspectorPresented: Bool) {
-        guard let activeProjectID else { return }
-        index.updateNavigation(projectID: activeProjectID, selectedSessionID: selectedSessionID, inspectorPresented: inspectorPresented)
+    func updateNavigation(projectID: String, selectedSessionID: String, inspectorPresented: Bool) {
+        index.updateNavigation(projectID: projectID, selectedSessionID: selectedSessionID, inspectorPresented: inspectorPresented)
         persist()
     }
 

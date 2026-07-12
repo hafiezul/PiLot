@@ -76,6 +76,19 @@ struct PiToolRun: Identifiable, Equatable {
     var status: Status = .running
 }
 
+enum SessionAttentionState: Equatable {
+    case waiting, failed, running, done
+
+    var sortOrder: Int {
+        switch self {
+        case .waiting: 0
+        case .failed: 1
+        case .running: 2
+        case .done: 3
+        }
+    }
+}
+
 struct PiSessionState {
     var assistantText = ""
     var tools: [String: PiToolRun] = [:]
@@ -182,6 +195,8 @@ final class PiEngine: ObservableObject {
     @Published private(set) var recovery: RecoveredSession?
     @Published private(set) var restoredDraft = ""
     @Published private(set) var ownershipRequiresFork = false
+    @Published private(set) var attentionState: SessionAttentionState = .done
+    @Published private(set) var activityDate = Date()
 
     private var process: Process?
     private var input: FileHandle?
@@ -228,6 +243,7 @@ final class PiEngine: ObservableObject {
                 recovery = recovered
                 restoredDraft = recovered.draft
                 guard recovered.metadata.state != .interrupted, recovered.issue == nil else {
+                    setAttention(.failed)
                     status = recovered.actions.isEmpty
                         ? "Interrupted — restart or fork without replaying unfinished work"
                         : "Transcript needs recovery — open read-only, export, or fork verified entries"
@@ -258,6 +274,15 @@ final class PiEngine: ObservableObject {
         markMetadata(.done)
         stopProcess(status: nil)
         do { try beginNewSession(project: project, resources: resources) }
+        catch { fail(error) }
+    }
+
+    func startNewSession(project: URL, resources: URL) {
+        let canonical = project.standardizedFileURL.resolvingSymlinksInPath()
+        guard process == nil else { return }
+        self.resources = resources
+        launchProject = canonical
+        do { try beginNewSession(project: canonical, resources: resources) }
         catch { fail(error) }
     }
 
@@ -300,6 +325,7 @@ final class PiEngine: ObservableObject {
         session.toolOrder = []
         session.isRunning = true
         session.isSettled = false
+        setAttention(.running)
         guard markMetadata(.running) else {
             session.isRunning = false
             return
@@ -331,6 +357,7 @@ final class PiEngine: ObservableObject {
     func stopSession() {
         markMetadata(.done)
         recovery = nil
+        setAttention(.done)
         stopProcess(status: "Session stopped")
     }
 
@@ -449,15 +476,22 @@ final class PiEngine: ObservableObject {
 
     private func receive(_ record: [String: Any]) throws {
         guard let type = record["type"] as? String else { throw PiEngineError.malformedOutput }
+        if type != "message_update" { activityDate = Date() }
         if type == "response" {
             try receiveResponse(record)
         } else {
             try session.apply(record)
             switch type {
-            case "agent_start": status = "Running"
+            case "agent_start":
+                status = "Running"
+                setAttention(.running)
             case "agent_settled":
                 status = "Done"
+                setAttention(.done)
                 markMetadata(.done)
+            case "extension_ui_request":
+                status = "Waiting for input"
+                setAttention(.waiting)
             case "auto_retry_start": status = "Retrying…"
             case "compaction_start": status = "Compacting…"
             default: break
@@ -516,7 +550,13 @@ final class PiEngine: ObservableObject {
 
     private func fail(_ error: Error) {
         if process != nil { markMetadata(.interrupted) }
+        setAttention(.failed)
         stopProcess(status: error.localizedDescription)
+    }
+
+    private func setAttention(_ state: SessionAttentionState) {
+        attentionState = state
+        activityDate = Date()
     }
 
     @discardableResult

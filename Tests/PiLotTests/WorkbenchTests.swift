@@ -37,6 +37,44 @@ final class WorkbenchTests: XCTestCase {
         XCTAssertEqual(index.recents.count, 1)
     }
 
+    func testSupervisedSessionsSortByAttentionThenRecency() {
+        let old = Date(timeIntervalSince1970: 1)
+        let recent = Date(timeIntervalSince1970: 2)
+        let index = SupervisedSessionIndex(sessions: [
+            .init(id: "done", projectPath: "/a", title: "Done", state: .done, updatedAt: recent),
+            .init(id: "running-old", projectPath: "/a", title: "Running old", state: .running, updatedAt: old),
+            .init(id: "failed", projectPath: "/b", title: "Failed", state: .failed, updatedAt: old),
+            .init(id: "waiting", projectPath: "/c", title: "Waiting", state: .waiting, updatedAt: old),
+            .init(id: "running-new", projectPath: "/a", title: "Running new", state: .running, updatedAt: recent),
+        ])
+
+        XCTAssertEqual(index.sortedSessions.map(\.id), ["waiting", "failed", "running-new", "running-old", "done"])
+    }
+
+    func testSharedCanonicalRootWarnsEveryPeer() {
+        let index = SupervisedSessionIndex(sessions: [
+            .init(id: "one", projectPath: "/project", title: "One", state: .running),
+            .init(id: "two", projectPath: "/project", title: "Two", state: .done),
+            .init(id: "other", projectPath: "/other", title: "Other", state: .running),
+        ])
+
+        XCTAssertEqual(index.peers(of: "one").map(\.id), ["two"])
+        XCTAssertEqual(index.peers(of: "two").map(\.id), ["one"])
+        XCTAssertTrue(index.peers(of: "other").isEmpty)
+    }
+
+    func testOneEngineExitDoesNotChangeSiblingSessions() {
+        var index = SupervisedSessionIndex(sessions: [
+            .init(id: "failed-engine", projectPath: "/project", title: "One", state: .running),
+            .init(id: "healthy-engine", projectPath: "/project", title: "Two", state: .running),
+        ])
+
+        index.update(sessionID: "failed-engine", state: .failed, at: Date(timeIntervalSince1970: 3))
+
+        XCTAssertEqual(index.session(id: "failed-engine")?.state, .failed)
+        XCTAssertEqual(index.session(id: "healthy-engine")?.state, .running)
+    }
+
     func testProjectIndexRestoresOnlyDurableNavigationState() throws {
         var index = ProjectIndex()
         let project = try index.open(URL(fileURLWithPath: FileManager.default.currentDirectoryPath), access: .readOnly)

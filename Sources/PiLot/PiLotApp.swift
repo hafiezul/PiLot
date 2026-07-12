@@ -2,12 +2,12 @@ import SwiftUI
 
 @main
 struct PiLotApp: App {
-    @StateObject private var engine = PiEngine()
+    @StateObject private var supervisor = SessionSupervisor()
     @StateObject private var projects = ProjectStore()
 
     var body: some Scene {
         WindowGroup("PiLot", id: "workbench") {
-            WorkbenchView(engine: engine, projects: projects)
+            WorkbenchView(supervisor: supervisor, projects: projects)
                 .frame(minWidth: 760, minHeight: 560)
                 .task { startEngine() }
         }
@@ -16,7 +16,7 @@ struct PiLotApp: App {
         .commands { PiLotCommands() }
 
         Settings {
-            SettingsView(engine: engine)
+            SettingsView(engine: supervisor.runtime)
                 .frame(width: 460, height: 250)
                 .task { startEngine() }
         }
@@ -29,7 +29,7 @@ struct PiLotApp: App {
 
     private func startEngine() {
         if let resources = Bundle.main.resourceURL {
-            engine.start(resources: resources)
+            supervisor.startRuntime(resources: resources)
         }
     }
 }

@@ -67,10 +67,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Recover an interrupted session.
 
-- [ ] Multiple sessions continue while unfocused and across project windows.
-- [ ] Sessions sort by waiting, failed, running, then done, and by recency within each group.
-- [ ] Every session sharing a canonical project root shows a persistent peer/conflict warning without claiming isolation.
-- [ ] Killing one engine leaves all other sessions and windows responsive and durable.
+- [x] Multiple sessions continue while unfocused and across project windows.
+- [x] Sessions sort by waiting, failed, running, then done, and by recency within each group.
+- [x] Every session sharing a canonical project root shows a persistent peer/conflict warning without claiming isolation.
+- [x] Killing one engine leaves all other sessions and windows responsive and durable.
 
 ## Continue a CLI session by fork
 

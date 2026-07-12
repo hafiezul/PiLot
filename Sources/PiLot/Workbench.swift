@@ -210,10 +210,11 @@ extension FocusedValues {
 }
 
 struct WorkbenchView: View {
-    @ObservedObject var engine: PiEngine
+    @ObservedObject var supervisor: SessionSupervisor
     @ObservedObject var projects: ProjectStore
     @StateObject private var store = WorkbenchStore()
     @SceneStorage("selectedSession") private var selectedSessionID = "approval"
+    @SceneStorage("activeProject") private var activeProjectID = ""
     @SceneStorage("inspectorPresented") private var inspectorPresented = true
     @SceneStorage("composerDraft") private var draft = ""
     @State private var inspectorScope = "Last turn"
@@ -225,7 +226,11 @@ struct WorkbenchView: View {
         store.session(id: selectedSessionID) ?? store.sessions[0]
     }
 
-    private var hasLiveSession: Bool { projects.activeProject?.access == .trusted }
+    private var activeProject: ProjectRecord? {
+        projects.index.recents.first { $0.id == activeProjectID } ?? projects.activeProject
+    }
+
+    private var selectedEngine: PiEngine? { supervisor.engine(for: selectedSessionID) }
 
     var body: some View {
         GeometryReader { geometry in
@@ -233,25 +238,27 @@ struct WorkbenchView: View {
                 ProjectNavigator(
                     sessions: store.sessions,
                     selection: $selectedSessionID,
-                    engineStatus: engine.status,
+                    engineStatus: supervisor.runtime.status,
                     recents: projects.index.recents,
-                    liveProject: projects.activeProject,
+                    liveSessions: supervisor.sortedSessions,
                     reopen: { url in Task { await requestOpen(url) } }
                 )
                 .focused($focus, equals: .sidebar)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 245, max: 320)
             } detail: {
-                if selectedSessionID == "live", hasLiveSession {
+                if let engine = selectedEngine {
                     LiveSessionDetail(
                         engine: engine,
+                        peers: supervisor.peers(of: selectedSessionID),
                         draft: $draft,
                         composerFocus: $focus,
                         showInspector: { inspectorPresented.toggle() }
                     )
+                    .id(selectedSessionID)
                 } else {
                     SessionDetail(
                         session: selectedSession,
-                        project: projects.activeProject,
+                        project: activeProject,
                         draft: $draft,
                         composerFocus: $focus,
                         showInspector: { inspectorPresented.toggle() },
@@ -274,7 +281,7 @@ struct WorkbenchView: View {
             .onChange(of: geometry.size.width) { _, width in adaptInspector(to: width) }
         }
         .task {
-            if let project = projects.activeProject { await requestOpen(project.url) }
+            if let project = activeProject { await requestOpen(project.url) }
         }
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
@@ -284,8 +291,7 @@ struct WorkbenchView: View {
         .onOpenURL { url in Task { await requestOpen(url) } }
         .onChange(of: selectedSessionID) { _, _ in saveNavigation() }
         .onChange(of: inspectorPresented) { _, _ in saveNavigation() }
-        .onChange(of: draft) { _, value in engine.saveDraft(value) }
-        .onChange(of: engine.restoredDraft) { _, value in draft = value }
+        .onChange(of: draft) { _, value in selectedEngine?.saveDraft(value) }
         .sheet(isPresented: Binding(
             get: { projects.pendingTrustURL != nil },
             set: { if !$0 { projects.pendingTrustURL = nil } }
@@ -307,9 +313,8 @@ struct WorkbenchView: View {
         .focusedSceneValue(\.workbenchActions, WorkbenchActions(
             openProject: chooseProject,
             newSession: {
-                if hasLiveSession {
-                    engine.newSession()
-                    selectedSessionID = "live"
+                if let project = activeProject, project.access == .trusted, let resources = Bundle.main.resourceURL {
+                    selectedSessionID = supervisor.newSession(project: project.url, resources: resources)
                 } else {
                     selectedSessionID = store.newSession()
                 }
@@ -319,7 +324,7 @@ struct WorkbenchView: View {
             focusComposer: { focus = .composer },
             toggleInspector: { inspectorPresented.toggle() },
             stopSession: {
-                if selectedSessionID == "live" { engine.stopSession() }
+                if let engine = selectedEngine { engine.stopSession() }
                 else { store.stop(selectedSessionID) }
             }
         ))
@@ -360,15 +365,15 @@ struct WorkbenchView: View {
               let project = await projects.saveTrust(url, trusted: trusted, resources: resources)
         else { return }
         restoreNavigation(project)
-        if trusted { engine.openProject(project.url, resources: resources) }
-        else { engine.openSafeSurface(resources: resources) }
+        activeProjectID = project.id
+        if trusted { selectedSessionID = supervisor.openProject(project.url, resources: resources) }
     }
 
     private func finishOpen(_ url: URL, access: ProjectRecord.Access, resources: URL) {
         guard let project = projects.open(url, access: access) else { return }
         restoreNavigation(project)
-        if access == .trusted { engine.openProject(project.url, resources: resources) }
-        else { engine.openSafeSurface(resources: resources) }
+        activeProjectID = project.id
+        if access == .trusted { selectedSessionID = supervisor.openProject(project.url, resources: resources) }
     }
 
     private func restoreNavigation(_ project: ProjectRecord) {
@@ -377,12 +382,14 @@ struct WorkbenchView: View {
     }
 
     private func saveNavigation() {
-        projects.updateNavigation(selectedSessionID: selectedSessionID, inspectorPresented: inspectorPresented)
+        guard let project = activeProject else { return }
+        projects.updateNavigation(projectID: project.id, selectedSessionID: selectedSessionID, inspectorPresented: inspectorPresented)
     }
 }
 
 private struct LiveSessionDetail: View {
     @ObservedObject var engine: PiEngine
+    let peers: [SupervisedSessionSummary]
     @Binding var draft: String
     let composerFocus: FocusState<WorkbenchFocus?>.Binding
     let showInspector: () -> Void
@@ -407,6 +414,19 @@ private struct LiveSessionDetail: View {
             .controlSize(.small)
             .padding(.horizontal, 16)
             .frame(minHeight: 54)
+
+            if !peers.isEmpty {
+                Label(
+                    "Shared project root with \(peers.map(\.title).joined(separator: ", ")) — edits may conflict; sessions are not isolated.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                .background(Color.orange.opacity(0.10))
+                .accessibilityLabel("Shared project root. Edits may conflict. Sessions are not isolated.")
+            }
 
             if let recovery = engine.recovery {
                 RecoveryBanner(
@@ -440,6 +460,8 @@ private struct LiveSessionDetail: View {
             LiveComposer(engine: engine, draft: $draft, focus: composerFocus)
         }
         .navigationTitle("Pi session")
+        .onAppear { draft = engine.restoredDraft }
+        .onChange(of: engine.restoredDraft) { _, value in draft = value }
     }
 }
 
@@ -592,12 +614,18 @@ private struct ProjectNavigator: View {
     @Binding var selection: String
     let engineStatus: String
     let recents: [ProjectRecord]
-    let liveProject: ProjectRecord?
+    let liveSessions: [SupervisedSessionSummary]
     let reopen: (URL) -> Void
 
     private var projects: [String] {
         sessions.reduce(into: []) { result, session in
             if !result.contains(session.project) { result.append(session.project) }
+        }
+    }
+
+    private var liveProjects: [String] {
+        liveSessions.reduce(into: []) { result, session in
+            if !result.contains(session.projectPath) { result.append(session.projectPath) }
         }
     }
 
@@ -614,17 +642,13 @@ private struct ProjectNavigator: View {
                     }
                 }
             }
-            if let liveProject, liveProject.access == .trusted {
-                Section(liveProject.name) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "sparkles")
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Pi session")
-                            Text(engineStatus).font(.caption).foregroundStyle(.secondary)
-                        }
+            ForEach(liveProjects, id: \.self) { projectPath in
+                let projectSessions = liveSessions.filter { $0.projectPath == projectPath }
+                Section(URL(fileURLWithPath: projectPath).lastPathComponent) {
+                    ForEach(projectSessions) { session in
+                        SupervisedSessionRow(session: session, hasPeers: projectSessions.count > 1)
+                            .tag(session.id)
                     }
-                    .tag("live")
-                    .accessibilityLabel("Pi session, \(engineStatus)")
                 }
             }
             ForEach(projects, id: \.self) { project in
@@ -651,6 +675,60 @@ private struct ProjectNavigator: View {
             .accessibilityElement(children: .combine)
         }
         .accessibilityLabel("Projects and sessions")
+    }
+}
+
+private extension SessionAttentionState {
+    var title: String {
+        switch self {
+        case .waiting: "Waiting"
+        case .failed: "Failed"
+        case .running: "Running"
+        case .done: "Done"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .waiting: "pause.circle.fill"
+        case .failed: "xmark.octagon.fill"
+        case .running: "gearshape.2.fill"
+        case .done: "checkmark.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .waiting: .orange
+        case .failed: .red
+        case .running: .blue
+        case .done: .green
+        }
+    }
+}
+
+private struct SupervisedSessionRow: View {
+    let session: SupervisedSessionSummary
+    let hasPeers: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: session.state.symbol)
+                .foregroundStyle(session.state.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(session.title).lineLimit(1)
+                Text(session.state.title).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            if hasPeers {
+                Label("Shared", systemImage: "exclamationmark.triangle.fill")
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(session.title), \(session.state.title)\(hasPeers ? ", shared project root; edits may conflict" : "")")
     }
 }
 
