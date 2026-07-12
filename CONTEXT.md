@@ -16,6 +16,10 @@ _Avoid_: Embedded TUI, terminal scraping
 A developer who already uses Pi CLI and may have authentication, providers, models, settings, extensions, skills, prompts, and session history configured.
 _Avoid_: Generic developer, new user
 
+**Project trust**:
+An existing Pi user's explicit authorization for PiLot to load a project's settings and executable resources with that user's normal permissions.
+_Avoid_: Sandbox, per-tool permission
+
 **Project**:
 A local directory opened in PiLot that groups the agent sessions working against it.
 _Avoid_: Workspace, repository
