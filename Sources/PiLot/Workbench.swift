@@ -225,6 +225,8 @@ struct WorkbenchView: View {
         store.session(id: selectedSessionID) ?? store.sessions[0]
     }
 
+    private var hasLiveSession: Bool { projects.activeProject?.access == .trusted }
+
     var body: some View {
         GeometryReader { geometry in
             NavigationSplitView {
@@ -233,26 +235,36 @@ struct WorkbenchView: View {
                     selection: $selectedSessionID,
                     engineStatus: engine.status,
                     recents: projects.index.recents,
+                    liveProject: projects.activeProject,
                     reopen: { url in Task { await requestOpen(url) } }
                 )
                 .focused($focus, equals: .sidebar)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 245, max: 320)
             } detail: {
-                SessionDetail(
-                    session: selectedSession,
-                    project: projects.activeProject,
-                    draft: $draft,
-                    composerFocus: $focus,
-                    showInspector: { inspectorPresented.toggle() },
-                    answer: { store.answerInterruption(for: selectedSessionID) },
-                    decline: { store.declineInterruption(for: selectedSessionID) },
-                    retry: { store.retry(selectedSessionID) },
-                    stop: { store.stop(selectedSessionID) },
-                    send: {
-                        store.send(draft, to: selectedSessionID)
-                        draft = ""
-                    }
-                )
+                if selectedSessionID == "live", hasLiveSession {
+                    LiveSessionDetail(
+                        engine: engine,
+                        draft: $draft,
+                        composerFocus: $focus,
+                        showInspector: { inspectorPresented.toggle() }
+                    )
+                } else {
+                    SessionDetail(
+                        session: selectedSession,
+                        project: projects.activeProject,
+                        draft: $draft,
+                        composerFocus: $focus,
+                        showInspector: { inspectorPresented.toggle() },
+                        answer: { store.answerInterruption(for: selectedSessionID) },
+                        decline: { store.declineInterruption(for: selectedSessionID) },
+                        retry: { store.retry(selectedSessionID) },
+                        stop: { store.stop(selectedSessionID) },
+                        send: {
+                            store.send(draft, to: selectedSessionID)
+                            draft = ""
+                        }
+                    )
+                }
             }
             .inspector(isPresented: $inspectorPresented) {
                 ChangesInspector(scope: $inspectorScope, selectedFile: $selectedFile)
@@ -292,11 +304,22 @@ struct WorkbenchView: View {
         }
         .focusedSceneValue(\.workbenchActions, WorkbenchActions(
             openProject: chooseProject,
-            newSession: { selectedSessionID = store.newSession(); focus = .composer },
+            newSession: {
+                if hasLiveSession {
+                    engine.newSession()
+                    selectedSessionID = "live"
+                } else {
+                    selectedSessionID = store.newSession()
+                }
+                focus = .composer
+            },
             focusSidebar: { focus = .sidebar },
             focusComposer: { focus = .composer },
             toggleInspector: { inspectorPresented.toggle() },
-            stopSession: { store.stop(selectedSessionID) }
+            stopSession: {
+                if selectedSessionID == "live" { engine.stopSession() }
+                else { store.stop(selectedSessionID) }
+            }
         ))
     }
 
@@ -356,11 +379,167 @@ struct WorkbenchView: View {
     }
 }
 
+private struct LiveSessionDetail: View {
+    @ObservedObject var engine: PiEngine
+    @Binding var draft: String
+    let composerFocus: FocusState<WorkbenchFocus?>.Binding
+    let showInspector: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: engine.session.isRunning ? "gearshape.2.fill" : engine.session.isSettled ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(engine.session.isRunning ? .blue : engine.session.isSettled ? .green : .secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Pi session").font(.headline)
+                    Text(engine.status).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Changes", systemImage: "sidebar.right", action: showInspector)
+                Button("Abort", action: engine.abort)
+                    .disabled(!engine.session.isRunning)
+                Button("Stop Session", role: .destructive, action: engine.stopSession)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 54)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if !engine.session.lastPrompt.isEmpty {
+                        UserMessage(text: engine.session.lastPrompt)
+                    }
+                    if !engine.session.assistantText.isEmpty {
+                        Text(engine.session.assistantText)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: 760, alignment: .leading)
+                            .accessibilityLabel("Assistant: \(engine.session.assistantText)")
+                    }
+                    ForEach(engine.session.orderedTools) { tool in
+                        LiveToolRow(tool: tool)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 22)
+                .frame(maxWidth: .infinity)
+            }
+            Divider()
+            LiveComposer(engine: engine, draft: $draft, focus: composerFocus)
+        }
+        .navigationTitle("Pi session")
+    }
+}
+
+private struct LiveToolRow: View {
+    let tool: PiToolRun
+    @State private var expanded = true
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            Text(tool.output.isEmpty ? "Waiting for output…" : tool.output)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(.leading, 20)
+        } label: {
+            HStack {
+                Label(tool.name, systemImage: symbol)
+                Spacer()
+                Text(status).font(.caption).foregroundStyle(.secondary)
+                Text(tool.id).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(tool.name), call ID \(tool.id), \(status)")
+        }
+        .padding(.vertical, 7)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var status: String {
+        switch tool.status {
+        case .running: "Running"
+        case .succeeded: "Succeeded"
+        case .failed: "Failed"
+        }
+    }
+
+    private var symbol: String {
+        switch tool.status {
+        case .running: "gearshape.2"
+        case .succeeded: "checkmark.circle"
+        case .failed: "xmark.octagon"
+        }
+    }
+}
+
+private struct LiveComposer: View {
+    @ObservedObject var engine: PiEngine
+    @Binding var draft: String
+    let focus: FocusState<WorkbenchFocus?>.Binding
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextEditor(text: $draft)
+                .focused(focus, equals: .composer)
+                .frame(minHeight: 54, maxHeight: 120)
+                .padding(6)
+                .accessibilityLabel("Message Pi")
+                .onKeyPress(keys: [.return]) { press in
+                    guard !press.modifiers.contains(.shift) else { return .ignored }
+                    submit()
+                    return .handled
+                }
+            Divider()
+            HStack(spacing: 8) {
+                Picker("Model", selection: Binding(
+                    get: { engine.session.model },
+                    set: { if let model = $0 { engine.setModel(model) } }
+                )) {
+                    if engine.session.model == nil { Text("Choose model").tag(PiModel?.none) }
+                    ForEach(engine.session.models) { model in Text(model.name).tag(Optional(model)) }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 220)
+                .disabled(engine.session.isRunning || engine.configurationPending)
+
+                Picker("Thinking", selection: Binding(
+                    get: { engine.session.thinkingLevel },
+                    set: engine.setThinkingLevel
+                )) {
+                    ForEach(PiThinkingLevel.allCases) { level in Text(level.title).tag(level) }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 130)
+                .disabled(engine.session.isRunning || engine.configurationPending || engine.session.model?.reasoning != true)
+
+                if engine.configurationPending { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Send", systemImage: "arrow.up", action: submit)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(engine.session.isRunning || engine.configurationPending || engine.session.model == nil || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .controlSize(.small)
+            .padding(7)
+        }
+        .background(.background, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator))
+        .padding(16)
+    }
+
+    private func submit() {
+        guard !engine.session.isRunning, !engine.configurationPending, engine.session.model != nil else { return }
+        engine.sendPrompt(draft)
+        draft = ""
+    }
+}
+
 private struct ProjectNavigator: View {
     let sessions: [WorkbenchSession]
     @Binding var selection: String
     let engineStatus: String
     let recents: [ProjectRecord]
+    let liveProject: ProjectRecord?
     let reopen: (URL) -> Void
 
     private var projects: [String] {
@@ -380,6 +559,19 @@ private struct ProjectNavigator: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Reopen \(project.name), \(project.access == .trusted ? "trusted" : "read only")")
                     }
+                }
+            }
+            if let liveProject, liveProject.access == .trusted {
+                Section(liveProject.name) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Pi session")
+                            Text(engineStatus).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .tag("live")
+                    .accessibilityLabel("Pi session, \(engineStatus)")
                 }
             }
             ForEach(projects, id: \.self) { project in

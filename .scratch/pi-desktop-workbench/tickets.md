@@ -43,11 +43,11 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Open and trust a project.
 
-- [ ] The user can choose the effective model and thinking level before sending.
-- [ ] Assistant output streams in place and interleaved tools correlate by call ID.
-- [ ] Completion follows `agent_settled`, not an earlier lifecycle event.
-- [ ] Abort works without confusing it with stopping the session.
-- [ ] Strict LF-delimited framing retains incomplete bytes and turns malformed or unknown protocol data into a session-local failure without guessing or replaying the prompt.
+- [x] The user can choose the effective model and thinking level before sending.
+- [x] Assistant output streams in place and interleaved tools correlate by call ID.
+- [x] Completion follows `agent_settled`, not an earlier lifecycle event.
+- [x] Abort works without confusing it with stopping the session.
+- [x] Strict LF-delimited framing retains incomplete bytes and turns malformed or unknown protocol data into a session-local failure without guessing or replaying the prompt.
 
 ## Recover an interrupted session
 
