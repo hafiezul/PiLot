@@ -111,6 +111,8 @@ struct PiResourceDiagnostic: Identifiable, Equatable {
     let reason: String
     let consequence: String
     var retainedState = "The session and source resource are unchanged."
+    var possibleLoss = "No durable state loss is known."
+    var recoveryCopy = "No recovery copy was needed."
     let repairAction: String
     var id: String { surface }
 }
@@ -593,6 +595,7 @@ final class PiEngine: ObservableObject {
     private var resourceSnapshot: ResourceSnapshot?
     private var reloadPending = false
     private var blockedSettingsScopes: Set<String> = []
+    private let diagnosticLog = DiagnosticLog.shared
     private lazy var cliMatrix = PiCLIMatrix(
         bundledVersion: VersionInfo.current.pi,
         detectedVersion: InstalledPiCLI.version()
@@ -772,6 +775,29 @@ final class PiEngine: ObservableObject {
         catch { status = "Composer draft could not be saved: \(error.localizedDescription)" }
     }
 
+    func supportBundleInput() -> SupportBundleInput {
+        let versions = VersionInfo.current
+        let agent = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".pi/agent")
+        var configurations = ["settings.json", "models.json", "keybindings.json"].map { agent.appending(path: $0) }
+        if let project = launchProject { configurations.append(project.appending(path: ".pi/settings.json")) }
+        return SupportBundleInput(
+            runtime: .init(
+                pilot: versions.pilot, pi: versions.pi, node: versions.node,
+                macOS: versions.macOS, cpu: versions.cpu
+            ),
+            compatibility: session.resourceDiagnostics,
+            events: diagnosticLog.events,
+            configurationFiles: configurations,
+            rawLogs: diagnosticLog.entries,
+            sessionContent: [
+                "prompt": session.lastPrompt,
+                "response": session.assistantText,
+                "toolArguments": session.orderedTools.map(\.arguments).joined(separator: "\n"),
+                "toolResults": session.orderedTools.map(\.output).joined(separator: "\n"),
+            ]
+        )
+    }
+
     @discardableResult
     func sendPrompt(_ prompt: PiPrompt) -> Bool {
         guard !prompt.message.isEmpty, isReady, !session.isRunning, !configurationPending else { return false }
@@ -925,7 +951,12 @@ final class PiEngine: ObservableObject {
         let generation = self.generation
         let recordDecoder = self.recordDecoder
         let decodeQueue = self.decodeQueue
-        errors.fileHandleForReading.readabilityHandler = { handle in _ = handle.availableData }
+        let diagnosticLog = self.diagnosticLog
+        errors.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            diagnosticLog.append(String(decoding: data, as: UTF8.self))
+        }
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
@@ -956,6 +987,7 @@ final class PiEngine: ObservableObject {
             try task.run()
             process = task
             input = inputPipe.fileHandleForWriting
+            diagnosticLog.record(.lifecycle, "Bundled Pi engine launched")
             launchProject = project
             session = PiSessionState()
             session.reportDiagnostic(cliMatrix.report)
@@ -992,6 +1024,9 @@ final class PiEngine: ObservableObject {
     private func receive(_ record: [String: Any]) throws {
         guard let type = record["type"] as? String else { throw PiEngineError.malformedOutput }
         if type != "message_update" { activityDate = Date() }
+        if ["agent_start", "agent_settled", "auto_retry_start", "compaction_start", "extension_ui_request"].contains(type) {
+            diagnosticLog.record(.lifecycle, type)
+        }
         if type == "response" {
             try receiveResponse(record)
         } else {
@@ -1167,6 +1202,7 @@ final class PiEngine: ObservableObject {
     }
 
     private func fail(_ error: Error) {
+        diagnosticLog.record(.error, error.localizedDescription)
         if process != nil { markMetadata(.interrupted) }
         setAttention(.failed)
         stopProcess(status: error.localizedDescription)
@@ -1205,6 +1241,7 @@ final class PiEngine: ObservableObject {
         (stoppedProcess?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         stoppedProcess?.terminationHandler = nil
         stoppedProcess?.terminate()
+        if stoppedProcess != nil { diagnosticLog.record(.lifecycle, "Bundled Pi engine stopped") }
         process = nil
         input = nil
         if releaseLease { writerLease = nil }

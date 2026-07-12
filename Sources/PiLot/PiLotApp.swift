@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -17,7 +18,7 @@ struct PiLotApp: App {
 
         Settings {
             SettingsView(engine: supervisor.runtime, notifications: supervisor.notifications)
-                .frame(width: 460, height: 320)
+                .frame(width: 500, height: 520)
                 .task { startEngine() }
         }
 
@@ -85,6 +86,10 @@ private struct PiLotCommands: Commands {
 private struct SettingsView: View {
     @ObservedObject var engine: PiEngine
     @ObservedObject var notifications: SessionNotifications
+    @State private var includeRawLogs = false
+    @State private var includeSessionContent = false
+    @State private var exportError: String?
+    @State private var confirmSensitiveExport = false
     private let versions = VersionInfo.current
 
     var body: some View {
@@ -109,10 +114,45 @@ private struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Privacy-safe diagnostics") {
+                Toggle("Include raw diagnostic logs", isOn: $includeRawLogs)
+                Toggle("Include session prompts and results", isOn: $includeSessionContent)
+                Text("Default exports exclude work content, credentials, environment values, and raw paths. Export is local; PiLot never uploads it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Export Support Bundle…") {
+                    if exportOptions.disclosureWarning == nil { exportSupportBundle() }
+                    else { confirmSensitiveExport = true }
+                }
+                if let exportError { Text(exportError).font(.caption).foregroundStyle(.red) }
+            }
         }
         .formStyle(.grouped)
         .padding()
         .textSelection(.enabled)
+        .alert("Export private diagnostic content?", isPresented: $confirmSensitiveExport) {
+            Button("Cancel", role: .cancel) {}
+            Button("Export") { exportSupportBundle() }
+        } message: {
+            Text(exportOptions.disclosureWarning ?? "")
+        }
+    }
+
+    private var exportOptions: SupportBundleOptions {
+        .init(includeRawLogs: includeRawLogs, includeSessionContent: includeSessionContent)
+    }
+
+    private func exportSupportBundle() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "PiLot-support.json"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try SupportBundleExporter().export(engine.supportBundleInput(), options: exportOptions, to: url)
+            exportError = nil
+        } catch {
+            exportError = "Export failed: \(error.localizedDescription)"
+        }
     }
 
     @ViewBuilder

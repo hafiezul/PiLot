@@ -180,11 +180,11 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Recover an interrupted session; Continue a CLI session by fork; Answer Pi and extension interruptions; Report compatibility and reload safely.
 
-- [ ] Actionable diagnostics identify the resource or session, source scope, reason, behavior, retained state, possible loss, recovery copy, and next action.
-- [ ] Logs are bounded and redact credentials and environment values.
-- [ ] Default support export includes runtime, compatibility, lifecycle, error, and redacted configuration-structure facts only.
-- [ ] Automated checks prove default export excludes prompts, responses, files, diffs, tool arguments/results, credentials, environment values, and user-specific raw paths.
-- [ ] Raw logs or session content require separate selection and a disclosure warning; nothing uploads automatically.
+- [x] Actionable diagnostics identify the resource or session, source scope, reason, behavior, retained state, possible loss, recovery copy, and next action.
+- [x] Logs are bounded and redact credentials and environment values.
+- [x] Default support export includes runtime, compatibility, lifecycle, error, and redacted configuration-structure facts only.
+- [x] Automated checks prove default export excludes prompts, responses, files, diffs, tool arguments/results, credentials, environment values, and user-specific raw paths.
+- [x] Raw logs or session content require separate selection and a disclosure warning; nothing uploads automatically.
 
 ## Harden native usability and performance
 

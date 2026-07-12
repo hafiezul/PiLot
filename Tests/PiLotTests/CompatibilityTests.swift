@@ -21,6 +21,8 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertFalse(resource.path.isEmpty)
         XCTAssertFalse(resource.consequence.isEmpty)
         XCTAssertFalse(resource.retainedState.isEmpty)
+        XCTAssertFalse(resource.possibleLoss.isEmpty)
+        XCTAssertFalse(resource.recoveryCopy.isEmpty)
         XCTAssertFalse(resource.repairAction.isEmpty)
     }
 

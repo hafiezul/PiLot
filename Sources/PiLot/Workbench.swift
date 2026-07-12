@@ -699,6 +699,8 @@ private struct PiResourceDiagnosticsView: View {
                     Text(diagnostic.reason).font(.caption)
                     Text(diagnostic.consequence).font(.caption).foregroundStyle(.secondary)
                     Text("Retained: \(diagnostic.retainedState)").font(.caption).foregroundStyle(.secondary)
+                    Text("Possible loss: \(diagnostic.possibleLoss)").font(.caption).foregroundStyle(.secondary)
+                    Text("Recovery copy: \(diagnostic.recoveryCopy)").font(.caption).foregroundStyle(.secondary)
                     Text("Next: \(diagnostic.repairAction)").font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
