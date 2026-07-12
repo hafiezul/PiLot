@@ -28,6 +28,7 @@ A standalone, decision-ready product, UX, and technical specification for an uns
 - [Prototype native workbench interactions](issues/07-prototype-workbench-interactions.md) — A project/session navigator with a focused timeline, pinned interruptions, stable composer, attention-first ordering, and toggleable trailing diff inspector best supports the MVP workflows.
 - [Choose macOS desktop architecture](issues/08-choose-desktop-architecture.md) — A macOS 14+ SwiftUI-first host with selective AppKit adapters and one supervised, bundled Pi RPC subprocess per live session is the minimal native architecture.
 - [Define trust, security, and unsigned distribution](issues/09-define-trust-and-distribution.md) — PiLot uses explicit project trust without sandboxing, local redacted diagnostics, narrowly guided unsigned installation, full version reporting, and user-triggered manual updates.
+- [Define state recovery and migration behavior](issues/11-define-state-recovery-and-migration.md) — PiLot preserves durable state and source bytes, automates only lossless repairs, enforces one proven writer, and uses consented forks for ambiguous recovery.
 
 ## Not yet specified
 
