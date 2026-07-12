@@ -5,59 +5,129 @@ struct PiLotApp: App {
     @StateObject private var engine = PiEngine()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(engine: engine)
-                .frame(minWidth: 520, minHeight: 360)
-                .task {
-                    if let resources = Bundle.main.resourceURL {
-                        engine.start(resources: resources)
-                    }
-                }
+        WindowGroup("PiLot", id: "workbench") {
+            WorkbenchView(engine: engine)
+                .frame(minWidth: 760, minHeight: 560)
+                .task { startEngine() }
         }
+        .defaultSize(width: 1180, height: 760)
         .windowStyle(.titleBar)
+        .commands { PiLotCommands() }
+
+        Settings {
+            SettingsView(engine: engine)
+                .frame(width: 460, height: 250)
+                .task { startEngine() }
+        }
+
+        Window("PiLot Help", id: "help") {
+            HelpView()
+                .frame(minWidth: 420, minHeight: 260)
+        }
+    }
+
+    private func startEngine() {
+        if let resources = Bundle.main.resourceURL {
+            engine.start(resources: resources)
+        }
     }
 }
 
-private struct ContentView: View {
+private struct PiLotCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.workbenchActions) private var actions
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Window") { openWindow(id: "workbench") }
+                .keyboardShortcut("n")
+            Button("Open Project…") {}
+                .keyboardShortcut("o")
+                .disabled(true)
+            Divider()
+            Button("New Session") { actions?.newSession() }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(actions == nil)
+        }
+
+        CommandMenu("Session") {
+            Button("Focus Composer") { actions?.focusComposer() }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .disabled(actions == nil)
+            Divider()
+            Button("Stop Session") { actions?.stopSession() }
+                .keyboardShortcut(".", modifiers: [.command])
+                .disabled(actions == nil)
+        }
+
+        CommandGroup(after: .sidebar) {
+            Button("Focus Sidebar") { actions?.focusSidebar() }
+                .keyboardShortcut("1", modifiers: [.command, .control])
+                .disabled(actions == nil)
+            Button("Show or Hide Inspector") { actions?.toggleInspector() }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(actions == nil)
+        }
+
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") {}
+                .disabled(true)
+        }
+
+        CommandGroup(replacing: .help) {
+            Button("PiLot Help") { openWindow(id: "help") }
+                .keyboardShortcut("?", modifiers: [.command])
+        }
+    }
+}
+
+private struct SettingsView: View {
     @ObservedObject var engine: PiEngine
     private let versions = VersionInfo.current
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            HStack(spacing: 12) {
-                Image(systemName: engine.isReady ? "checkmark.circle.fill" : "gearshape.2")
-                    .foregroundStyle(engine.isReady ? .green : .secondary)
-                    .font(.title)
-                VStack(alignment: .leading) {
-                    Text("PiLot").font(.title.bold())
-                    Text(engine.status).foregroundStyle(.secondary)
-                }
-            }
-
-            Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 10) {
+        Form {
+            Section("Bundled runtime") {
                 versionRow("PiLot", versions.pilot)
                 versionRow("Pi", versions.pi)
                 versionRow("Node", versions.node)
                 versionRow("macOS", versions.macOS)
                 versionRow("CPU", versions.cpu)
             }
-            .textSelection(.enabled)
-            Spacer()
+            Section("Status") {
+                Label(engine.status, systemImage: engine.isReady ? "checkmark.circle.fill" : "gearshape.2")
+                    .foregroundStyle(engine.isReady ? .green : .secondary)
+            }
         }
-        .padding(32)
-        .accessibilityElement(children: .contain)
+        .formStyle(.grouped)
+        .padding()
+        .textSelection(.enabled)
     }
 
     @ViewBuilder
     private func versionRow(_ name: String, _ value: String) -> some View {
-        GridRow {
-            Text(name).fontWeight(.medium)
+        LabeledContent(name) {
             Text(value).font(.system(.body, design: .monospaced))
         }
     }
 }
 
-private struct VersionInfo {
+private struct HelpView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("PiLot workbench", systemImage: "hammer")
+                .font(.title2.bold())
+            Text("Choose a fixture session in the sidebar to exercise running, waiting, failed, and done states. Answer pinned requests above the composer, or inspect the fixture changes without leaving the timeline.")
+                .frame(maxWidth: 62 * 8, alignment: .leading)
+            Text("Keyboard: ⌃⌘1 focuses the sidebar, ⌥⌘L focuses the composer, and ⌥⌘I toggles the inspector.")
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(28)
+    }
+}
+
+struct VersionInfo {
     let pilot: String
     let pi: String
     let node: String

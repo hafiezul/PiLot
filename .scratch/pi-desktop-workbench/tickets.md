@@ -21,10 +21,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Launch the bundled Pi engine.
 
-- [ ] The project/session navigator, timeline, interruption, composer, and inspector can be exercised with fixture states.
-- [ ] Waiting, failed, running, and done states use text and icon, with color only supplementary.
-- [ ] The inspector is toggleable and resizable, hides by default in narrow windows, and never replaces the timeline.
-- [ ] Standard window, menu, focus, text-editing, and restoration behavior works on macOS 14.
+- [x] The project/session navigator, timeline, interruption, composer, and inspector can be exercised with fixture states.
+- [x] Waiting, failed, running, and done states use text and icon, with color only supplementary.
+- [x] The inspector is toggleable and resizable, hides by default in narrow windows, and never replaces the timeline.
+- [x] Standard window, menu, focus, text-editing, and restoration behavior works on macOS 14.
 
 ## Open and trust a project
 
