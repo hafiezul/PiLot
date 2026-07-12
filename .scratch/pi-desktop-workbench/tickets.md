@@ -89,10 +89,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Complete one durable coding run.
 
-- [ ] Picked, pasted, and dropped items appear as removable context chips before sending.
-- [ ] Supported files and images reach Pi with the submitted prompt.
-- [ ] Invalid, missing, or inaccessible context fails clearly without losing the composer draft.
-- [ ] Protected-path failures identify the blocked action and relevant system control without requesting broad access preemptively.
+- [x] Picked, pasted, and dropped items appear as removable context chips before sending.
+- [x] Supported files and images reach Pi with the submitted prompt.
+- [x] Invalid, missing, or inaccessible context fails clearly without losing the composer draft.
+- [x] Protected-path failures identify the blocked action and relevant system control without requesting broad access preemptively.
 
 ## Direct work while a run is busy
 

@@ -50,6 +50,7 @@ struct PiModel: Identifiable, Hashable {
     let name: String
     let provider: String
     let reasoning: Bool
+    let supportsImages: Bool
 
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String,
@@ -59,6 +60,7 @@ struct PiModel: Identifiable, Hashable {
         name = value["name"] as? String ?? id
         self.provider = provider
         reasoning = value["reasoning"] as? Bool ?? false
+        supportsImages = (value["input"] as? [String])?.contains("image") == true
     }
 }
 
@@ -335,10 +337,15 @@ final class PiEngine: ObservableObject {
         catch { status = "Composer draft could not be saved: \(error.localizedDescription)" }
     }
 
-    func sendPrompt(_ text: String) {
-        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty, isReady, !session.isRunning, !configurationPending else { return }
-        session.lastPrompt = message
+    @discardableResult
+    func sendPrompt(_ text: String) -> Bool {
+        sendPrompt(PiPrompt(message: text.trimmingCharacters(in: .whitespacesAndNewlines), images: []))
+    }
+
+    @discardableResult
+    func sendPrompt(_ prompt: PiPrompt) -> Bool {
+        guard !prompt.message.isEmpty, isReady, !session.isRunning, !configurationPending else { return false }
+        session.lastPrompt = prompt.displayMessage
         session.assistantText = ""
         session.tools = [:]
         session.toolOrder = []
@@ -347,10 +354,11 @@ final class PiEngine: ObservableObject {
         setAttention(.running)
         guard markMetadata(.running) else {
             session.isRunning = false
-            return
+            return false
         }
         status = "Submitting prompt…"
-        send(type: "prompt", fields: ["message": message])
+        send(type: "prompt", fields: prompt.rpcFields)
+        return true
     }
 
     func setModel(_ model: PiModel) {

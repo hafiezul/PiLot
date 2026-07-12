@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Fixture model
 
@@ -613,9 +614,35 @@ private struct LiveComposer: View {
     @ObservedObject var engine: PiEngine
     @Binding var draft: String
     let focus: FocusState<WorkbenchFocus?>.Binding
+    @State private var attachments: [PromptAttachment] = []
+    @State private var contextError: String?
 
     var body: some View {
         VStack(spacing: 0) {
+            if !attachments.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        ForEach(attachments) { attachment in
+                            HStack(spacing: 4) {
+                                Label(attachment.name, systemImage: attachment.symbol)
+                                    .lineLimit(1)
+                                Button("Remove \(attachment.name)", systemImage: "xmark") {
+                                    attachments.removeAll { $0.id == attachment.id }
+                                }
+                                .labelStyle(.iconOnly)
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(.quaternary, in: Capsule())
+                            .accessibilityElement(children: .contain)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 7)
+                }
+                .scrollIndicators(.hidden)
+            }
             TextEditor(text: $draft)
                 .focused(focus, equals: .composer)
                 .frame(minHeight: 54, maxHeight: 120)
@@ -628,6 +655,9 @@ private struct LiveComposer: View {
                 }
             Divider()
             HStack(spacing: 8) {
+                Button("Context", systemImage: "plus", action: chooseContext)
+                    .help("Attach text files or images")
+
                 Picker("Model", selection: Binding(
                     get: { engine.session.model },
                     set: { if let model = $0 { engine.setModel(model) } }
@@ -660,13 +690,68 @@ private struct LiveComposer: View {
         }
         .background(.background, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator))
+        .dropDestination(for: URL.self) { urls, _ in
+            attachments.append(contentsOf: urls.map(PromptAttachment.init(file:)))
+            return !urls.isEmpty
+        }
+        .onPasteCommand(of: [.image], perform: pasteImages)
+        .alert("Context could not be attached", isPresented: Binding(
+            get: { contextError != nil },
+            set: { if !$0 { contextError = nil } }
+        )) {
+            Button("OK") { contextError = nil }
+        } message: {
+            Text(contextError ?? "Unknown context error")
+        }
         .padding(16)
+    }
+
+    private func chooseContext() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+        guard panel.runModal() == .OK else { return }
+        attachments.append(contentsOf: panel.urls.map(PromptAttachment.init(file:)))
+    }
+
+    private func pasteImages(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            guard let identifier = provider.registeredTypeIdentifiers.first(where: {
+                UTType($0)?.conforms(to: .image) == true
+            }) else { continue }
+            provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, error in
+                DispatchQueue.main.async {
+                    guard let data, error == nil,
+                          let image = NSImage(data: data),
+                          let tiff = image.tiffRepresentation,
+                          let bitmap = NSBitmapImageRep(data: tiff),
+                          let png = bitmap.representation(using: .png, properties: [:])
+                    else {
+                        contextError = "The pasted image could not be read. Copy it again and retry."
+                        return
+                    }
+                    attachments.append(PromptAttachment(imageData: png, mimeType: "image/png", name: "Pasted image"))
+                }
+            }
+        }
     }
 
     private func submit() {
         guard !engine.session.isRunning, !engine.configurationPending, engine.session.model != nil else { return }
-        engine.sendPrompt(draft)
-        draft = ""
+        do {
+            let prompt = try PromptContext(attachments: attachments).prepare(message: draft)
+            guard prompt.images.isEmpty || engine.session.model?.supportsImages == true else {
+                contextError = "The selected model does not accept images. Remove them or choose an image-capable model."
+                return
+            }
+            guard engine.sendPrompt(prompt) else { return }
+            draft = ""
+            attachments = []
+        } catch {
+            contextError = error.localizedDescription
+        }
     }
 }
 

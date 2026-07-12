@@ -51,6 +51,18 @@ final class PiEngineTests: XCTestCase {
         XCTAssertThrowsError(try state.apply(["type": "future_event"]))
     }
 
+    func testModelsReportWhetherTheyAcceptImageContext() throws {
+        let textOnly = try XCTUnwrap(PiModel([
+            "id": "text", "provider": "test", "input": ["text"],
+        ]))
+        let vision = try XCTUnwrap(PiModel([
+            "id": "vision", "provider": "test", "input": ["text", "image"],
+        ]))
+
+        XCTAssertFalse(textOnly.supportsImages)
+        XCTAssertTrue(vision.supportsImages)
+    }
+
     func testRuntimeLayoutUsesOnlyBundleRelativePaths() {
         let root = URL(fileURLWithPath: "/App/PiEngine")
         let layout = RuntimeLayout(root: root, architecture: "x64")
