@@ -1,0 +1,17 @@
+# PiLot
+
+PiLot is a native macOS visual workbench for developers who already use Pi.
+
+## Language
+
+**Desktop workbench**:
+A native visual workspace that brings projects, concurrent agent sessions, files, diffs, tool activity, and approvals together around Pi.
+_Avoid_: TUI wrapper, terminal wrapper, native chat
+
+**Pi engine**:
+The supported Pi runtime and programmatic capabilities that power agent sessions independently of Pi's terminal interface.
+_Avoid_: Embedded TUI, terminal scraping
+
+**Existing Pi user**:
+A developer who already uses Pi CLI and may have authentication, providers, models, settings, extensions, skills, prompts, and session history configured.
+_Avoid_: Generic developer, new user
