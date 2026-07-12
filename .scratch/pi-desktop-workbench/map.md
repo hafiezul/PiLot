@@ -23,10 +23,10 @@ A standalone, decision-ready product, UX, and technical specification for an uns
 - [Map Pi TUI capabilities to desktop](issues/02-research-pi-tui-portability.md) — Most Pi engine semantics port directly or through native adapters, while terminal presentation must be redesigned and extension compatibility must explicitly exclude unsupported TUI-only surfaces.
 - [Research native agent workbench patterns](issues/03-research-desktop-workbenches.md) — PiLot should use a native project/session workbench with structured activity, scoped approvals, and a read-only diff inspector while rejecting chat-only, embedded-IDE, default-full-access, and web-chrome patterns.
 - [Choose Pi engine sourcing and version strategy](issues/04-decide-pi-engine-strategy.md) — PiLot bundles a release-pinned Pi RPC engine, isolates each live session in its own process and store, forks CLI sessions by default, and gates unsafe shared-state operations on version drift.
+- [Define existing setup compatibility contract](issues/05-define-compatibility-contract.md) — PiLot reuses compatible trusted Pi setup by default, guards shared state across version drift, degrades unsupported extension presentation explicitly, and keeps native presentation authoritative.
 
 ## Not yet specified
 
-- Detailed recovery, migration, and concurrency edge cases exposed by the chosen engine/state architecture.
 - Additional prototype variants needed after the first workbench interaction model is tested with the product owner.
 
 ## Out of scope

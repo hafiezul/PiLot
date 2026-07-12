@@ -15,3 +15,7 @@ _Avoid_: Embedded TUI, terminal scraping
 **Existing Pi user**:
 A developer who already uses Pi CLI and may have authentication, providers, models, settings, extensions, skills, prompts, and session history configured.
 _Avoid_: Generic developer, new user
+
+**Existing setup compatibility contract**:
+PiLot's explicit per-resource promise for what existing Pi state it reuses, adapts, degrades, blocks, or does not support.
+_Avoid_: Full Pi compatibility, configuration import
