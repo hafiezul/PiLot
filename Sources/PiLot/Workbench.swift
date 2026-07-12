@@ -499,6 +499,10 @@ private struct LiveSessionDetail: View {
                 )
             }
 
+            if !engine.session.resourceDiagnostics.isEmpty {
+                PiResourceDiagnosticsView(diagnostics: engine.session.resourceDiagnostics)
+            }
+
             if engine.session.isRetrying || engine.session.isCompacting {
                 Label(
                     engine.session.isRetrying ? "Pi is retrying the active run" : "Pi is compacting context for the active run",
@@ -530,6 +534,10 @@ private struct LiveSessionDetail: View {
                             if let interruption = engine.session.interruptions.first(where: { $0.id == id }) {
                                 LiveInterruptionTimelineRow(interruption: interruption)
                             }
+                        case .extensionPresentation(let id):
+                            if let presentation = engine.session.extensionPresentations.first(where: { $0.id == id }) {
+                                ExtensionPresentationRow(presentation: presentation)
+                            }
                         }
                     }
                 }
@@ -554,6 +562,48 @@ private struct LiveSessionDetail: View {
         .navigationTitle("Pi session")
         .onAppear { draft = engine.restoredDraft }
         .onChange(of: engine.restoredDraft) { _, value in draft = value }
+        .onChange(of: engine.session.requestedEditorText) { _, value in
+            if let value { draft = value }
+        }
+    }
+}
+
+private struct PiResourceDiagnosticsView: View {
+    let diagnostics: [PiResourceDiagnostic]
+
+    var body: some View {
+        DisclosureGroup("Pi compatibility · \(diagnostics.count) item\(diagnostics.count == 1 ? "" : "s")") {
+            ForEach(diagnostics) { diagnostic in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(diagnostic.title).font(.caption.bold())
+                    Text("\(diagnostic.scope) · \(diagnostic.path)")
+                        .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                    Text(diagnostic.reason).font(.caption)
+                    Text(diagnostic.consequence).font(.caption).foregroundStyle(.secondary)
+                    Text("Next: \(diagnostic.repairAction)").font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.10))
+        .accessibilityLabel("Pi compatibility diagnostics, \(diagnostics.count) items")
+    }
+}
+
+private struct ExtensionPresentationRow: View {
+    let presentation: PiExtensionPresentation
+
+    var body: some View {
+        DisclosureGroup(presentation.title) {
+            Text(presentation.content)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+        }
+        .accessibilityLabel("Extension presentation: \(presentation.title)")
     }
 }
 
@@ -723,10 +773,12 @@ private struct LiveToolRow: View {
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
-            Text(tool.output.isEmpty ? "Waiting for output…" : tool.output)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(.leading, 20)
+            VStack(alignment: .leading, spacing: 8) {
+                if !tool.arguments.isEmpty { structured("Arguments", tool.arguments) }
+                structured("Content", tool.output.isEmpty ? "Waiting for output…" : tool.output)
+                if !tool.details.isEmpty { structured("Details", tool.details) }
+            }
+            .padding(.leading, 20)
         } label: {
             HStack {
                 Label(tool.name, systemImage: symbol)
@@ -739,6 +791,13 @@ private struct LiveToolRow: View {
         }
         .padding(.vertical, 7)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func structured(_ title: String, _ content: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption2.bold()).foregroundStyle(.secondary)
+            Text(content).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+        }
     }
 
     private var status: String {
@@ -807,12 +866,25 @@ private struct LiveComposer: View {
                 Button("Context", systemImage: "plus", action: chooseContext)
                     .help("Attach text files or images")
 
+                Menu("Pi resources", systemImage: "command") {
+                    ForEach(engine.session.commands) { command in
+                        Button(command.description.isEmpty ? command.invocation : "\(command.invocation) — \(command.description)") {
+                            draft = command.invocation + " "
+                        }
+                        .help("\(command.source.rawValue), \(command.scope): \(command.path)")
+                    }
+                }
+                .disabled(engine.session.commands.isEmpty)
+                .help("Use extension commands, prompt templates, and skills discovered by Pi")
+
                 Picker("Model", selection: Binding(
                     get: { engine.session.model },
                     set: { if let model = $0 { engine.setModel(model) } }
                 )) {
                     if engine.session.model == nil { Text("Choose model").tag(PiModel?.none) }
-                    ForEach(engine.session.models) { model in Text(model.name).tag(Optional(model)) }
+                    ForEach(engine.session.models) { model in
+                        Text("\(model.name) · \(model.provider)").tag(Optional(model))
+                    }
                 }
                 .labelsHidden()
                 .frame(maxWidth: 220)

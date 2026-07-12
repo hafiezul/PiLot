@@ -70,6 +70,48 @@ enum PiThinkingLevel: String, CaseIterable, Identifiable {
     var title: String { rawValue == "xhigh" ? "Extra high" : rawValue.capitalized }
 }
 
+struct PiCommand: Identifiable, Equatable {
+    enum Source: String { case extensionCommand = "extension", prompt, skill }
+
+    let name: String
+    let description: String
+    let source: Source
+    let scope: String
+    let path: String
+    var id: String { "\(source.rawValue):\(name):\(path)" }
+    var invocation: String { "/\(name)" }
+
+    init?(_ value: [String: Any]) {
+        guard let name = value["name"] as? String, !name.isEmpty,
+              let rawSource = value["source"] as? String, let source = Source(rawValue: rawSource),
+              let info = value["sourceInfo"] as? [String: Any],
+              let scope = info["scope"] as? String, let path = info["path"] as? String
+        else { return nil }
+        self.name = name
+        description = value["description"] as? String ?? ""
+        self.source = source
+        self.scope = scope
+        self.path = path
+    }
+}
+
+struct PiResourceDiagnostic: Identifiable, Equatable {
+    let surface: String
+    let title: String
+    let scope: String
+    let path: String
+    let reason: String
+    let consequence: String
+    let repairAction: String
+    var id: String { surface }
+}
+
+struct PiExtensionPresentation: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let content: String
+}
+
 enum PiInterruptionResponse: Equatable {
     case value(String)
     case confirmed(Bool)
@@ -138,11 +180,13 @@ struct PiInterruption: Identifiable, Equatable {
 enum PiTimelineItem: Equatable, Identifiable {
     case tool(String)
     case interruption(String)
+    case extensionPresentation(String)
 
     var id: String {
         switch self {
         case .tool(let id): "tool:\(id)"
         case .interruption(let id): "interruption:\(id)"
+        case .extensionPresentation(let id): "extension:\(id)"
         }
     }
 }
@@ -151,7 +195,9 @@ struct PiToolRun: Identifiable, Equatable {
     enum Status: Equatable { case running, succeeded, failed }
     let id: String
     let name: String
+    var arguments = ""
     var output = ""
+    var details = ""
     var status: Status = .running
 }
 
@@ -174,6 +220,10 @@ struct PiSessionState {
     var toolOrder: [String] = []
     var models: [PiModel] = []
     var model: PiModel?
+    var commands: [PiCommand] = []
+    var resourceDiagnostics: [PiResourceDiagnostic] = []
+    var extensionPresentations: [PiExtensionPresentation] = []
+    var requestedEditorText: String?
     var thinkingLevel: PiThinkingLevel = .off
     var isRunning = false
     var isSettled = false
@@ -188,6 +238,43 @@ struct PiSessionState {
     var orderedTools: [PiToolRun] { toolOrder.compactMap { tools[$0] } }
     var activeInterruptions: [PiInterruption] { interruptions.filter { $0.resolution == .active } }
     var isWaitingForInput: Bool { !activeInterruptions.isEmpty }
+
+    mutating func loadCommands(_ values: [[String: Any]]) {
+        commands = []
+        resourceDiagnostics.removeAll { $0.surface.hasPrefix("command:") }
+        for (index, value) in values.enumerated() {
+            if let command = PiCommand(value) {
+                commands.append(command)
+            } else {
+                let info = value["sourceInfo"] as? [String: Any]
+                addDiagnostic(.init(
+                    surface: "command:\(index)", title: "Invalid Pi command",
+                    scope: info?["scope"] as? String ?? "unknown",
+                    path: info?["path"] as? String ?? "Unknown path",
+                    reason: "Pi returned incomplete or unsupported command metadata.",
+                    consequence: "Only this command was skipped; other Pi resources remain available.",
+                    repairAction: "Open the resource in Pi CLI, correct it, then restart this session."
+                ))
+            }
+        }
+    }
+
+    mutating func loadModels(_ values: [[String: Any]]) {
+        models = []
+        resourceDiagnostics.removeAll { $0.surface.hasPrefix("model:") }
+        for (index, value) in values.enumerated() {
+            if let model = PiModel(value) {
+                models.append(model)
+            } else {
+                addDiagnostic(.init(
+                    surface: "model:\(index)", title: "Invalid Pi model", scope: "user",
+                    path: "~/.pi/agent/models.json", reason: "Pi returned incomplete model metadata.",
+                    consequence: "Only this model was skipped; other configured models remain available.",
+                    repairAction: "Run Pi CLI and repair models.json before restarting this session."
+                ))
+            }
+        }
+    }
 
     mutating func resolveInterruption(id: String, response: PiInterruptionResponse) throws -> [String: Any] {
         guard let index = interruptions.firstIndex(where: { $0.id == id && $0.resolution == .active }) else {
@@ -236,9 +323,20 @@ struct PiSessionState {
         case "agent_start":
             isRunning = true
             isSettled = false
-        case "agent_end", "turn_start", "turn_end", "message_start", "message_end",
-             "extension_error":
+        case "agent_end", "turn_start", "turn_end", "message_start", "message_end":
             break
+        case "extension_error":
+            guard let path = record["extensionPath"] as? String,
+                  let event = record["event"] as? String,
+                  let error = record["error"] as? String
+            else { throw PiEngineError.malformedOutput }
+            let scope = path.hasPrefix(FileManager.default.homeDirectoryForCurrentUser.path) ? "user" : "project"
+            addDiagnostic(.init(
+                surface: "extension:\(path):\(event)", title: "Extension event failed", scope: scope,
+                path: path, reason: error,
+                consequence: "The \(event) hook was skipped; the session and other extensions remain active.",
+                repairAction: "Open this extension in Pi CLI, repair the failing hook, then restart this session."
+            ))
         case "extension_ui_request":
             guard let method = record["method"] as? String else { throw PiEngineError.malformedOutput }
             if let interruption = try PiInterruption(record) {
@@ -249,6 +347,7 @@ struct PiSessionState {
                 timelineItems.append(.interruption(interruption.id))
             } else {
                 try Self.validateFireAndForgetUI(record, method: method)
+                applyExtensionPresentation(record, method: method)
             }
         case "queue_update":
             guard let steering = record["steering"] as? [String],
@@ -305,22 +404,24 @@ struct PiSessionState {
         case "tool_execution_start":
             let (id, name) = try toolIdentity(record)
             guard tools[id] == nil else { throw PiEngineError.malformedOutput }
-            tools[id] = PiToolRun(id: id, name: name)
+            var tool = PiToolRun(id: id, name: name)
+            tool.arguments = Self.structuredText(record["args"])
+            tools[id] = tool
             toolOrder.append(id)
             timelineItems.append(.tool(id))
         case "tool_execution_update":
-            let (id, _) = try toolIdentity(record)
+            let (id, name) = try toolIdentity(record)
             guard var tool = tools[id], let result = record["partialResult"] as? [String: Any] else {
                 throw PiEngineError.malformedOutput
             }
-            tool.output = Self.textContent(result)
+            apply(result, to: &tool, surface: "tool:\(name)")
             tools[id] = tool
         case "tool_execution_end":
-            let (id, _) = try toolIdentity(record)
+            let (id, name) = try toolIdentity(record)
             guard var tool = tools[id], let result = record["result"] as? [String: Any],
                   let isError = record["isError"] as? Bool
             else { throw PiEngineError.malformedOutput }
-            tool.output = Self.textContent(result)
+            apply(result, to: &tool, surface: "tool:\(name)")
             tool.status = isError ? .failed : .succeeded
             tools[id] = tool
         default:
@@ -349,6 +450,37 @@ struct PiSessionState {
         }
     }
 
+    private mutating func applyExtensionPresentation(_ record: [String: Any], method: String) {
+        guard let id = record["id"] as? String else { return }
+        let title = record["title"] as? String ?? record["message"] as? String ?? method
+        let payload = record.filter { !["type", "id", "method", "title"].contains($0.key) }
+        let presentation = PiExtensionPresentation(id: id, title: title, content: Self.structuredText(payload))
+        extensionPresentations.removeAll { $0.id == id }
+        extensionPresentations.append(presentation)
+        timelineItems.append(.extensionPresentation(id))
+        if method == "set_editor_text" { requestedEditorText = record["text"] as? String }
+    }
+
+    private mutating func apply(_ result: [String: Any], to tool: inout PiToolRun, surface: String) {
+        tool.output = Self.contentText(result["content"])
+        tool.details = Self.structuredText(result["details"])
+        let content = result["content"] as? [[String: Any]] ?? []
+        if !tool.details.isEmpty || content.contains(where: { $0["type"] as? String != "text" }) {
+            addDiagnostic(.init(
+                surface: surface, title: "Generic tool presentation", scope: "extension or built-in tool",
+                path: tool.name,
+                reason: "The tool returned structured details or rich content.",
+                consequence: "Arguments, content, details, progress, and errors are shown generically; no TUI renderer was executed.",
+                repairAction: "Use Pi CLI only if this tool's terminal-specific renderer is required."
+            ))
+        }
+    }
+
+    private mutating func addDiagnostic(_ diagnostic: PiResourceDiagnostic) {
+        guard !resourceDiagnostics.contains(where: { $0.surface == diagnostic.surface }) else { return }
+        resourceDiagnostics.append(diagnostic)
+    }
+
     private func toolIdentity(_ record: [String: Any]) throws -> (String, String) {
         guard let id = record["toolCallId"] as? String,
               let name = record["toolName"] as? String
@@ -356,10 +488,20 @@ struct PiSessionState {
         return (id, name)
     }
 
-    private static func textContent(_ result: [String: Any]) -> String {
-        (result["content"] as? [[String: Any]])?
-            .compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
-            .joined(separator: "\n") ?? ""
+    private static func contentText(_ value: Any?) -> String {
+        guard let content = value as? [[String: Any]] else { return structuredText(value) }
+        return content.compactMap { item in
+            if item["type"] as? String == "text" { return item["text"] as? String }
+            return structuredText(item)
+        }.joined(separator: "\n")
+    }
+
+    private static func structuredText(_ value: Any?) -> String {
+        guard let value, JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8)
+        else { return "" }
+        return text
     }
 }
 
@@ -689,6 +831,7 @@ final class PiEngine: ObservableObject {
             status = project.map { "Loading \($0.lastPathComponent)…" } ?? "Starting bundled Pi engine…"
             send(type: "get_state")
             send(type: "get_available_models")
+            send(type: "get_commands")
         } catch {
             fail(error)
         }
@@ -725,6 +868,7 @@ final class PiEngine: ObservableObject {
                 status = "Running"
                 setAttention(.running)
             case "agent_settled":
+                send(type: "get_commands")
                 if session.isWaitingForInput {
                     status = "Waiting for input"
                     setAttention(.waiting)
@@ -782,10 +926,12 @@ final class PiEngine: ObservableObject {
             guard let data = record["data"] as? [String: Any], let values = data["models"] as? [[String: Any]] else {
                 throw PiEngineError.malformedOutput
             }
-            session.models = try values.map {
-                guard let model = PiModel($0) else { throw PiEngineError.malformedOutput }
-                return model
+            session.loadModels(values)
+        case "get_commands":
+            guard let data = record["data"] as? [String: Any], let values = data["commands"] as? [[String: Any]] else {
+                throw PiEngineError.malformedOutput
             }
+            session.loadCommands(values)
         case "set_model":
             guard pendingModels.removeValue(forKey: id) != nil else { throw PiEngineError.malformedOutput }
             send(type: "get_state")

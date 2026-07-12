@@ -122,11 +122,11 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Open and trust a project; Complete one durable coding run; Answer Pi and extension interruptions.
 
-- [ ] Compatible skills, prompt templates, commands, packages, providers, models, extensions, and custom tools are discoverable and usable through Pi semantics.
-- [ ] Invalid resources are isolated individually with their source scope, consequence, and repair action.
-- [ ] Extension hooks, providers, commands, gates, tools, and state remain functional when compatible.
-- [ ] Unsupported TUI-only or unknown rich presentation falls back to generic structured content and produces one diagnostic per affected surface.
-- [ ] PiLot never executes a TUI renderer or silently substitutes an unavailable session model.
+- [x] Compatible skills, prompt templates, commands, packages, providers, models, extensions, and custom tools are discoverable and usable through Pi semantics.
+- [x] Invalid resources are isolated individually with their source scope, consequence, and repair action.
+- [x] Extension hooks, providers, commands, gates, tools, and state remain functional when compatible.
+- [x] Unsupported TUI-only or unknown rich presentation falls back to generic structured content and produces one diagnostic per affected surface.
+- [x] PiLot never executes a TUI renderer or silently substitutes an unavailable session model.
 
 ## Inspect and hand off changes
 

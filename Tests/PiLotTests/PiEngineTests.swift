@@ -161,6 +161,67 @@ final class PiEngineTests: XCTestCase {
         XCTAssertTrue(state.isSettled)
     }
 
+    func testExistingPiCommandsKeepSemanticsAndIsolateMalformedResources() {
+        var state = PiSessionState()
+        state.loadCommands([
+            [
+                "name": "review", "description": "Review changes", "source": "prompt",
+                "sourceInfo": ["path": "/project/.pi/prompts/review.md", "scope": "project", "source": "local", "origin": "top-level"],
+            ],
+            ["name": "broken", "source": "future"],
+            [
+                "name": "skill:check", "source": "skill",
+                "sourceInfo": ["path": "/user/skills/check/SKILL.md", "scope": "user", "source": "local", "origin": "top-level"],
+            ],
+        ])
+
+        XCTAssertEqual(state.commands.map(\.invocation), ["/review", "/skill:check"])
+        XCTAssertEqual(state.commands.first?.scope, "project")
+        XCTAssertEqual(state.resourceDiagnostics.count, 1)
+        XCTAssertTrue(state.resourceDiagnostics[0].consequence.contains("skipped"))
+    }
+
+    func testRichToolDataUsesGenericPresentationAndOneDiagnosticPerSurface() throws {
+        var state = PiSessionState()
+        let start: [String: Any] = [
+            "type": "tool_execution_start", "toolCallId": "rich-1", "toolName": "custom_tool",
+            "args": ["query": "Pi resources"],
+        ]
+        try state.apply(start)
+        try state.apply([
+            "type": "tool_execution_update", "toolCallId": "rich-1", "toolName": "custom_tool",
+            "partialResult": [
+                "content": [["type": "text", "text": "Working"], ["type": "image", "mimeType": "image/png"]],
+                "details": ["progress": 50],
+            ],
+        ])
+        try state.apply([
+            "type": "tool_execution_end", "toolCallId": "rich-1", "toolName": "custom_tool", "isError": false,
+            "result": ["content": [["type": "text", "text": "Done"]], "details": ["items": 2]],
+        ])
+
+        XCTAssertTrue(state.tools["rich-1"]?.arguments.contains("Pi resources") == true)
+        XCTAssertEqual(state.tools["rich-1"]?.output, "Done")
+        XCTAssertTrue(state.tools["rich-1"]?.details.contains("items") == true)
+        XCTAssertEqual(state.resourceDiagnostics.filter { $0.surface == "tool:custom_tool" }.count, 1)
+    }
+
+    func testExtensionFailuresAndRPCPresentationDegradeIndependently() throws {
+        var state = PiSessionState()
+        try state.apply([
+            "type": "extension_error", "extensionPath": "/user/extensions/example.ts",
+            "event": "tool_call", "error": "failed hook",
+        ])
+        try state.apply([
+            "type": "extension_ui_request", "id": "widget", "method": "setWidget",
+            "widgetKey": "example", "widgetLines": ["Count: 2"],
+        ])
+
+        XCTAssertEqual(state.resourceDiagnostics.count, 1)
+        XCTAssertEqual(state.extensionPresentations.first?.title, "setWidget")
+        XCTAssertTrue(state.extensionPresentations.first?.content.contains("Count: 2") == true)
+    }
+
     func testMalformedOrUnknownProtocolDataFailsTheSession() {
         var decoder = LFJSONDecoder()
         XCTAssertThrowsError(try decoder.append(Data("not-json\n".utf8)))
