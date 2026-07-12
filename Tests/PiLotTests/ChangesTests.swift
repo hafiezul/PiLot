@@ -26,6 +26,26 @@ final class ChangesTests: XCTestCase {
         XCTAssertEqual(settled.files[0].status, .unchanged)
     }
 
+    func testLongDiffPreservesEveryLineInAccessibilityOrder() throws {
+        let project = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: project) }
+        let file = project.appending(path: "long.txt")
+        let original = (1...2_000).map { "old \($0)" }.joined(separator: "\n") + "\n"
+        let changed = (1...2_000).map { "new \($0)" }.joined(separator: "\n") + "\n"
+        try original.write(to: file, atomically: true, encoding: .utf8)
+        try git(["add", "long.txt"], in: project)
+        try git(["commit", "-m", "long fixture"], in: project)
+        try changed.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try GitInspector().inspect(project: project, lastRunPaths: [], lastRunOnly: false)
+        let lines = try XCTUnwrap(result.files.first?.hunks.first?.lines)
+
+        XCTAssertEqual(result.files.first?.additions, 2_000)
+        XCTAssertEqual(result.files.first?.deletions, 2_000)
+        XCTAssertEqual(lines.first, DiffLine(kind: .deletion, oldLine: 1, newLine: nil, text: "old 1"))
+        XCTAssertEqual(lines.last, DiffLine(kind: .addition, oldLine: nil, newLine: 2_000, text: "new 2000"))
+    }
+
     func testLastRunUsesStructuredPathsAndLabelsNonGitFallback() throws {
         let project = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)

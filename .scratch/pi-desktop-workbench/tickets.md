@@ -192,11 +192,11 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Send rich project context; Direct work while a run is busy; Answer Pi and extension interruptions; Use existing Pi resources; Inspect and hand off changes; Manage project and session navigation; Notify only when attention is needed.
 
-- [ ] Keyboard-only walkthroughs pass for opening a project, completing a run, answering an interruption, switching sessions, and reading a diff.
-- [ ] VoiceOver exposes meaningful names, states, progress, choices, attachments, changed files, hunks, and lines in those workflows.
-- [ ] Text scaling, contrast settings, Reduce Motion, and macOS Keyboard Navigation are honored without relying on color, hover, animation, or position alone.
-- [ ] Representative long timelines and diffs preserve selection, scroll position, accessibility order, and responsive typing.
-- [ ] Profiling confirms decoding, pipe reads, process waits, Git work, and diff parsing do not stall the main actor; any AppKit adapter is limited to a proven SwiftUI gap.
+- [x] Keyboard-only walkthroughs pass for opening a project, completing a run, answering an interruption, switching sessions, and reading a diff.
+- [x] VoiceOver exposes meaningful names, states, progress, choices, attachments, changed files, hunks, and lines in those workflows.
+- [x] Text scaling, contrast settings, Reduce Motion, and macOS Keyboard Navigation are honored without relying on color, hover, animation, or position alone.
+- [x] Representative long timelines and diffs preserve selection, scroll position, accessibility order, and responsive typing.
+- [x] Profiling confirms decoding, pipe reads, process waits, Git work, and diff parsing do not stall the main actor; any AppKit adapter is limited to a proven SwiftUI gap.
 
 ## Ship and manually update the unsigned app
 

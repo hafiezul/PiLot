@@ -15,7 +15,7 @@ struct ChangedFile: Identifiable, Equatable {
 struct DiffHunk: Identifiable, Equatable {
     let header: String
     let lines: [DiffLine]
-    var id: String { header + lines.map(\.text).joined() }
+    var id: String { header }
 }
 
 struct DiffLine: Equatable {
@@ -225,18 +225,23 @@ struct FileHandoff {
     }
 
     private static func launch(_ command: String, file: URL) -> Bool {
-        guard let executable = command.split(whereSeparator: \.isWhitespace).first,
-              executable.allSatisfy({ $0.isLetter || $0.isNumber || "_./-".contains($0) }) else { return false }
-        let check = Process()
-        check.executableURL = URL(fileURLWithPath: "/bin/sh")
-        check.arguments = ["-c", "command -v -- \(executable) >/dev/null 2>&1"]
-        do { try check.run(); check.waitUntilExit() } catch { return false }
-        guard check.terminationStatus == 0 else { return false }
-
+        let parts = command.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let executable = parts.first, let executableURL = executableURL(for: executable) else { return false }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "exec \(command) \"$1\"", "PiLot", file.path]
+        process.executableURL = executableURL
+        process.arguments = Array(parts.dropFirst()) + [file.path]
         do { try process.run(); return true } catch { return false }
+    }
+
+    private static func executableURL(for executable: String) -> URL? {
+        if executable.contains("/") {
+            let url = URL(fileURLWithPath: executable)
+            return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+        }
+        return ProcessInfo.processInfo.environment["PATH"]?
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appending(path: executable) }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 }
 

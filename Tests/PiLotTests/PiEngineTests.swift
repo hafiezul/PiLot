@@ -12,6 +12,27 @@ final class PiEngineTests: XCTestCase {
         XCTAssertTrue(decoder.buffer.isEmpty)
     }
 
+    func testLongStreamingBatchesCoalesceTextWithoutReorderingActivity() throws {
+        let deltas = (0..<10_000).map { index in
+            ["type": "message_update", "assistantMessageEvent": ["type": "text_delta", "delta": "\(index),"]]
+        }
+        let tool: [String: Any] = ["type": "tool_execution_start", "toolCallId": "read", "toolName": "read", "args": [:]]
+        let decoder = RPCRecordDecoder()
+        var firstBatch = true
+        for record in deltas + [tool] + deltas {
+            let data = try JSONSerialization.data(withJSONObject: record) + Data([0x0A])
+            XCTAssertEqual(try decoder.append(data), firstBatch)
+            firstBatch = false
+        }
+        let records = decoder.drain()
+
+        XCTAssertEqual(records.count, 3)
+        var state = PiSessionState()
+        try records.forEach { try state.apply($0) }
+        XCTAssertEqual(state.assistantText, (0..<10_000).map { "\($0)," }.joined() + (0..<10_000).map { "\($0)," }.joined())
+        XCTAssertEqual(state.timelineItems, [.tool("read")])
+    }
+
     func testInterleavedToolsStayCorrelatedByCallID() throws {
         var state = PiSessionState()
         try state.apply(["type": "tool_execution_start", "toolCallId": "a", "toolName": "read", "args": [:]])

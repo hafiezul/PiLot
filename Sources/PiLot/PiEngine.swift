@@ -38,11 +38,62 @@ struct LFJSONDecoder {
     }
 }
 
-private final class RPCRecordDecoder: @unchecked Sendable {
+final class RPCRecordDecoder: @unchecked Sendable {
     private var decoder = LFJSONDecoder()
+    private var records: [[String: Any]] = []
+    private var deliveryScheduled = false
 
-    func append(_ data: Data) throws -> [[String: Any]] { try decoder.append(data) }
-    func reset() { decoder = LFJSONDecoder() }
+    func append(_ data: Data) throws -> Bool {
+        records += try decoder.append(data)
+        guard !deliveryScheduled, !records.isEmpty else { return false }
+        deliveryScheduled = true
+        return true
+    }
+
+    func drain() -> [[String: Any]] {
+        defer { records = []; deliveryScheduled = false }
+        return RPCRecordCoalescer.coalesce(records)
+    }
+
+    func reset() {
+        decoder = LFJSONDecoder()
+        records = []
+        deliveryScheduled = false
+    }
+}
+
+struct RPCRecordCoalescer {
+    static func coalesce(_ records: [[String: Any]]) -> [[String: Any]] {
+        var result: [[String: Any]] = []
+        var index = 0
+        while index < records.count {
+            guard textDelta(in: records[index]) != nil else {
+                result.append(records[index])
+                index += 1
+                continue
+            }
+            let start = index
+            var deltas: [String] = []
+            while index < records.count, let delta = textDelta(in: records[index]) {
+                deltas.append(delta)
+                index += 1
+            }
+            var record = records[start]
+            var event = record["assistantMessageEvent"] as? [String: Any] ?? [:]
+            event["delta"] = deltas.joined()
+            record["assistantMessageEvent"] = event
+            result.append(record)
+        }
+        return result
+    }
+
+    private static func textDelta(in record: [String: Any]) -> String? {
+        guard record["type"] as? String == "message_update",
+              let event = record["assistantMessageEvent"] as? [String: Any],
+              event["type"] as? String == "text_delta"
+        else { return nil }
+        return event["delta"] as? String
+    }
 }
 
 struct PiModel: Identifiable, Hashable {
@@ -962,11 +1013,14 @@ final class PiEngine: ObservableObject {
             guard !data.isEmpty else { return }
             decodeQueue.async {
                 do {
-                    let records = try recordDecoder.append(data)
-                    Task { @MainActor [weak self] in
-                        guard let self, self.generation == generation else { return }
-                        do { for record in records { try self.receive(record) } }
-                        catch { self.fail(error) }
+                    guard try recordDecoder.append(data) else { return }
+                    decodeQueue.asyncAfter(deadline: .now() + .milliseconds(16)) {
+                        let records = recordDecoder.drain()
+                        Task { @MainActor [weak self] in
+                            guard let self, self.generation == generation else { return }
+                            do { for record in records { try self.receive(record) } }
+                            catch { self.fail(error) }
+                        }
                     }
                 } catch {
                     Task { @MainActor [weak self] in
@@ -1255,7 +1309,8 @@ final class PiEngine: ObservableObject {
             stoppedLease?.release()
             if let afterExit { Task { @MainActor in afterExit() } }
         }
-        decodeQueue.sync { recordDecoder.reset() }
+        let recordDecoder = recordDecoder
+        decodeQueue.async { recordDecoder.reset() }
         interruptionTimeouts.values.forEach { $0.cancel() }
         interruptionTimeouts = [:]
         session.cancelActiveInterruptions()

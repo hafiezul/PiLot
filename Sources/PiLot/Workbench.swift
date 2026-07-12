@@ -188,7 +188,7 @@ final class WorkbenchStore: ObservableObject {
 
 // MARK: - Workbench
 
-enum WorkbenchFocus: Hashable { case sidebar, composer, interruption(String) }
+enum WorkbenchFocus: Hashable { case sidebar, composer, inspector, interruption(String) }
 
 struct WorkbenchActions {
     let openProject: () -> Void
@@ -282,7 +282,7 @@ struct WorkbenchView: View {
                         draft: $draft,
                         stopSession: { supervisor.stopSession(selectedSessionID) },
                         composerFocus: $focus,
-                        showInspector: { inspectorPresented.toggle() }
+                        showInspector: showChangesInspector
                     )
                     .id(selectedSessionID)
                 } else {
@@ -291,7 +291,7 @@ struct WorkbenchView: View {
                         project: activeProject,
                         draft: $draft,
                         composerFocus: $focus,
-                        showInspector: { inspectorPresented.toggle() },
+                        showInspector: showChangesInspector,
                         answer: { store.answerInterruption(for: selectedSessionID) },
                         decline: { store.declineInterruption(for: selectedSessionID) },
                         retry: { store.retry(selectedSessionID) },
@@ -308,7 +308,8 @@ struct WorkbenchView: View {
                     scope: $inspectorScope,
                     selectedFile: $selectedFile,
                     project: selectedProjectURL,
-                    lastRunPaths: selectedEngine?.session.lastRunChangedPaths ?? []
+                    lastRunPaths: selectedEngine?.session.lastRunChangedPaths ?? [],
+                    workbenchFocus: $focus
                 )
                 .inspectorColumnWidth(min: 300, ideal: 380, max: 560)
             }
@@ -398,13 +399,21 @@ struct WorkbenchView: View {
             },
             focusSidebar: { focus = .sidebar },
             focusComposer: { focus = .composer },
-            toggleInspector: { inspectorPresented.toggle() },
+            toggleInspector: {
+                inspectorPresented.toggle()
+                if inspectorPresented { focus = .inspector }
+            },
             stopSession: {
                 guard windowAccess == .owner else { return }
                 if selectedEngine != nil { supervisor.stopSession(selectedSessionID) }
                 else { store.stop(selectedSessionID) }
             }
         ))
+    }
+
+    private func showChangesInspector() {
+        inspectorPresented = true
+        focus = .inspector
     }
 
     private func beginRenaming(_ session: SupervisedSessionSummary) {
@@ -965,6 +974,7 @@ private struct LiveComposer: View {
                             .padding(.vertical, 5)
                             .background(.quaternary, in: Capsule())
                             .accessibilityElement(children: .contain)
+                            .accessibilityLabel("Attached \(attachment.name)")
                         }
                     }
                     .padding(.horizontal, 8)
@@ -1021,7 +1031,9 @@ private struct LiveComposer: View {
                 .frame(maxWidth: 130)
                 .disabled(engine.session.isRunning || engine.configurationPending || engine.session.model?.reasoning != true)
 
-                if engine.configurationPending { ProgressView().controlSize(.small) }
+                if engine.configurationPending {
+                    ProgressView().controlSize(.small).accessibilityLabel("Saving Pi configuration")
+                }
                 Spacer()
                 Button(engine.session.isRunning ? "Direct…" : "Send", systemImage: "arrow.up", action: submit)
                     .buttonStyle(.borderedProminent)
@@ -1599,6 +1611,7 @@ private struct ChangesInspector: View {
     @Binding var selectedFile: String
     let project: URL?
     let lastRunPaths: [String]
+    let workbenchFocus: FocusState<WorkbenchFocus?>.Binding
     @StateObject private var store = ChangesStore()
 
     private var selected: ChangedFile? {
@@ -1624,7 +1637,7 @@ private struct ChangesInspector: View {
                 .padding(.bottom, 8)
 
             if store.isLoading {
-                ProgressView().frame(maxWidth: .infinity, minHeight: 100)
+                ProgressView("Loading changes").frame(maxWidth: .infinity, minHeight: 100)
             } else if let reason = store.inspection.unavailableReason {
                 ContentUnavailableView("Aggregate diff unavailable", systemImage: "doc.text.magnifyingglass", description: Text(reason))
                     .frame(minHeight: 120)
@@ -1645,6 +1658,7 @@ private struct ChangesInspector: View {
                 .accessibilityLabel("\(file.path), \(file.status.rawValue), \(file.additions) additions, \(file.deletions) deletions")
             }
             .frame(minHeight: 115, maxHeight: 180)
+            .focused(workbenchFocus, equals: .inspector)
 
             Divider()
             if let file = selected {
@@ -1659,7 +1673,10 @@ private struct ChangesInspector: View {
                 ScrollView([.horizontal, .vertical]) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(file.hunks) { hunk in
-                            Text(hunk.header).foregroundStyle(.secondary).padding(.vertical, 5)
+                            Text(hunk.header)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 5)
+                                .accessibilityLabel("Diff hunk \(hunk.header)")
                             ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
                                 NativeDiffLine(line: line)
                             }
