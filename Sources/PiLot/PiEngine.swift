@@ -70,6 +70,83 @@ enum PiThinkingLevel: String, CaseIterable, Identifiable {
     var title: String { rawValue == "xhigh" ? "Extra high" : rawValue.capitalized }
 }
 
+enum PiInterruptionResponse: Equatable {
+    case value(String)
+    case confirmed(Bool)
+    case cancelled
+}
+
+struct PiInterruption: Identifiable, Equatable {
+    enum Method: String { case select, confirm, input, editor }
+    enum Resolution: Equatable { case active, answered, cancelled, timedOut }
+
+    let id: String
+    let method: Method
+    let title: String
+    let message: String?
+    let options: [String]
+    let placeholder: String?
+    let prefill: String?
+    let timeoutMilliseconds: Int?
+    var resolution: Resolution = .active
+
+    init?(_ record: [String: Any]) throws {
+        guard let methodName = record["method"] as? String else { throw PiEngineError.malformedOutput }
+        guard let method = Method(rawValue: methodName) else { return nil }
+        guard let id = record["id"] as? String, let title = record["title"] as? String else {
+            throw PiEngineError.malformedOutput
+        }
+        self.id = id
+        self.method = method
+        self.title = title
+        if let timeout = record["timeout"] {
+            guard let milliseconds = timeout as? Int, milliseconds >= 0 else { throw PiEngineError.malformedOutput }
+            timeoutMilliseconds = milliseconds
+        } else {
+            timeoutMilliseconds = nil
+        }
+
+        switch method {
+        case .select:
+            guard let choices = record["options"] as? [String] else { throw PiEngineError.malformedOutput }
+            options = choices
+            message = nil
+            placeholder = nil
+            prefill = nil
+        case .confirm:
+            guard let detail = record["message"] as? String else { throw PiEngineError.malformedOutput }
+            message = detail
+            options = []
+            placeholder = nil
+            prefill = nil
+        case .input:
+            if let value = record["placeholder"], !(value is String) { throw PiEngineError.malformedOutput }
+            message = nil
+            options = []
+            placeholder = record["placeholder"] as? String
+            prefill = nil
+        case .editor:
+            if let value = record["prefill"], !(value is String) { throw PiEngineError.malformedOutput }
+            message = nil
+            options = []
+            placeholder = nil
+            prefill = record["prefill"] as? String
+        }
+    }
+}
+
+enum PiTimelineItem: Equatable, Identifiable {
+    case tool(String)
+    case interruption(String)
+
+    var id: String {
+        switch self {
+        case .tool(let id): "tool:\(id)"
+        case .interruption(let id): "interruption:\(id)"
+        }
+    }
+}
+
 struct PiToolRun: Identifiable, Equatable {
     enum Status: Equatable { case running, succeeded, failed }
     let id: String
@@ -105,8 +182,53 @@ struct PiSessionState {
     var steeringQueue: [String] = []
     var followUpQueue: [String] = []
     var lastPrompt = ""
+    var interruptions: [PiInterruption] = []
+    var timelineItems: [PiTimelineItem] = []
 
     var orderedTools: [PiToolRun] { toolOrder.compactMap { tools[$0] } }
+    var activeInterruptions: [PiInterruption] { interruptions.filter { $0.resolution == .active } }
+    var isWaitingForInput: Bool { !activeInterruptions.isEmpty }
+
+    mutating func resolveInterruption(id: String, response: PiInterruptionResponse) throws -> [String: Any] {
+        guard let index = interruptions.firstIndex(where: { $0.id == id && $0.resolution == .active }) else {
+            throw PiEngineError.command("This input request is no longer waiting.")
+        }
+        let interruption = interruptions[index]
+        var payload: [String: Any] = ["type": "extension_ui_response", "id": id]
+        switch response {
+        case .value(let value):
+            guard interruption.method == .input || interruption.method == .editor ||
+                    (interruption.method == .select && interruption.options.contains(value))
+            else { throw PiEngineError.command("That response was not offered by Pi or the extension.") }
+            payload["value"] = value
+            interruptions[index].resolution = .answered
+        case .confirmed(let confirmed):
+            guard interruption.method == .confirm else {
+                throw PiEngineError.command("This request does not accept confirmation responses.")
+            }
+            payload["confirmed"] = confirmed
+            interruptions[index].resolution = .answered
+        case .cancelled:
+            payload["cancelled"] = true
+            interruptions[index].resolution = .cancelled
+        }
+        return payload
+    }
+
+    @discardableResult
+    mutating func timeoutInterruption(id: String) -> Bool {
+        guard let index = interruptions.firstIndex(where: { $0.id == id && $0.resolution == .active }) else {
+            return false
+        }
+        interruptions[index].resolution = .timedOut
+        return true
+    }
+
+    mutating func cancelActiveInterruptions() {
+        for index in interruptions.indices where interruptions[index].resolution == .active {
+            interruptions[index].resolution = .cancelled
+        }
+    }
 
     mutating func apply(_ record: [String: Any]) throws {
         guard let type = record["type"] as? String else { throw PiEngineError.malformedOutput }
@@ -115,8 +237,19 @@ struct PiSessionState {
             isRunning = true
             isSettled = false
         case "agent_end", "turn_start", "turn_end", "message_start", "message_end",
-             "extension_error", "extension_ui_request":
+             "extension_error":
             break
+        case "extension_ui_request":
+            guard let method = record["method"] as? String else { throw PiEngineError.malformedOutput }
+            if let interruption = try PiInterruption(record) {
+                guard !interruptions.contains(where: { $0.id == interruption.id }) else {
+                    throw PiEngineError.malformedOutput
+                }
+                interruptions.append(interruption)
+                timelineItems.append(.interruption(interruption.id))
+            } else {
+                try Self.validateFireAndForgetUI(record, method: method)
+            }
         case "queue_update":
             guard let steering = record["steering"] as? [String],
                   let followUp = record["followUp"] as? [String]
@@ -174,6 +307,7 @@ struct PiSessionState {
             guard tools[id] == nil else { throw PiEngineError.malformedOutput }
             tools[id] = PiToolRun(id: id, name: name)
             toolOrder.append(id)
+            timelineItems.append(.tool(id))
         case "tool_execution_update":
             let (id, _) = try toolIdentity(record)
             guard var tool = tools[id], let result = record["partialResult"] as? [String: Any] else {
@@ -191,6 +325,27 @@ struct PiSessionState {
             tools[id] = tool
         default:
             throw PiEngineError.unknownProtocol(type)
+        }
+    }
+
+    private static func validateFireAndForgetUI(_ record: [String: Any], method: String) throws {
+        guard record["id"] is String else { throw PiEngineError.malformedOutput }
+        switch method {
+        case "notify":
+            guard record["message"] is String else { throw PiEngineError.malformedOutput }
+            if let type = record["notifyType"], !(type is String) { throw PiEngineError.malformedOutput }
+        case "setStatus":
+            guard record["statusKey"] is String else { throw PiEngineError.malformedOutput }
+            if let text = record["statusText"], !(text is String) { throw PiEngineError.malformedOutput }
+        case "setWidget":
+            guard record["widgetKey"] is String else { throw PiEngineError.malformedOutput }
+            if let lines = record["widgetLines"], !(lines is [String]) { throw PiEngineError.malformedOutput }
+        case "setTitle":
+            guard record["title"] is String else { throw PiEngineError.malformedOutput }
+        case "set_editor_text":
+            guard record["text"] is String else { throw PiEngineError.malformedOutput }
+        default:
+            throw PiEngineError.unknownProtocol(method)
         }
     }
 
@@ -237,6 +392,7 @@ final class PiEngine: ObservableObject {
     @Published private(set) var ownershipRequiresFork = false
     @Published private(set) var attentionState: SessionAttentionState = .done
     @Published private(set) var activityDate = Date()
+    @Published private(set) var attentionAnnouncement = 0
 
     private var process: Process?
     private var input: FileHandle?
@@ -249,6 +405,7 @@ final class PiEngine: ObservableObject {
     private var pendingThinking: [String: PiThinkingLevel] = [:]
     private var requestNumber = 0
     private var generation = UUID()
+    private var interruptionTimeouts: [String: Task<Void, Never>] = [:]
     private let recoveryStore = SessionRecoveryStore()
     private var metadata: SessionMetadata?
     private var writerLease: SessionWriterLease?
@@ -382,6 +539,8 @@ final class PiEngine: ObservableObject {
         session.assistantText = ""
         session.tools = [:]
         session.toolOrder = []
+        session.interruptions = []
+        session.timelineItems = []
         session.isRunning = true
         session.isSettled = false
         setAttention(.running)
@@ -420,6 +579,16 @@ final class PiEngine: ObservableObject {
         guard session.isRunning else { return }
         status = "Abort requested…"
         send(type: "abort")
+    }
+
+    func answerInterruption(_ id: String, response: PiInterruptionResponse) {
+        let payload: [String: Any]
+        do { payload = try session.resolveInterruption(id: id, response: response) }
+        catch { status = error.localizedDescription; return }
+        interruptionTimeouts.removeValue(forKey: id)?.cancel()
+        do { try write(payload) }
+        catch { fail(error); return }
+        refreshAttentionAfterInterruption()
     }
 
     func stopSession() {
@@ -533,13 +702,15 @@ final class PiEngine: ObservableObject {
         command["id"] = id
         command["type"] = type
         pendingCommands[id] = type
-        do {
-            let data = try JSONSerialization.data(withJSONObject: command) + Data([0x0A])
-            try input?.write(contentsOf: data)
-        } catch {
-            fail(error)
-        }
+        do { try write(command) }
+        catch { fail(error) }
         return id
+    }
+
+    private func write(_ payload: [String: Any]) throws {
+        guard let input else { throw PiEngineError.command("The Pi engine input stream is unavailable.") }
+        let data = try JSONSerialization.data(withJSONObject: payload) + Data([0x0A])
+        try input.write(contentsOf: data)
     }
 
     private func receive(_ record: [String: Any]) throws {
@@ -554,12 +725,21 @@ final class PiEngine: ObservableObject {
                 status = "Running"
                 setAttention(.running)
             case "agent_settled":
-                status = "Done"
-                setAttention(.done)
-                markMetadata(.done)
+                if session.isWaitingForInput {
+                    status = "Waiting for input"
+                    setAttention(.waiting)
+                } else {
+                    status = "Done"
+                    setAttention(.done)
+                    markMetadata(.done)
+                }
             case "extension_ui_request":
-                status = "Waiting for input"
-                setAttention(.waiting)
+                if let id = record["id"] as? String,
+                   let interruption = session.activeInterruptions.first(where: { $0.id == id }) {
+                    status = "Waiting for input"
+                    setAttention(.waiting)
+                    scheduleTimeout(for: interruption)
+                }
             case "queue_update":
                 let count = session.steeringQueue.count + session.followUpQueue.count
                 status = count == 0 ? "Running" : "Running · \(count) queued"
@@ -622,6 +802,32 @@ final class PiEngine: ObservableObject {
         }
     }
 
+    private func scheduleTimeout(for interruption: PiInterruption) {
+        guard let milliseconds = interruption.timeoutMilliseconds else { return }
+        interruptionTimeouts[interruption.id]?.cancel()
+        interruptionTimeouts[interruption.id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+            guard !Task.isCancelled, let self,
+                  self.session.timeoutInterruption(id: interruption.id)
+            else { return }
+            self.interruptionTimeouts.removeValue(forKey: interruption.id)
+            self.refreshAttentionAfterInterruption()
+        }
+    }
+
+    private func refreshAttentionAfterInterruption() {
+        if session.isWaitingForInput {
+            status = "Waiting for input"
+            setAttention(.waiting)
+        } else if session.isRunning {
+            status = "Running"
+            setAttention(.running)
+        } else {
+            status = "Done"
+            setAttention(.done)
+        }
+    }
+
     private func fail(_ error: Error) {
         if process != nil { markMetadata(.interrupted) }
         setAttention(.failed)
@@ -629,6 +835,7 @@ final class PiEngine: ObservableObject {
     }
 
     private func setAttention(_ state: SessionAttentionState) {
+        if state == .waiting && attentionState != .waiting { attentionAnnouncement += 1 }
         attentionState = state
         activityDate = Date()
     }
@@ -668,6 +875,9 @@ final class PiEngine: ObservableObject {
             stoppedLease?.release()
         }
         decodeQueue.sync { recordDecoder.reset() }
+        interruptionTimeouts.values.forEach { $0.cancel() }
+        interruptionTimeouts = [:]
+        session.cancelActiveInterruptions()
         pendingCommands = [:]
         pendingModels = [:]
         pendingThinking = [:]

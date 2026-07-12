@@ -43,6 +43,76 @@ final class PiEngineTests: XCTestCase {
         XCTAssertTrue(state.isSettled)
     }
 
+    func testDialogRequestsRemainChronologicalAndExposeOnlyProtocolChoices() throws {
+        var state = PiSessionState()
+        try state.apply([
+            "type": "extension_ui_request", "id": "gate", "method": "select",
+            "title": "Allow command?", "options": ["Allow once", "Block"], "timeout": 10_000,
+        ])
+        try state.apply([
+            "type": "extension_ui_request", "id": "question", "method": "input",
+            "title": "Why?", "placeholder": "Reason",
+        ])
+
+        try state.apply(["type": "tool_execution_start", "toolCallId": "after", "toolName": "read"])
+
+        XCTAssertEqual(state.interruptions.map(\.id), ["gate", "question"])
+        XCTAssertEqual(state.timelineItems.map(\.id), ["interruption:gate", "interruption:question", "tool:after"])
+        XCTAssertEqual(state.activeInterruptions.map(\.id), ["gate", "question"])
+        XCTAssertEqual(state.interruptions[0].options, ["Allow once", "Block"])
+        XCTAssertEqual(state.interruptions[0].timeoutMilliseconds, 10_000)
+        XCTAssertTrue(state.isWaitingForInput)
+    }
+
+    func testFireAndForgetExtensionUIIsNotWaitingAndUnknownMethodsFail() throws {
+        var state = PiSessionState()
+        try state.apply([
+            "type": "extension_ui_request", "id": "notice", "method": "notify",
+            "message": "Done", "notifyType": "info",
+        ])
+
+        XCTAssertFalse(state.isWaitingForInput)
+        XCTAssertTrue(state.interruptions.isEmpty)
+        XCTAssertThrowsError(try state.apply([
+            "type": "extension_ui_request", "id": "future", "method": "customDialog",
+        ]))
+    }
+
+    func testInterruptionResponsesUseExactRPCPayloadsAndResolveWaitingState() throws {
+        var state = PiSessionState()
+        try state.apply([
+            "type": "extension_ui_request", "id": "gate", "method": "select",
+            "title": "Allow command?", "options": ["Allow once", "Block"],
+        ])
+
+        XCTAssertThrowsError(try state.resolveInterruption(id: "gate", response: .value("Always allow")))
+        let payload = try state.resolveInterruption(id: "gate", response: .value("Allow once"))
+
+        XCTAssertEqual(payload["type"] as? String, "extension_ui_response")
+        XCTAssertEqual(payload["id"] as? String, "gate")
+        XCTAssertEqual(payload["value"] as? String, "Allow once")
+        XCTAssertFalse(state.isWaitingForInput)
+        XCTAssertEqual(state.interruptions[0].resolution, .answered)
+    }
+
+    func testInterruptionCancellationAndTimeoutEndWaitingWithoutInventingAnswers() throws {
+        var state = PiSessionState()
+        try state.apply([
+            "type": "extension_ui_request", "id": "confirm", "method": "confirm",
+            "title": "Continue?", "message": "Choose whether to continue.",
+        ])
+        try state.apply([
+            "type": "extension_ui_request", "id": "input", "method": "input",
+            "title": "Reason", "timeout": 100,
+        ])
+
+        let cancellation = try state.resolveInterruption(id: "confirm", response: .cancelled)
+        XCTAssertEqual(cancellation["cancelled"] as? Bool, true)
+        XCTAssertTrue(state.timeoutInterruption(id: "input"))
+        XCTAssertEqual(state.interruptions.map(\.resolution), [.cancelled, .timedOut])
+        XCTAssertFalse(state.isWaitingForInput)
+    }
+
     func testQueuedWorkPreservesPiSubmissionOrderUntilDelivered() throws {
         var state = PiSessionState()
         try state.apply([

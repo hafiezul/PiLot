@@ -522,8 +522,15 @@ private struct LiveSessionDetail: View {
                             .frame(maxWidth: 760, alignment: .leading)
                             .accessibilityLabel("Assistant: \(engine.session.assistantText)")
                     }
-                    ForEach(engine.session.orderedTools) { tool in
-                        LiveToolRow(tool: tool)
+                    ForEach(engine.session.timelineItems) { item in
+                        switch item {
+                        case .tool(let id):
+                            if let tool = engine.session.tools[id] { LiveToolRow(tool: tool) }
+                        case .interruption(let id):
+                            if let interruption = engine.session.interruptions.first(where: { $0.id == id }) {
+                                LiveInterruptionTimelineRow(interruption: interruption)
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 24)
@@ -537,11 +544,105 @@ private struct LiveSessionDetail: View {
                     followUps: engine.session.followUpQueue
                 )
             }
+            ForEach(engine.session.activeInterruptions) { interruption in
+                LiveInterruptionView(interruption: interruption) { response in
+                    engine.answerInterruption(interruption.id, response: response)
+                }
+            }
             LiveComposer(engine: engine, draft: $draft, focus: composerFocus)
         }
         .navigationTitle("Pi session")
         .onAppear { draft = engine.restoredDraft }
         .onChange(of: engine.restoredDraft) { _, value in draft = value }
+    }
+}
+
+private struct LiveInterruptionTimelineRow: View {
+    let interruption: PiInterruption
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(interruption.title)
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: interruption.resolution == .active ? "pause.circle.fill" : "checkmark.circle")
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Input request: \(interruption.title), \(status)")
+    }
+
+    private var status: String {
+        switch interruption.resolution {
+        case .active: "Waiting · pinned above the composer"
+        case .answered: "Answered"
+        case .cancelled: "Cancelled"
+        case .timedOut: "Timed out"
+        }
+    }
+}
+
+private struct LiveInterruptionView: View {
+    let interruption: PiInterruption
+    let respond: (PiInterruptionResponse) -> Void
+    @State private var text: String
+
+    init(interruption: PiInterruption, respond: @escaping (PiInterruptionResponse) -> Void) {
+        self.interruption = interruption
+        self.respond = respond
+        _text = State(initialValue: interruption.prefill ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(interruption.title, systemImage: "hand.raised.fill").font(.headline)
+            if let message = interruption.message { Text(message).font(.callout) }
+            responseControls
+            HStack {
+                Button("Cancel request") { respond(.cancelled) }
+                if interruption.timeoutMilliseconds != nil {
+                    Text("Pi will cancel this request if it times out.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(.separator))
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Input needed: \(interruption.title)")
+    }
+
+    @ViewBuilder
+    private var responseControls: some View {
+        switch interruption.method {
+        case .select:
+            VStack(alignment: .leading) {
+                ForEach(Array(interruption.options.enumerated()), id: \.offset) { _, option in
+                    Button(option) { respond(.value(option)) }
+                        .buttonStyle(.bordered)
+                }
+            }
+        case .confirm:
+            HStack {
+                Button("Confirm") { respond(.confirmed(true)) }.buttonStyle(.borderedProminent)
+                Button("Decline") { respond(.confirmed(false)) }
+            }
+        case .input:
+            HStack {
+                TextField(interruption.placeholder ?? "Response", text: $text)
+                Button("Submit") { respond(.value(text)) }.buttonStyle(.borderedProminent)
+            }
+        case .editor:
+            VStack(alignment: .trailing, spacing: 6) {
+                TextEditor(text: $text).frame(minHeight: 70, maxHeight: 140)
+                Button("Submit") { respond(.value(text)) }.buttonStyle(.borderedProminent)
+            }
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 
@@ -45,6 +46,7 @@ final class SessionSupervisor: ObservableObject {
 
     private var engines: [String: PiEngine] = [:]
     private var observations: [String: AnyCancellable] = [:]
+    private var announcementObservations: [String: AnyCancellable] = [:]
 
     var sortedSessions: [SupervisedSessionSummary] { index.sortedSessions }
 
@@ -136,6 +138,16 @@ final class SessionSupervisor: ObservableObject {
     private func observe(_ engine: PiEngine, id: String) {
         observations[id] = engine.$attentionState.combineLatest(engine.$activityDate).sink { [weak self] state, date in
             self?.index.update(sessionID: id, state: state, at: date)
+        }
+        announcementObservations[id] = engine.$attentionAnnouncement.dropFirst().sink { _ in
+            NSAccessibility.post(
+                element: NSApp as Any,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: "Input needed for Pi session",
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                ]
+            )
         }
     }
 }

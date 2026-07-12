@@ -111,10 +111,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Complete one durable coding run.
 
-- [ ] Active requests are pinned above the composer and remain represented at their chronological timeline position.
-- [ ] Only choices and persistence scopes supplied by Pi or the extension are presented.
-- [ ] Requests remain waiting until answered, cancelled, or timed out; closing a window does not answer them.
-- [ ] Waiting state remains visible in the navigator and is announced once without stealing focus.
+- [x] Active requests are pinned above the composer and remain represented at their chronological timeline position.
+- [x] Only choices and persistence scopes supplied by Pi or the extension are presented.
+- [x] Requests remain waiting until answered, cancelled, or timed out; closing a window does not answer them.
+- [x] Waiting state remains visible in the navigator and is announced once without stealing focus.
 
 ## Use existing Pi resources
 
