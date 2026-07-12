@@ -80,6 +80,26 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: store.transcriptURL(sessionID: metadata.id)), bytes)
     }
 
+    func testSessionCatalogRestoresNavigationMetadataForAProject() throws {
+        let store = SessionRecoveryStore(root: root)
+        try store.save(metadata: SessionMetadata(
+            id: "older", projectPath: "/tmp/project", state: .stopped,
+            title: "Archived work", isArchived: true, updatedAt: Date(timeIntervalSince1970: 1)
+        ))
+        try store.save(metadata: SessionMetadata(
+            id: "newer", projectPath: "/tmp/project", state: .done,
+            title: "Current work", updatedAt: Date(timeIntervalSince1970: 2)
+        ))
+        try store.save(metadata: SessionMetadata(id: "other", projectPath: "/tmp/other", state: .done))
+
+        let sessions = try store.sessions(projectPath: "/tmp/project")
+
+        XCTAssertEqual(sessions.map(\.id), ["newer", "older"])
+        XCTAssertEqual(sessions.last?.title, "Archived work")
+        XCTAssertEqual(sessions.last?.isArchived, true)
+        XCTAssertEqual(sessions.last?.state, .stopped)
+    }
+
     func testWriterLeaseIsExclusiveAndUncertainOwnershipRequiresFork() throws {
         let first = SessionWriterLease(root: root, sessionID: "session-3")
         let second = SessionWriterLease(root: root, sessionID: "session-3")

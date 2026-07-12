@@ -2,12 +2,42 @@ import Darwin
 import Foundation
 
 struct SessionMetadata: Codable, Equatable {
-    enum State: String, Codable { case ready, running, interrupted, done }
+    enum State: String, Codable { case ready, running, interrupted, done, stopped }
 
     let id: String
     let projectPath: String
     var state: State
-    var updatedAt = Date()
+    var title: String
+    var isArchived: Bool
+    var updatedAt: Date
+
+    init(
+        id: String,
+        projectPath: String,
+        state: State,
+        title: String = "Pi session",
+        isArchived: Bool = false,
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.projectPath = projectPath
+        self.state = state
+        self.title = title
+        self.isArchived = isArchived
+        self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, projectPath, state, title, isArchived, updatedAt }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        projectPath = try values.decode(String.self, forKey: .projectPath)
+        state = try values.decode(State.self, forKey: .state)
+        title = try values.decodeIfPresent(String.self, forKey: .title) ?? "Pi session"
+        isArchived = try values.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        updatedAt = try values.decodeIfPresent(Date.self, forKey: .updatedAt) ?? .distantPast
+    }
 }
 
 enum SessionRecoveryIssue: Equatable {
@@ -68,8 +98,8 @@ struct SessionRecoveryStore {
         try atomicWrite(Data(draft.utf8), to: draftURL(sessionID), keepPrevious: true)
     }
 
-    func latest(projectPath: String) throws -> SessionMetadata? {
-        guard FileManager.default.fileExists(atPath: root.path) else { return nil }
+    func sessions(projectPath: String) throws -> [SessionMetadata] {
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
         return try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.hasSuffix(".metadata.json") }
             .map { url in
@@ -77,8 +107,10 @@ struct SessionRecoveryStore {
                 catch { return try JSONDecoder().decode(SessionMetadata.self, from: Data(contentsOf: url.appendingPathExtension("previous"))) }
             }
             .filter { $0.projectPath == projectPath }
-            .max { $0.updatedAt < $1.updatedAt }
+            .sorted { $0.updatedAt > $1.updatedAt }
     }
+
+    func latest(projectPath: String) throws -> SessionMetadata? { try sessions(projectPath: projectPath).first }
 
     func forkVerifiedEntries(from recovery: RecoveredSession) throws -> SessionMetadata {
         let source = try Data(contentsOf: transcriptURL(sessionID: recovery.metadata.id))

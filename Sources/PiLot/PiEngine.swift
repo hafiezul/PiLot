@@ -569,41 +569,53 @@ final class PiEngine: ObservableObject {
 
     func openProject(_ project: URL, resources: URL) {
         let canonical = project.standardizedFileURL.resolvingSymlinksInPath()
-        guard launchProject != canonical || process == nil else { return }
         self.resources = resources
-        stopProcess(status: nil)
         launchProject = canonical
         do {
             if let existing = try recoveryStore.latest(projectPath: canonical.path) {
-                let lease = SessionWriterLease(root: recoveryStore.root, sessionID: existing.id)
-                guard try lease.acquire() == .acquired else {
-                    let recovered = try recoveryStore.recover(sessionID: existing.id, allowRepair: false)
-                    metadata = recovered.metadata
-                    recovery = recovered
-                    restoredDraft = recovered.draft
-                    ownershipRequiresFork = true
-                    status = "Another owner may be writing this session — fork to continue"
-                    return
-                }
-                writerLease = lease
-                let recovered = try recoveryStore.recover(sessionID: existing.id)
-                metadata = recovered.metadata
-                recovery = recovered
-                restoredDraft = recovered.draft
-                guard recovered.metadata.state != .interrupted, recovered.issue == nil else {
-                    setAttention(.failed)
-                    status = recovered.actions.isEmpty
-                        ? "Interrupted — restart or fork without replaying unfinished work"
-                        : "Transcript needs recovery — open read-only, export, or fork verified entries"
-                    return
-                }
-                launch(resources: resources, project: canonical, sessionID: existing.id)
+                openExistingSession(existing, project: canonical, resources: resources)
             } else {
                 try beginNewSession(project: canonical, resources: resources)
             }
-        } catch {
-            fail(error)
-        }
+        } catch { fail(error) }
+    }
+
+    func openExistingSession(_ existing: SessionMetadata, project: URL, resources: URL) {
+        let canonical = project.standardizedFileURL.resolvingSymlinksInPath()
+        guard process == nil, existing.projectPath == canonical.path else { return }
+        self.resources = resources
+        launchProject = canonical
+        do {
+            let lease = SessionWriterLease(root: recoveryStore.root, sessionID: existing.id)
+            guard try lease.acquire() == .acquired else {
+                let recovered = try recoveryStore.recover(sessionID: existing.id, allowRepair: false)
+                metadata = recovered.metadata
+                recovery = recovered
+                restoredDraft = recovered.draft
+                ownershipRequiresFork = true
+                status = "Another owner may be writing this session — read only; fork to continue"
+                return
+            }
+            writerLease = lease
+            let recovered = try recoveryStore.recover(sessionID: existing.id)
+            metadata = recovered.metadata
+            recovery = recovered
+            restoredDraft = recovered.draft
+            if recovered.metadata.state == .stopped {
+                writerLease?.release()
+                writerLease = nil
+                status = "Session stopped"
+                return
+            }
+            guard recovered.metadata.state != .interrupted, recovered.issue == nil else {
+                setAttention(.failed)
+                status = recovered.actions.isEmpty
+                    ? "Interrupted — restart or fork without replaying unfinished work"
+                    : "Transcript needs recovery — open read-only, export, or fork verified entries"
+                return
+            }
+            launch(resources: resources, project: canonical, sessionID: existing.id)
+        } catch { fail(error) }
     }
 
     func openSafeSurface(resources: URL) {
@@ -625,13 +637,53 @@ final class PiEngine: ObservableObject {
         catch { fail(error) }
     }
 
-    func startNewSession(project: URL, resources: URL) {
+    func startNewSession(project: URL, resources: URL, id: String = UUID().uuidString, title: String = "Pi session") {
         let canonical = project.standardizedFileURL.resolvingSymlinksInPath()
         guard process == nil else { return }
         self.resources = resources
         launchProject = canonical
-        do { try beginNewSession(project: canonical, resources: resources) }
+        do { try beginNewSession(project: canonical, resources: resources, id: id, title: title) }
         catch { fail(error) }
+    }
+
+    @discardableResult
+    func resumeSession() -> Bool {
+        guard process == nil, let resources, let project = launchProject, var metadata else { return false }
+        do {
+            let lease = SessionWriterLease(root: recoveryStore.root, sessionID: metadata.id)
+            guard try lease.acquire() == .acquired else {
+                status = "Another owner may be writing this session — read only"
+                ownershipRequiresFork = true
+                return false
+            }
+            writerLease = lease
+            metadata.state = .ready
+            metadata.updatedAt = Date()
+            try recoveryStore.save(metadata: metadata)
+            self.metadata = metadata
+            recovery = nil
+            ownershipRequiresFork = false
+            launch(resources: resources, project: project, sessionID: metadata.id)
+            return true
+        } catch { fail(error); return false }
+    }
+
+    @discardableResult
+    func renameSession(_ title: String) -> Bool {
+        guard var metadata else { return false }
+        metadata.title = title
+        metadata.updatedAt = Date()
+        do { try recoveryStore.save(metadata: metadata); self.metadata = metadata; return true }
+        catch { status = "Session name could not be saved: \(error.localizedDescription)"; return false }
+    }
+
+    @discardableResult
+    func setArchived(_ archived: Bool) -> Bool {
+        guard var metadata else { return false }
+        metadata.isArchived = archived
+        metadata.updatedAt = Date()
+        do { try recoveryStore.save(metadata: metadata); self.metadata = metadata; return true }
+        catch { status = "Session archive state could not be saved: \(error.localizedDescription)"; return false }
     }
 
     func startForkedSession(_ imported: SessionMetadata, project: URL, resources: URL) {
@@ -743,15 +795,22 @@ final class PiEngine: ObservableObject {
         refreshAttentionAfterInterruption()
     }
 
-    func stopSession() {
-        markMetadata(.done)
+    @discardableResult
+    func stopSession() -> Bool {
+        guard markMetadata(.stopped) else { return false }
         recovery = nil
         setAttention(.done)
         stopProcess(status: "Session stopped")
+        return true
     }
 
-    private func beginNewSession(project: URL, resources: URL) throws {
-        let session = SessionMetadata(id: UUID().uuidString, projectPath: project.path, state: .ready)
+    private func beginNewSession(
+        project: URL,
+        resources: URL,
+        id: String = UUID().uuidString,
+        title: String = "Pi session"
+    ) throws {
+        let session = SessionMetadata(id: id, projectPath: project.path, state: .ready, title: title)
         try recoveryStore.save(metadata: session)
         let lease = SessionWriterLease(root: recoveryStore.root, sessionID: session.id)
         guard try lease.acquire() == .acquired else { throw PiEngineError.command("The new session could not acquire its writer lease.") }

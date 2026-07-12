@@ -146,10 +146,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Supervise concurrent sessions.
 
-- [ ] Users can create, rename, stop, resume, and archive sessions; archived remains a navigation property rather than a runtime state.
-- [ ] Recents, selected session, inspector visibility, and composer drafts restore after reopening.
-- [ ] Session identity remains independent of window identity.
-- [ ] Another window can observe a live owner read-only without acquiring a second writer.
+- [x] Users can create, rename, stop, resume, and archive sessions; archived remains a navigation property rather than a runtime state.
+- [x] Recents, selected session, inspector visibility, and composer drafts restore after reopening.
+- [x] Session identity remains independent of window identity.
+- [x] Another window can observe a live owner read-only without acquiring a second writer.
 
 ## Notify only when attention is needed
 

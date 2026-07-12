@@ -222,6 +222,10 @@ struct WorkbenchView: View {
     @State private var selectedFile = "docs/install.md"
     @State private var wasNarrow = false
     @State private var pendingCLISession: CLISessionRecord?
+    @State private var windowID = UUID()
+    @State private var windowAccess: SessionWindowAccess = .observer
+    @State private var renamingSessionID: String?
+    @State private var sessionTitle = ""
     @FocusState private var focus: WorkbenchFocus?
 
     private var selectedSession: WorkbenchSession {
@@ -249,7 +253,23 @@ struct WorkbenchView: View {
                     liveSessions: supervisor.sortedSessions,
                     cliSessions: supervisor.cliSessions,
                     reopen: { url in Task { await requestOpen(url) } },
-                    continueCLI: continueCLISession
+                    continueCLI: continueCLISession,
+                    rename: { session in
+                        guard supervisor.windowAccess(to: session.id, from: windowID) == .owner else { return }
+                        beginRenaming(session)
+                    },
+                    stop: { id in
+                        guard supervisor.windowAccess(to: id, from: windowID) == .owner else { return }
+                        supervisor.stopSession(id)
+                    },
+                    resume: { id in
+                        guard supervisor.windowAccess(to: id, from: windowID) == .owner else { return }
+                        supervisor.resumeSession(id)
+                    },
+                    archive: { id, archived in
+                        guard supervisor.windowAccess(to: id, from: windowID) == .owner else { return }
+                        supervisor.setArchived(archived, sessionID: id)
+                    }
                 )
                 .focused($focus, equals: .sidebar)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 245, max: 320)
@@ -258,7 +278,9 @@ struct WorkbenchView: View {
                     LiveSessionDetail(
                         engine: engine,
                         peers: supervisor.peers(of: selectedSessionID),
+                        isReadOnly: windowAccess == .observer || engine.ownershipRequiresFork,
                         draft: $draft,
+                        stopSession: { supervisor.stopSession(selectedSessionID) },
                         composerFocus: $focus,
                         showInspector: { inspectorPresented.toggle() }
                     )
@@ -303,7 +325,10 @@ struct WorkbenchView: View {
             return true
         }
         .onOpenURL { url in Task { await requestOpen(url) } }
-        .onChange(of: selectedSessionID) { _, _ in saveNavigation() }
+        .onChange(of: selectedSessionID) { _, id in
+            windowAccess = supervisor.windowAccess(to: id, from: windowID)
+            saveNavigation()
+        }
         .onChange(of: inspectorPresented) { _, _ in saveNavigation() }
         .onChange(of: draft) { _, value in selectedEngine?.saveDraft(value) }
         .sheet(isPresented: Binding(
@@ -317,6 +342,19 @@ struct WorkbenchView: View {
                     decline: { Task { await resolveTrust(url, trusted: false) } }
                 )
             }
+        }
+        .onAppear { windowAccess = supervisor.windowAccess(to: selectedSessionID, from: windowID) }
+        .onDisappear { supervisor.releaseWindow(windowID) }
+        .alert("Rename session", isPresented: Binding(
+            get: { renamingSessionID != nil },
+            set: { if !$0 { renamingSessionID = nil } }
+        )) {
+            TextField("Session name", text: $sessionTitle)
+            Button("Rename") {
+                if let id = renamingSessionID { supervisor.renameSession(id, title: sessionTitle) }
+                renamingSessionID = nil
+            }
+            Button("Cancel", role: .cancel) { renamingSessionID = nil }
         }
         .alert("Project could not be opened", isPresented: Binding(
             get: { projects.errorMessage != nil },
@@ -358,10 +396,16 @@ struct WorkbenchView: View {
             focusComposer: { focus = .composer },
             toggleInspector: { inspectorPresented.toggle() },
             stopSession: {
-                if let engine = selectedEngine { engine.stopSession() }
+                guard windowAccess == .owner else { return }
+                if selectedEngine != nil { supervisor.stopSession(selectedSessionID) }
                 else { store.stop(selectedSessionID) }
             }
         ))
+    }
+
+    private func beginRenaming(_ session: SupervisedSessionSummary) {
+        renamingSessionID = session.id
+        sessionTitle = session.title
     }
 
     private func continueCLISession(_ session: CLISessionRecord) {
@@ -435,20 +479,29 @@ struct WorkbenchView: View {
         guard let resources = Bundle.main.resourceURL,
               let project = await projects.saveTrust(url, trusted: trusted, resources: resources)
         else { return }
-        restoreNavigation(project)
         activeProjectID = project.id
-        if trusted { selectedSessionID = supervisor.openProject(project.url, resources: resources) }
+        if trusted {
+            inspectorPresented = project.inspectorPresented
+            selectedSessionID = supervisor.openProject(project.url, resources: resources, preferredSessionID: project.selectedSessionID)
+        } else {
+            restoreNavigation(project)
+        }
     }
 
     private func finishOpen(_ url: URL, access: ProjectRecord.Access, resources: URL) {
         guard let project = projects.open(url, access: access) else { return }
-        restoreNavigation(project)
         activeProjectID = project.id
-        if access == .trusted { selectedSessionID = supervisor.openProject(project.url, resources: resources) }
+        if access == .trusted {
+            inspectorPresented = project.inspectorPresented
+            selectedSessionID = supervisor.openProject(project.url, resources: resources, preferredSessionID: project.selectedSessionID)
+        } else {
+            restoreNavigation(project)
+        }
     }
 
     private func restoreNavigation(_ project: ProjectRecord) {
-        selectedSessionID = store.session(id: project.selectedSessionID) == nil ? "approval" : project.selectedSessionID
+        selectedSessionID = store.session(id: project.selectedSessionID) == nil && supervisor.engine(for: project.selectedSessionID) == nil
+            ? "approval" : project.selectedSessionID
         inspectorPresented = project.inspectorPresented
     }
 
@@ -461,7 +514,9 @@ struct WorkbenchView: View {
 private struct LiveSessionDetail: View {
     @ObservedObject var engine: PiEngine
     let peers: [SupervisedSessionSummary]
+    let isReadOnly: Bool
     @Binding var draft: String
+    let stopSession: () -> Void
     let composerFocus: FocusState<WorkbenchFocus?>.Binding
     let showInspector: () -> Void
 
@@ -478,13 +533,23 @@ private struct LiveSessionDetail: View {
                 Spacer()
                 Button("Changes", systemImage: "sidebar.right", action: showInspector)
                 Button("Abort", action: engine.abort)
-                    .disabled(!engine.session.isRunning)
-                Button("Stop Session", role: .destructive, action: engine.stopSession)
+                    .disabled(isReadOnly || !engine.session.isRunning)
+                Button("Stop Session", role: .destructive, action: stopSession)
+                    .disabled(isReadOnly)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .padding(.horizontal, 16)
             .frame(minHeight: 54)
+
+            if isReadOnly {
+                Label("Read-only observer — another window owns this session.", systemImage: "eye")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                    .background(.quaternary)
+            }
 
             if !peers.isEmpty {
                 Label(
@@ -565,8 +630,10 @@ private struct LiveSessionDetail: View {
                 LiveInterruptionView(interruption: interruption) { response in
                     engine.answerInterruption(interruption.id, response: response)
                 }
+                .disabled(isReadOnly)
             }
             LiveComposer(engine: engine, draft: $draft, focus: composerFocus)
+                .disabled(isReadOnly)
         }
         .navigationTitle("Pi session")
         .onAppear { draft = engine.restoredDraft }
@@ -1014,6 +1081,10 @@ private struct ProjectNavigator: View {
     let cliSessions: [CLISessionRecord]
     let reopen: (URL) -> Void
     let continueCLI: (CLISessionRecord) -> Void
+    let rename: (SupervisedSessionSummary) -> Void
+    let stop: (String) -> Void
+    let resume: (String) -> Void
+    let archive: (String, Bool) -> Void
 
     private var projects: [String] {
         sessions.reduce(into: []) { result, session in
@@ -1064,10 +1135,18 @@ private struct ProjectNavigator: View {
             }
             ForEach(liveProjects, id: \.self) { projectPath in
                 let projectSessions = liveSessions.filter { $0.projectPath == projectPath }
+                let visibleSessions = projectSessions.filter { !$0.isArchived }
+                let archivedSessions = projectSessions.filter(\.isArchived)
                 Section(URL(fileURLWithPath: projectPath).lastPathComponent) {
-                    ForEach(projectSessions) { session in
-                        SupervisedSessionRow(session: session, hasPeers: projectSessions.count > 1)
-                            .tag(session.id)
+                    ForEach(visibleSessions) { session in
+                        sessionRow(session, hasPeers: projectSessions.count > 1)
+                    }
+                }
+                if !archivedSessions.isEmpty {
+                    Section("Archived · \(URL(fileURLWithPath: projectPath).lastPathComponent)") {
+                        ForEach(archivedSessions) { session in
+                            sessionRow(session, hasPeers: projectSessions.count > 1)
+                        }
                     }
                 }
             }
@@ -1095,6 +1174,23 @@ private struct ProjectNavigator: View {
             .accessibilityElement(children: .combine)
         }
         .accessibilityLabel("Projects and sessions")
+    }
+
+    private func sessionRow(_ session: SupervisedSessionSummary, hasPeers: Bool) -> some View {
+        SupervisedSessionRow(session: session, hasPeers: hasPeers)
+            .tag(session.id)
+            .contextMenu {
+                Button("Rename…") { rename(session) }
+                if session.isStopped {
+                    Button("Resume") { resume(session.id) }
+                } else {
+                    Button("Stop") { stop(session.id) }
+                }
+                Divider()
+                Button(session.isArchived ? "Unarchive" : "Archive") {
+                    archive(session.id, !session.isArchived)
+                }
+            }
     }
 }
 
@@ -1154,7 +1250,7 @@ private struct SupervisedSessionRow: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.title).lineLimit(1)
-                Text(session.state.title).font(.caption).foregroundStyle(.secondary)
+                Text(session.isStopped ? "Stopped" : session.state.title).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
             if hasPeers {
@@ -1164,7 +1260,7 @@ private struct SupervisedSessionRow: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(session.title), \(session.state.title)\(hasPeers ? ", shared project root; edits may conflict" : "")")
+        .accessibilityLabel("\(session.title), \(session.isStopped ? "Stopped" : session.state.title)\(session.isArchived ? ", archived" : "")\(hasPeers ? ", shared project root; edits may conflict" : "")")
     }
 }
 

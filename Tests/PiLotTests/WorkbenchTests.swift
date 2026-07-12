@@ -63,6 +63,34 @@ final class WorkbenchTests: XCTestCase {
         XCTAssertTrue(index.peers(of: "other").isEmpty)
     }
 
+    func testSessionLifecycleKeepsIdentityAndArchiveSeparateFromRuntimeState() {
+        var index = SupervisedSessionIndex(sessions: [
+            .init(id: "stable-id", projectPath: "/project", title: "Original", state: .running),
+        ])
+
+        index.rename(sessionID: "stable-id", title: "Renamed")
+        index.setStopped(sessionID: "stable-id", true)
+        index.setArchived(sessionID: "stable-id", true)
+
+        let session = index.session(id: "stable-id")
+        XCTAssertEqual(session?.id, "stable-id")
+        XCTAssertEqual(session?.title, "Renamed")
+        XCTAssertEqual(session?.state, .done)
+        XCTAssertEqual(session?.isStopped, true)
+        XCTAssertEqual(session?.isArchived, true)
+    }
+
+    func testWindowOwnershipAllowsOneEditorAndReadOnlyObservers() {
+        var ownership = SessionWindowOwnership()
+        let firstWindow = UUID()
+        let secondWindow = UUID()
+
+        XCTAssertEqual(ownership.access(to: "session", from: firstWindow), .owner)
+        XCTAssertEqual(ownership.access(to: "session", from: secondWindow), .observer)
+        ownership.release(window: firstWindow)
+        XCTAssertEqual(ownership.access(to: "session", from: secondWindow), .owner)
+    }
+
     func testOneEngineExitDoesNotChangeSiblingSessions() {
         var index = SupervisedSessionIndex(sessions: [
             .init(id: "failed-engine", projectPath: "/project", title: "One", state: .running),
