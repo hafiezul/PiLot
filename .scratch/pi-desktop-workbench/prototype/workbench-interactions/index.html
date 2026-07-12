@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PiLot workbench interaction prototype</title>
+  <!-- PROTOTYPE — three workbench variants, switchable via ?variant=A|B|C. Delete after the ticket resolves. -->
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: oklch(0.975 0.004 250); --surface: oklch(1 0 0); --sidebar: oklch(0.945 0.008 250);
+      --ink: oklch(0.22 0.012 250); --muted: oklch(0.46 0.018 250); --line: oklch(0.84 0.01 250);
+      --accent: oklch(0.58 0.19 252); --accent-soft: oklch(0.91 0.045 252); --danger: oklch(0.53 0.19 25);
+      --warning: oklch(0.64 0.14 75); --success: oklch(0.52 0.13 150); --r: 9px;
+      font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; height: 100vh; overflow: hidden; color: var(--ink); background: var(--bg); }
+    button, textarea { font: inherit; color: inherit; }
+    button { border: 0; background: none; }
+    button:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in oklch, var(--accent), transparent 50%); outline-offset: 1px; }
+    .app { height: 100vh; display: flex; flex-direction: column; }
+    .titlebar { height: 42px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 14px 0 76px; border-bottom: 1px solid var(--line); background: color-mix(in oklch, var(--surface), transparent 10%); -webkit-app-region: drag; }
+    .titlebar strong { font-size: 13px; }
+    .titlebar .trail { margin-left: auto; color: var(--muted); }
+    .workspace { min-height: 0; flex: 1; display: flex; }
+    .pane { min-width: 0; min-height: 0; }
+    .sidebar { width: 244px; flex: none; overflow: auto; padding: 10px; background: var(--sidebar); border-right: 1px solid var(--line); }
+    .section-label { margin: 12px 8px 5px; color: var(--muted); font-size: 11px; font-weight: 600; }
+    .row { width: 100%; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; text-align: left; cursor: default; }
+    .row:hover { background: color-mix(in oklch, var(--ink), transparent 94%); }
+    .row.selected { background: var(--accent-soft); color: color-mix(in oklch, var(--accent), black 25%); }
+    .row-copy { min-width: 0; flex: 1; }
+    .row-copy b, .row-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-copy b { font-size: 12px; font-weight: 550; }
+    .row-copy small { color: var(--muted); }
+    .status { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+    .running { background: var(--accent); } .waiting { background: var(--warning); } .failed { background: var(--danger); } .done { background: var(--success); }
+    .badge { padding: 2px 7px; border-radius: 999px; color: var(--muted); background: color-mix(in oklch, var(--ink), transparent 93%); font-size: 11px; white-space: nowrap; }
+    .badge.attn { color: oklch(0.34 0.1 65); background: oklch(0.92 0.07 80); }
+    .main { min-width: 420px; flex: 1; display: flex; flex-direction: column; background: var(--surface); }
+    .session-head { min-height: 54px; flex: none; display: flex; align-items: center; gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--line); }
+    .session-head h1 { margin: 0; font-size: 14px; }
+    .session-head p { margin: 1px 0 0; color: var(--muted); font-size: 11px; }
+    .session-head .actions { margin-left: auto; display: flex; gap: 5px; }
+    .control { padding: 6px 9px; border-radius: 6px; background: color-mix(in oklch, var(--ink), transparent 94%); }
+    .control:hover { background: color-mix(in oklch, var(--ink), transparent 89%); }
+    .primary { color: white; background: var(--accent); }
+    .timeline { flex: 1; overflow: auto; padding: 20px max(22px, calc((100% - 760px)/2)); }
+    .message { max-width: 72ch; margin: 0 0 18px; }
+    .message.user { margin-left: auto; width: fit-content; max-width: min(72ch, 82%); padding: 9px 12px; border-radius: var(--r); background: var(--accent-soft); }
+    .message p { margin: 0 0 8px; }
+    .activity { margin: 7px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .activity summary { padding: 8px 3px; cursor: default; list-style: none; color: var(--muted); }
+    .activity summary::before { content: "›"; display: inline-block; width: 16px; }
+    .activity[open] summary::before { transform: rotate(90deg); }
+    pre { margin: 0 0 10px 19px; overflow: auto; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+    .approval { margin-top: 12px; padding: 12px; border-radius: var(--r); background: oklch(0.965 0.025 80); border: 1px solid oklch(0.83 0.06 80); }
+    .approval strong { display: block; }
+    .approval .buttons { display: flex; gap: 6px; margin-top: 10px; }
+    .main > .approval { flex: none; margin: 0 16px 8px; }
+    .composer { flex: none; margin: 0 16px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
+    .composer textarea { display: block; width: 100%; min-height: 56px; resize: none; border: 0; padding: 11px; background: transparent; }
+    .compose-tools { display: flex; align-items: center; padding: 6px; border-top: 1px solid var(--line); color: var(--muted); }
+    .compose-tools .send { margin-left: auto; }
+    .inspector { width: 340px; flex: none; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--bg); }
+    .tabs { display: flex; gap: 3px; padding: 9px; border-bottom: 1px solid var(--line); }
+    .tabs button { flex: 1; padding: 6px; border-radius: 6px; color: var(--muted); }
+    .tabs button.selected { color: var(--ink); background: var(--surface); }
+    .files { padding: 8px; border-bottom: 1px solid var(--line); }
+    .file { display: flex; padding: 6px; border-radius: 6px; }
+    .file.selected { background: var(--accent-soft); }
+    .delta { margin-left: auto; font: 11px ui-monospace, monospace; color: var(--success); }
+    .diff { flex: 1; overflow: auto; padding: 10px; font: 11px/1.5 ui-monospace, monospace; white-space: pre; }
+    .add { background: oklch(0.92 0.045 150); } .remove { background: oklch(0.93 0.04 25); }
+    .warning-strip { padding: 7px 14px; background: oklch(0.94 0.045 80); border-bottom: 1px solid oklch(0.84 0.055 80); font-size: 11px; }
+
+    /* B: supervision-first control board */
+    .board { flex: 1; overflow: auto; padding: 16px 18px 90px; }
+    .board h2 { margin: 2px 0 12px; font-size: 16px; }
+    .attention-list { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 14px; }
+    .attention-item { min-width: 260px; text-align: left; padding: 11px; border-radius: var(--r); background: var(--surface); box-shadow: 0 2px 7px color-mix(in oklch, var(--ink), transparent 88%); }
+    .attention-item b, .attention-item span { display: block; }
+    .attention-item span { margin-top: 3px; color: var(--muted); }
+    .session-table { width: 100%; border-collapse: collapse; background: var(--surface); }
+    .session-table th { padding: 8px 10px; text-align: left; color: var(--muted); font-size: 11px; font-weight: 500; border-bottom: 1px solid var(--line); }
+    .session-table td { padding: 10px; border-bottom: 1px solid var(--line); }
+    .session-table tr[data-session] { cursor: default; }
+    .session-table tr[data-session]:hover, .session-table tr.selected { background: var(--accent-soft); }
+    .focus-drawer { position: absolute; left: 262px; right: 18px; bottom: 18px; height: 42%; display: flex; background: var(--surface); border-radius: 12px; box-shadow: 0 5px 8px color-mix(in oklch, var(--ink), transparent 78%); overflow: hidden; }
+    .focus-summary { width: 38%; padding: 14px; border-right: 1px solid var(--line); overflow: auto; }
+    .focus-summary h3 { margin: 0 0 4px; }
+    .focus-transcript { flex: 1; padding: 14px; overflow: auto; }
+
+    /* C: session-first tabs and bottom inspector */
+    .tabstrip { display: flex; overflow-x: auto; background: var(--sidebar); border-bottom: 1px solid var(--line); }
+    .session-tab { min-width: 190px; padding: 9px 12px; display: flex; gap: 8px; align-items: center; border-right: 1px solid var(--line); text-align: left; }
+    .session-tab.selected { background: var(--surface); }
+    .focus-layout { flex: 1; min-height: 0; display: flex; }
+    .activity-rail { width: 190px; padding: 10px; overflow: auto; border-right: 1px solid var(--line); background: var(--bg); }
+    .rail-step { padding: 8px 5px; color: var(--muted); border-bottom: 1px solid var(--line); }
+    .bottom-inspector { height: 210px; flex: none; display: flex; border-top: 1px solid var(--line); background: var(--bg); }
+    .bottom-inspector .files { width: 260px; border: 0; border-right: 1px solid var(--line); }
+
+    .switcher { position: fixed; z-index: 10; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; color: white; background: oklch(0.18 0.015 250); box-shadow: 0 4px 8px oklch(0 0 0 / .25); }
+    .switcher button { width: 30px; height: 30px; color: white; border-radius: 50%; }
+    .switcher button:hover { background: oklch(1 0 0 / .14); }
+    .switcher output { min-width: 210px; text-align: center; font-size: 12px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+    @media (max-width: 1000px) { .inspector { width: 290px; } .sidebar { width: 210px; } }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: oklch(0.19 0.009 250); --surface: oklch(0.235 0.01 250); --sidebar: oklch(0.16 0.009 250); --ink: oklch(0.91 0.008 250); --muted: oklch(0.68 0.015 250); --line: oklch(0.34 0.012 250); --accent-soft: oklch(0.34 0.08 252); }
+      .approval, .warning-strip { color: oklch(0.88 0.05 80); }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main id="root"></main>
+  <nav class="switcher" aria-label="Prototype variants">
+    <button id="prev" aria-label="Previous variant">←</button>
+    <output id="variant-label" aria-live="polite"></output>
+    <button id="next" aria-label="Next variant">→</button>
+  </nav>
+<script>
+const sessions = [
+  {id:'auth', project:'PiLot', title:'Repair auth handoff', state:'Waiting for approval', cls:'waiting', detail:'Allow xattr inspection', age:'now'},
+  {id:'tests', project:'PiLot', title:'Check migration tests', state:'Failed', cls:'failed', detail:'Process exited with status 1', age:'12m'},
+  {id:'recovery', project:'PiLot', title:'Specify recovery states', state:'Running', cls:'running', detail:'Reading Pi RPC docs', age:'2m'},
+  {id:'docs', project:'Cavecrew', title:'Refresh extension docs', state:'Done', cls:'done', detail:'3 files changed', age:'8m'}
+];
+let selected = 'auth', inspectorOpen = true;
+const names = {A:'Navigator + inspector', B:'Supervision board', C:'Focused session tabs'};
+const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function current(){ return sessions.find(s => s.id === selected) || sessions[0]; }
+function titlebar(name){ return `<header class="titlebar"><strong>PiLot</strong><span>›</span><span>${name}</span><span class="trail">Bundled Pi 0.80.6</span></header>`; }
+function sessionRows(){ return sessions.filter(s=>s.project==='PiLot').map(s => `<button class="row ${s.id===selected?'selected':''}" data-session="${s.id}" aria-label="${s.title}, ${s.state}"><i class="status ${s.cls}"></i><span class="row-copy"><b>${s.title}</b><small>${s.state}</small></span>${s.state.startsWith('Waiting')?'<span class="badge attn">Needs you</span>':''}</button>`).join(''); }
+function sidebar(){ return `<aside class="sidebar pane" aria-label="Projects and sessions"><button class="row"><span>＋</span><span class="row-copy"><b>New session</b></span></button><div class="section-label">PiLot · 3 sessions</div>${sessionRows()}<div class="section-label">Cavecrew · 1 session</div>${sessions.filter(s=>s.project==='Cavecrew').map(s=>`<button class="row" data-session="${s.id}"><i class="status ${s.cls}"></i><span class="row-copy"><b>${s.title}</b><small>${s.state}</small></span></button>`).join('')}</aside>`; }
+function approval(){ return `<section class="approval" aria-label="Approval needed"><strong>Allow shell command?</strong><span>Run <code>xattr -l /Applications/PiLot.app</code> in project “PiLot”.</span><div class="buttons"><button class="control primary" data-resolve>Allow once</button><button class="control">Decline</button><button class="control">Stop session</button></div></section>`; }
+function conversation(){ return `<div class="timeline"><article class="message user">Check why the unsigned app handoff fails and propose the smallest safe fix.</article><article class="message"><p>I found the installation guidance and am checking whether the quarantine attribute is present before changing anything.</p><details class="activity" open><summary>Read · docs/install.md <span class="badge">Succeeded</span></summary><pre>Unsigned builds require explicit user trust…</pre></details><details class="activity"><summary>Bash · xattr inspection <span class="badge">Waiting</span></summary><pre>xattr -l /Applications/PiLot.app</pre></details></article></div>`; }
+function composer(){ return `<section class="composer" aria-label="Message composer"><label class="sr-only" for="prompt">Message Pi</label><textarea id="prompt" placeholder="Message Pi…"></textarea><div class="compose-tools"><button class="control">＋ Context</button><button class="control">Claude Sonnet 4</button><button class="control">High thinking</button><button class="control primary send">Send</button></div></section>`; }
+function inspector(cls='inspector'){ return `<aside class="${cls} pane" aria-label="Changes inspector"><div class="tabs"><button class="selected">Last turn</button><button>Workspace</button></div><div class="files"><div class="file selected"><span>docs/install.md</span><span class="delta">+8 −2</span></div><div class="file"><span>README.md</span><span class="delta">+2</span></div></div><div class="diff" aria-label="Read-only diff"><span class="remove">− Open System Settings manually</span>\n<span class="add">+ Verify the downloaded DMG path.</span>\n<span class="add">+ Run xattr only for that exact path.</span>\n\nNo changes can be edited here.</div></aside>`; }
+function variantA(){ const s=current(); return `<div class="app">${titlebar(s.project)}<div class="workspace">${sidebar()}<section class="main pane"><header class="session-head"><div><h1>${s.title}</h1><p>${s.state} · project root shared with 2 sessions</p></div><div class="actions"><button class="control">Open in Editor</button><button class="control" data-toggle-inspector>${inspectorOpen?'Hide':'Show'} Changes</button><button class="control">Stop</button></div></header><div class="warning-strip">Shared project root · edits from 3 sessions may conflict. PiLot does not isolate workspaces.</div>${conversation()}${s.id==='auth'?approval():''}${composer()}</section>${inspectorOpen?inspector():''}</div></div>`; }
+function variantB(){ const s=current(); return `<div class="app">${titlebar('Supervision')}<div class="workspace">${sidebar()}<section class="board pane"><h2>Needs your attention</h2><div class="attention-list"><button class="attention-item" data-session="auth"><b>Repair auth handoff</b><span>Approve xattr inspection</span></button><button class="attention-item" data-session="tests"><b>Check migration tests</b><span>Review failed process</span></button></div><h2>All active work</h2><table class="session-table"><thead><tr><th>Session</th><th>Status</th><th>Current activity</th><th>Updated</th></tr></thead><tbody>${sessions.map(x=>`<tr data-session="${x.id}" class="${x.id===selected?'selected':''}"><td><b>${x.title}</b><br><small>${x.project}</small></td><td><i class="status ${x.cls}" style="display:inline-block;margin-right:7px"></i>${x.state}</td><td>${x.detail}</td><td>${x.age}</td></tr>`).join('')}</tbody></table><section class="focus-drawer" aria-label="Selected session"><div class="focus-summary"><h3>${s.title}</h3><p>${s.project} · ${s.state}</p>${s.id==='auth'?approval():'<p>'+s.detail+'</p>'}</div><div class="focus-transcript"><b>Latest narrative</b><p>I found the installation guidance and am checking the current state before changing anything.</p><details class="activity"><summary>Show 2 activities</summary><pre>Read docs/install.md\nInspect project metadata</pre></details></div></section></section></div></div>`; }
+function variantC(){ const s=current(); return `<div class="app">${titlebar(s.project)}<nav class="tabstrip" aria-label="Open sessions">${sessions.map(x=>`<button class="session-tab ${x.id===selected?'selected':''}" data-session="${x.id}"><i class="status ${x.cls}"></i><span class="row-copy"><b>${x.title}</b><small>${x.state}</small></span></button>`).join('')}</nav><div class="focus-layout"><aside class="activity-rail" aria-label="Activity outline"><div class="section-label">Current turn</div><div class="rail-step">Prompt</div><div class="rail-step">✓ Read · install.md</div><div class="rail-step">● Bash · waiting</div><div class="rail-step">Changes · 2 files</div></aside><section class="main pane"><header class="session-head"><div><h1>${s.title}</h1><p>${s.state} · PiLot</p></div><div class="actions"><button class="control">Stop</button></div></header>${conversation()}${composer()}</section></div><section class="bottom-inspector" aria-label="Changes drawer"><div class="files"><b>Last-turn changes</b><div class="file selected">docs/install.md <span class="delta">+8 −2</span></div><div class="file">README.md <span class="delta">+2</span></div></div><div class="diff"><span class="remove">− Open System Settings manually</span>\n<span class="add">+ Verify the downloaded DMG path.</span>\n<span class="add">+ Run xattr only for that exact path.</span></div></section></div>`; }
+function variant(){ const v=new URLSearchParams(location.search).get('variant')?.toUpperCase(); return names[v]?v:'A'; }
+function render(){ const v=variant(); document.getElementById('root').innerHTML=({A:variantA,B:variantB,C:variantC})[v](); document.getElementById('variant-label').textContent=`${v} — ${names[v]}`; document.querySelectorAll('[data-session]').forEach(el=>el.addEventListener('click',()=>{ selected=el.dataset.session; render(); })); document.querySelectorAll('[data-resolve]').forEach(el=>el.addEventListener('click',()=>{ sessions[0].state='Running'; sessions[0].cls='running'; sessions[0].detail='Continuing after approval'; render(); })); document.querySelectorAll('[data-toggle-inspector]').forEach(el=>el.addEventListener('click',()=>{ inspectorOpen=!inspectorOpen; render(); })); }
+function cycle(step){ const keys=Object.keys(names), i=keys.indexOf(variant()), v=keys[(i+step+keys.length)%keys.length]; const u=new URL(location); u.searchParams.set('variant',v); history.replaceState({},'',u); render(); }
+document.getElementById('prev').addEventListener('click',()=>cycle(-1));
+document.getElementById('next').addEventListener('click',()=>cycle(1));
+addEventListener('keydown',e=>{ if(!['ArrowLeft','ArrowRight'].includes(e.key)||/INPUT|TEXTAREA/.test(e.target.tagName)||e.target.isContentEditable)return; cycle(e.key==='ArrowRight'?1:-1); });
+addEventListener('popstate',render); render();
+</script>
+</body>
+</html>

@@ -25,10 +25,10 @@ A standalone, decision-ready product, UX, and technical specification for an uns
 - [Choose Pi engine sourcing and version strategy](issues/04-decide-pi-engine-strategy.md) — PiLot bundles a release-pinned Pi RPC engine, isolates each live session in its own process and store, forks CLI sessions by default, and gates unsafe shared-state operations on version drift.
 - [Define existing setup compatibility contract](issues/05-define-compatibility-contract.md) — PiLot reuses compatible trusted Pi setup by default, guards shared state across version drift, degrades unsupported extension presentation explicitly, and keeps native presentation authoritative.
 - [Define MVP workflows and boundaries](issues/06-define-mvp-workflows.md) — The MVP runs and supervises concurrent coding sessions through rich prompting, native Pi gates, structured activity, and read-only diffs while leaving editing, Git delivery, broad TUI parity, and configuration management external.
+- [Prototype native workbench interactions](issues/07-prototype-workbench-interactions.md) — A project/session navigator with a focused timeline, pinned interruptions, stable composer, attention-first ordering, and toggleable trailing diff inspector best supports the MVP workflows.
 
 ## Not yet specified
 
-- Additional prototype variants needed after the first workbench interaction model is tested with the product owner.
 
 ## Out of scope
 
