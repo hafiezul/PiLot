@@ -32,10 +32,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Launch the bundled Pi engine; Build the native workbench shell.
 
-- [ ] Open panel, drag/drop, and Recents resolve the same directory to one canonical project identity.
-- [ ] An unknown project receives a native trust explanation before executable project resources load.
-- [ ] Declining trust opens only the safe read-only surface.
-- [ ] Reopening restores navigation state without reconstructing in-flight work from UI state.
+- [x] Open panel, drag/drop, and Recents resolve the same directory to one canonical project identity.
+- [x] An unknown project receives a native trust explanation before executable project resources load.
+- [x] Declining trust opens only the safe read-only surface.
+- [x] Reopening restores navigation state without reconstructing in-flight work from UI state.
 
 ## Complete one durable coding run
 

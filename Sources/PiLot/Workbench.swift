@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Fixture model
@@ -189,6 +190,7 @@ final class WorkbenchStore: ObservableObject {
 enum WorkbenchFocus: Hashable { case sidebar, composer }
 
 struct WorkbenchActions {
+    let openProject: () -> Void
     let newSession: () -> Void
     let focusSidebar: () -> Void
     let focusComposer: () -> Void
@@ -209,6 +211,7 @@ extension FocusedValues {
 
 struct WorkbenchView: View {
     @ObservedObject var engine: PiEngine
+    @ObservedObject var projects: ProjectStore
     @StateObject private var store = WorkbenchStore()
     @SceneStorage("selectedSession") private var selectedSessionID = "approval"
     @SceneStorage("inspectorPresented") private var inspectorPresented = true
@@ -228,13 +231,16 @@ struct WorkbenchView: View {
                 ProjectNavigator(
                     sessions: store.sessions,
                     selection: $selectedSessionID,
-                    engineStatus: engine.status
+                    engineStatus: engine.status,
+                    recents: projects.index.recents,
+                    reopen: { url in Task { await requestOpen(url) } }
                 )
                 .focused($focus, equals: .sidebar)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 245, max: 320)
             } detail: {
                 SessionDetail(
                     session: selectedSession,
+                    project: projects.activeProject,
                     draft: $draft,
                     composerFocus: $focus,
                     showInspector: { inspectorPresented.toggle() },
@@ -255,7 +261,37 @@ struct WorkbenchView: View {
             .onAppear { adaptInspector(to: geometry.size.width) }
             .onChange(of: geometry.size.width) { _, width in adaptInspector(to: width) }
         }
+        .task {
+            if let project = projects.activeProject { await requestOpen(project.url) }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first else { return false }
+            Task { await requestOpen(url) }
+            return true
+        }
+        .onOpenURL { url in Task { await requestOpen(url) } }
+        .onChange(of: selectedSessionID) { _, _ in saveNavigation() }
+        .onChange(of: inspectorPresented) { _, _ in saveNavigation() }
+        .sheet(isPresented: Binding(
+            get: { projects.pendingTrustURL != nil },
+            set: { if !$0 { projects.pendingTrustURL = nil } }
+        )) {
+            if let url = projects.pendingTrustURL {
+                ProjectTrustSheet(
+                    project: url,
+                    trust: { Task { await resolveTrust(url, trusted: true) } },
+                    decline: { Task { await resolveTrust(url, trusted: false) } }
+                )
+            }
+        }
+        .alert("Project could not be opened", isPresented: Binding(
+            get: { projects.errorMessage != nil },
+            set: { if !$0 { projects.errorMessage = nil } }
+        )) { Button("OK") { projects.errorMessage = nil } } message: {
+            Text(projects.errorMessage ?? "Unknown error")
+        }
         .focusedSceneValue(\.workbenchActions, WorkbenchActions(
+            openProject: chooseProject,
             newSession: { selectedSessionID = store.newSession(); focus = .composer },
             focusSidebar: { focus = .sidebar },
             focusComposer: { focus = .composer },
@@ -269,12 +305,63 @@ struct WorkbenchView: View {
         if isNarrow && !wasNarrow { inspectorPresented = false }
         wasNarrow = isNarrow
     }
+
+    private func chooseProject() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open Project"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await requestOpen(url) }
+    }
+
+    private func requestOpen(_ url: URL) async {
+        guard let resources = Bundle.main.resourceURL,
+              let result = await projects.inspect(url, resources: resources)
+        else { return }
+        switch result.status {
+        case .unknown:
+            break
+        case .trusted, .notRequired:
+            finishOpen(URL(fileURLWithPath: result.path, isDirectory: true), access: .trusted, resources: resources)
+        case .declined:
+            finishOpen(URL(fileURLWithPath: result.path, isDirectory: true), access: .readOnly, resources: resources)
+        }
+    }
+
+    private func resolveTrust(_ url: URL, trusted: Bool) async {
+        guard let resources = Bundle.main.resourceURL,
+              let project = await projects.saveTrust(url, trusted: trusted, resources: resources)
+        else { return }
+        restoreNavigation(project)
+        if trusted { engine.openProject(project.url, resources: resources) }
+        else { engine.openSafeSurface(resources: resources) }
+    }
+
+    private func finishOpen(_ url: URL, access: ProjectRecord.Access, resources: URL) {
+        guard let project = projects.open(url, access: access) else { return }
+        restoreNavigation(project)
+        if access == .trusted { engine.openProject(project.url, resources: resources) }
+        else { engine.openSafeSurface(resources: resources) }
+    }
+
+    private func restoreNavigation(_ project: ProjectRecord) {
+        selectedSessionID = store.session(id: project.selectedSessionID) == nil ? "approval" : project.selectedSessionID
+        inspectorPresented = project.inspectorPresented
+    }
+
+    private func saveNavigation() {
+        projects.updateNavigation(selectedSessionID: selectedSessionID, inspectorPresented: inspectorPresented)
+    }
 }
 
 private struct ProjectNavigator: View {
     let sessions: [WorkbenchSession]
     @Binding var selection: String
     let engineStatus: String
+    let recents: [ProjectRecord]
+    let reopen: (URL) -> Void
 
     private var projects: [String] {
         sessions.reduce(into: []) { result, session in
@@ -284,6 +371,17 @@ private struct ProjectNavigator: View {
 
     var body: some View {
         List(selection: $selection) {
+            if !recents.isEmpty {
+                Section("Recents") {
+                    ForEach(recents) { project in
+                        Button { reopen(project.url) } label: {
+                            Label(project.name, systemImage: project.access == .trusted ? "folder" : "lock.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Reopen \(project.name), \(project.access == .trusted ? "trusted" : "read only")")
+                    }
+                }
+            }
             ForEach(projects, id: \.self) { project in
                 Section(project) {
                     ForEach(sessions.filter { $0.project == project }) { session in
@@ -339,6 +437,7 @@ private struct SessionRow: View {
 
 private struct SessionDetail: View {
     let session: WorkbenchSession
+    let project: ProjectRecord?
     @Binding var draft: String
     let composerFocus: FocusState<WorkbenchFocus?>.Binding
     let showInspector: () -> Void
@@ -351,6 +450,14 @@ private struct SessionDetail: View {
     var body: some View {
         VStack(spacing: 0) {
             sessionHeader
+            if project?.access == .readOnly {
+                Label("Read-only project — project settings and executable resources are not loaded.", systemImage: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                    .background(.quaternary)
+            }
             if session.project == "PiLot" {
                 Label("Shared project root — edits from these fixture sessions may conflict.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -383,7 +490,13 @@ private struct SessionDetail: View {
             if let interruption = session.interruption {
                 InterruptionView(interruption: interruption, answer: answer, decline: decline, stop: stop)
             }
-            Composer(draft: $draft, focus: composerFocus, isRunning: session.state == .running, send: send)
+            Composer(
+                draft: $draft,
+                focus: composerFocus,
+                isRunning: session.state == .running,
+                isReadOnly: project?.access == .readOnly,
+                send: send
+            )
         }
         .navigationTitle(session.title)
     }
@@ -502,10 +615,43 @@ private struct InterruptionView: View {
     }
 }
 
+private struct ProjectTrustSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let project: URL
+    let trust: () -> Void
+    let decline: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Trust this project?", systemImage: "hand.raised.fill")
+                .font(.title2.bold())
+            Text(project.path)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+            Text("Trusting allows Pi to load this project's settings and executable resources, install missing project packages, and run extensions with your normal user permissions. PiLot is not a sandbox.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Choose Read Only to open the safe surface without loading those resources.")
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Open Read Only") { decline() }
+                Button("Trust and Open") { trust() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+        .interactiveDismissDisabled()
+        .accessibilityElement(children: .contain)
+    }
+}
+
 private struct Composer: View {
     @Binding var draft: String
     let focus: FocusState<WorkbenchFocus?>.Binding
     let isRunning: Bool
+    let isReadOnly: Bool
     let send: () -> Void
 
     var body: some View {
@@ -516,7 +662,8 @@ private struct Composer: View {
                 .focused(focus, equals: .composer)
                 .frame(minHeight: 54, maxHeight: 120)
                 .padding(6)
-                .accessibilityLabel("Message Pi")
+                .accessibilityLabel(isReadOnly ? "Message Pi, unavailable in read-only mode" : "Message Pi")
+                .disabled(isReadOnly)
                 .onKeyPress(keys: [.return]) { press in
                     guard !press.modifiers.contains(.shift) else { return .ignored }
                     send()
@@ -525,12 +672,15 @@ private struct Composer: View {
             Divider()
             HStack(spacing: 8) {
                 Button("Context", systemImage: "plus") {}
+                    .disabled(isReadOnly)
                 Menu("Claude Sonnet 4") { Button("Claude Sonnet 4") {} }
+                    .disabled(isReadOnly)
                 Menu("High thinking") { Button("High") {} }
+                    .disabled(isReadOnly)
                 Spacer()
                 Button(isRunning ? "Follow up" : "Send", systemImage: "arrow.up", action: send)
                     .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isReadOnly || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .keyboardShortcut(.return, modifiers: [])
             }
             .buttonStyle(.borderless)

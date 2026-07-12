@@ -3,10 +3,11 @@ import SwiftUI
 @main
 struct PiLotApp: App {
     @StateObject private var engine = PiEngine()
+    @StateObject private var projects = ProjectStore()
 
     var body: some Scene {
         WindowGroup("PiLot", id: "workbench") {
-            WorkbenchView(engine: engine)
+            WorkbenchView(engine: engine, projects: projects)
                 .frame(minWidth: 760, minHeight: 560)
                 .task { startEngine() }
         }
@@ -41,9 +42,9 @@ private struct PiLotCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Window") { openWindow(id: "workbench") }
                 .keyboardShortcut("n")
-            Button("Open Project…") {}
+            Button("Open Project…") { actions?.openProject() }
                 .keyboardShortcut("o")
-                .disabled(true)
+                .disabled(actions == nil)
             Divider()
             Button("New Session") { actions?.newSession() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])

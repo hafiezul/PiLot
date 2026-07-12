@@ -59,8 +59,26 @@ final class PiEngine: ObservableObject {
 
     private var process: Process?
     private var decoder = LFJSONDecoder()
+    private var launchProject: URL?
 
     func start(resources: URL) {
+        launch(resources: resources, project: nil)
+    }
+
+    func openProject(_ project: URL, resources: URL) {
+        let canonical = project.standardizedFileURL.resolvingSymlinksInPath()
+        guard launchProject != canonical else { return }
+        stop()
+        launch(resources: resources, project: canonical)
+    }
+
+    func openSafeSurface(resources: URL) {
+        guard launchProject != nil else { return }
+        stop()
+        launch(resources: resources, project: nil)
+    }
+
+    private func launch(resources: URL, project: URL?) {
         guard process == nil else { return }
         let layout = RuntimeLayout(root: resources.appending(path: "PiEngine"), architecture: RuntimeLayout.currentArchitecture)
         guard FileManager.default.isExecutableFile(atPath: layout.node.path) else {
@@ -75,11 +93,11 @@ final class PiEngine: ObservableObject {
         let output = Pipe()
         let errors = Pipe()
         task.executableURL = layout.node
-        task.arguments = [
-            layout.cli.path, "--mode", "rpc", "--no-session", "--no-approve", "--offline",
-            "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
-        ]
-        task.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        task.arguments = project == nil
+            ? [layout.cli.path, "--mode", "rpc", "--no-session", "--no-approve", "--offline",
+               "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"]
+            : [layout.cli.path, "--mode", "rpc", "--no-session", "--approve", "--offline"]
+        task.currentDirectoryURL = project ?? FileManager.default.homeDirectoryForCurrentUser
         var environment = ProcessInfo.processInfo.environment
         environment.keys.filter { $0.hasPrefix("DYLD_") || $0 == "NODE_OPTIONS" || $0 == "NODE_PATH" }.forEach {
             environment.removeValue(forKey: $0)
@@ -106,6 +124,8 @@ final class PiEngine: ObservableObject {
         do {
             try task.run()
             process = task
+            launchProject = project
+            status = project.map { "Loading \($0.lastPathComponent)…" } ?? "Starting bundled Pi engine…"
             try input.fileHandleForWriting.write(contentsOf: Data("{\"id\":\"startup\",\"type\":\"get_state\"}\n".utf8))
         } catch {
             fail(error)
@@ -129,6 +149,16 @@ final class PiEngine: ObservableObject {
     private func fail(_ error: Error) {
         isReady = false
         status = error.localizedDescription
+    }
+
+    private func stop() {
+        (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        process?.terminationHandler = nil
+        process?.terminate()
+        process = nil
+        launchProject = nil
+        decoder = LFJSONDecoder()
+        isReady = false
     }
 
     deinit { process?.terminate() }
