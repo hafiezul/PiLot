@@ -16,6 +16,14 @@ _Avoid_: Embedded TUI, terminal scraping
 A developer who already uses Pi CLI and may have authentication, providers, models, settings, extensions, skills, prompts, and session history configured.
 _Avoid_: Generic developer, new user
 
+**Project**:
+A local directory opened in PiLot that groups the agent sessions working against it.
+_Avoid_: Workspace, repository
+
+**Session**:
+A resumable Pi-backed unit of coding work associated with one project.
+_Avoid_: Chat, thread, task
+
 **Existing setup compatibility contract**:
 PiLot's explicit per-resource promise for what existing Pi state it reuses, adapts, degrades, blocks, or does not support.
 _Avoid_: Full Pi compatibility, configuration import
