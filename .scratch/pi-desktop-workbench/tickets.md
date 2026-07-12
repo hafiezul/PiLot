@@ -78,10 +78,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Recover an interrupted session.
 
-- [ ] CLI sessions show their source and compatibility state without being modified.
-- [ ] Continue copies, validates, and migrates staged data before atomic publication.
-- [ ] The resulting PiLot session has a new identity, writer lease, controller, process, and session file.
-- [ ] Failed continuation publishes no usable session and retains a recovery copy with retry, export, and salvage choices.
+- [x] CLI sessions show their source and compatibility state without being modified.
+- [x] Continue copies, validates, and migrates staged data before atomic publication.
+- [x] The resulting PiLot session has a new identity, writer lease, controller, process, and session file.
+- [x] Failed continuation publishes no usable session and retains a recovery copy with retry, export, and salvage choices.
 
 ## Send rich project context
 

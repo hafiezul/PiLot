@@ -220,6 +220,7 @@ struct WorkbenchView: View {
     @State private var inspectorScope = "Last turn"
     @State private var selectedFile = "docs/install.md"
     @State private var wasNarrow = false
+    @State private var pendingCLISession: CLISessionRecord?
     @FocusState private var focus: WorkbenchFocus?
 
     private var selectedSession: WorkbenchSession {
@@ -241,7 +242,9 @@ struct WorkbenchView: View {
                     engineStatus: supervisor.runtime.status,
                     recents: projects.index.recents,
                     liveSessions: supervisor.sortedSessions,
-                    reopen: { url in Task { await requestOpen(url) } }
+                    cliSessions: supervisor.cliSessions,
+                    reopen: { url in Task { await requestOpen(url) } },
+                    continueCLI: continueCLISession
                 )
                 .focused($focus, equals: .sidebar)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 245, max: 320)
@@ -281,6 +284,7 @@ struct WorkbenchView: View {
             .onChange(of: geometry.size.width) { _, width in adaptInspector(to: width) }
         }
         .task {
+            supervisor.refreshCLIHistory()
             if let project = activeProject { await requestOpen(project.url) }
         }
         .dropDestination(for: URL.self) { urls, _ in
@@ -310,6 +314,26 @@ struct WorkbenchView: View {
         )) { Button("OK") { projects.errorMessage = nil } } message: {
             Text(projects.errorMessage ?? "Unknown error")
         }
+        .alert("CLI session fork failed", isPresented: Binding(
+            get: { supervisor.cliContinuationFailure != nil },
+            set: { if !$0 { supervisor.cliContinuationFailure = nil } }
+        )) {
+            Button("Retry") {
+                if let session = pendingCLISession { continueCLISession(session) }
+            }
+            Button("Export Copy…") {
+                if let failure = supervisor.cliContinuationFailure { exportRecoveryCopy(failure.recoveryCopy) }
+            }
+            Button("Salvage Verified Entries") {
+                guard let session = pendingCLISession, let failure = supervisor.cliContinuationFailure else { return }
+                salvageCLISession(session, failure: failure)
+            }
+            Button("Cancel", role: .cancel) { supervisor.cliContinuationFailure = nil }
+        } message: {
+            if let failure = supervisor.cliContinuationFailure {
+                Text("\(failure.localizedDescription) \(failure.salvageSummary) Recovery copy: \(failure.recoveryCopy.path)")
+            }
+        }
         .focusedSceneValue(\.workbenchActions, WorkbenchActions(
             openProject: chooseProject,
             newSession: {
@@ -328,6 +352,43 @@ struct WorkbenchView: View {
                 else { store.stop(selectedSessionID) }
             }
         ))
+    }
+
+    private func continueCLISession(_ session: CLISessionRecord) {
+        guard let project = activeProject, project.access == .trusted,
+              let resources = Bundle.main.resourceURL else { return }
+        pendingCLISession = session
+        supervisor.cliContinuationFailure = nil
+        Task {
+            if let id = await supervisor.continueCLISession(session, project: project.url, resources: resources) {
+                selectedSessionID = id
+                pendingCLISession = nil
+            }
+        }
+    }
+
+    private func salvageCLISession(_ session: CLISessionRecord, failure: CLISessionContinuationFailure) {
+        guard let project = activeProject, project.access == .trusted,
+              let resources = Bundle.main.resourceURL else { return }
+        supervisor.cliContinuationFailure = nil
+        Task {
+            if let id = await supervisor.salvageCLISession(session, failure: failure, project: project.url, resources: resources) {
+                selectedSessionID = id
+                pendingCLISession = nil
+            }
+        }
+    }
+
+    private func exportRecoveryCopy(_ source: URL) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = source.lastPathComponent
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            try Data(contentsOf: source).write(to: destination, options: .atomic)
+            supervisor.cliContinuationFailure = nil
+        } catch {
+            projects.errorMessage = "Recovery copy could not be exported: \(error.localizedDescription)"
+        }
     }
 
     private func adaptInspector(to width: CGFloat) {
@@ -615,7 +676,9 @@ private struct ProjectNavigator: View {
     let engineStatus: String
     let recents: [ProjectRecord]
     let liveSessions: [SupervisedSessionSummary]
+    let cliSessions: [CLISessionRecord]
     let reopen: (URL) -> Void
+    let continueCLI: (CLISessionRecord) -> Void
 
     private var projects: [String] {
         sessions.reduce(into: []) { result, session in
@@ -639,6 +702,28 @@ private struct ProjectNavigator: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Reopen \(project.name), \(project.access == .trusted ? "trusted" : "read only")")
+                    }
+                }
+            }
+            if !cliSessions.isEmpty {
+                Section("CLI History · Read Only") {
+                    ForEach(cliSessions) { session in
+                        HStack(spacing: 8) {
+                            Image(systemName: session.compatibility == .compatible ? "terminal" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(session.projectPath.isEmpty ? session.id : URL(fileURLWithPath: session.projectPath).lastPathComponent)
+                                    .lineLimit(1)
+                                Text("\(session.compatibility.detail) · \(session.source.path)")
+                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer(minLength: 4)
+                            Button("Continue") { continueCLI(session) }
+                                .controlSize(.small)
+                                .disabled(session.compatibility != .compatible)
+                        }
+                        .help(session.source.path)
+                        .accessibilityElement(children: .contain)
                     }
                 }
             }
@@ -675,6 +760,22 @@ private struct ProjectNavigator: View {
             .accessibilityElement(children: .combine)
         }
         .accessibilityLabel("Projects and sessions")
+    }
+}
+
+private extension CLISessionCompatibility {
+    var title: String {
+        switch self {
+        case .compatible: "Compatible"
+        case .actionRequired: "Action required"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .compatible: title
+        case .actionRequired(let reason): "\(title): \(reason)"
+        }
     }
 }
 

@@ -286,6 +286,25 @@ final class PiEngine: ObservableObject {
         catch { fail(error) }
     }
 
+    func startForkedSession(_ imported: SessionMetadata, project: URL, resources: URL) {
+        let canonical = project.standardizedFileURL.resolvingSymlinksInPath()
+        guard process == nil, imported.projectPath == canonical.path else { return }
+        self.resources = resources
+        launchProject = canonical
+        do {
+            let lease = SessionWriterLease(root: recoveryStore.root, sessionID: imported.id)
+            guard try lease.acquire() == .acquired else {
+                throw PiEngineError.command("The CLI session fork could not acquire its writer lease.")
+            }
+            metadata = imported
+            writerLease = lease
+            recovery = nil
+            ownershipRequiresFork = false
+            restoredDraft = ""
+            launch(resources: resources, project: canonical, sessionID: imported.id)
+        } catch { fail(error) }
+    }
+
     func restartRecoveredSession() {
         guard let resources, let project = launchProject, let recovery,
               recovery.actions.isEmpty, !ownershipRequiresFork

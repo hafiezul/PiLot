@@ -40,6 +40,8 @@ struct SupervisedSessionIndex {
 final class SessionSupervisor: ObservableObject {
     let runtime = PiEngine()
     @Published private(set) var index = SupervisedSessionIndex()
+    @Published private(set) var cliSessions: [CLISessionRecord] = []
+    @Published var cliContinuationFailure: CLISessionContinuationFailure?
 
     private var engines: [String: PiEngine] = [:]
     private var observations: [String: AnyCancellable] = [:]
@@ -51,6 +53,50 @@ final class SessionSupervisor: ObservableObject {
     func engine(for sessionID: String) -> PiEngine? { engines[sessionID] }
 
     func peers(of sessionID: String) -> [SupervisedSessionSummary] { index.peers(of: sessionID) }
+
+    func refreshCLIHistory() {
+        Task {
+            do { cliSessions = try await Task.detached { try CLISessionStore().discover() }.value }
+            catch { cliSessions = [] }
+        }
+    }
+
+    func continueCLISession(_ session: CLISessionRecord, project: URL, resources: URL) async -> String? {
+        do {
+            let metadata = try await Task.detached {
+                try CLISessionStore().continueSession(session, in: project)
+            }.value
+            return registerCLIContinuation(metadata, project: project, resources: resources)
+        } catch let failure as CLISessionContinuationFailure {
+            cliContinuationFailure = failure
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    func salvageCLISession(
+        _ session: CLISessionRecord,
+        failure: CLISessionContinuationFailure,
+        project: URL,
+        resources: URL
+    ) async -> String? {
+        do {
+            let metadata = try await Task.detached {
+                try CLISessionStore().salvageVerifiedEntries(from: failure, session: session, in: project)
+            }.value
+            return registerCLIContinuation(metadata, project: project, resources: resources)
+        } catch let nextFailure as CLISessionContinuationFailure {
+            cliContinuationFailure = nextFailure
+            return nil
+        } catch {
+            cliContinuationFailure = CLISessionContinuationFailure(
+                recoveryCopy: failure.recoveryCopy,
+                reason: error.localizedDescription
+            )
+            return nil
+        }
+    }
 
     @discardableResult
     func openProject(_ project: URL, resources: URL) -> String {
@@ -70,11 +116,26 @@ final class SessionSupervisor: ObservableObject {
         let engine = PiEngine()
         engines[id] = engine
         index.add(.init(id: id, projectPath: project.path, title: "Pi session \(number)", state: .done))
-        observations[id] = engine.$attentionState.combineLatest(engine.$activityDate).sink { [weak self] state, date in
-            self?.index.update(sessionID: id, state: state, at: date)
-        }
+        observe(engine, id: id)
         if recoverLatest { engine.openProject(project, resources: resources) }
         else { engine.startNewSession(project: project, resources: resources) }
         return id
+    }
+
+    private func registerCLIContinuation(_ metadata: SessionMetadata, project: URL, resources: URL) -> String {
+        let engine = PiEngine()
+        engines[metadata.id] = engine
+        let number = index.sessions.filter { $0.projectPath == metadata.projectPath }.count + 1
+        index.add(.init(id: metadata.id, projectPath: metadata.projectPath, title: "CLI fork \(number)", state: .done))
+        observe(engine, id: metadata.id)
+        engine.startForkedSession(metadata, project: project, resources: resources)
+        refreshCLIHistory()
+        return metadata.id
+    }
+
+    private func observe(_ engine: PiEngine, id: String) {
+        observations[id] = engine.$attentionState.combineLatest(engine.$activityDate).sink { [weak self] state, date in
+            self?.index.update(sessionID: id, state: state, at: date)
+        }
     }
 }
