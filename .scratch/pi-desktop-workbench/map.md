@@ -29,6 +29,7 @@ A standalone, decision-ready product, UX, and technical specification for an uns
 - [Choose macOS desktop architecture](issues/08-choose-desktop-architecture.md) — A macOS 14+ SwiftUI-first host with selective AppKit adapters and one supervised, bundled Pi RPC subprocess per live session is the minimal native architecture.
 - [Define trust, security, and unsigned distribution](issues/09-define-trust-and-distribution.md) — PiLot uses explicit project trust without sandboxing, local redacted diagnostics, narrowly guided unsigned installation, full version reporting, and user-triggered manual updates.
 - [Define state recovery and migration behavior](issues/11-define-state-recovery-and-migration.md) — PiLot preserves durable state and source bytes, automates only lossless repairs, enforces one proven writer, and uses consented forks for ambiguous recovery.
+- [Synthesize the decision-ready specification](issues/10-synthesize-decision-ready-spec.md) — The standalone PiLot v1 specification fixes the product boundary, native UX, compatibility, architecture, recovery, trust, distribution, and implementation-planning gates.
 
 ## Not yet specified
 
