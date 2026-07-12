@@ -5,6 +5,7 @@ import SwiftUI
 struct PiLotApp: App {
     @StateObject private var supervisor = SessionSupervisor()
     @StateObject private var projects = ProjectStore()
+    @StateObject private var updates = ManualUpdateChecker()
 
     var body: some Scene {
         WindowGroup("PiLot", id: "workbench") {
@@ -14,7 +15,7 @@ struct PiLotApp: App {
         }
         .defaultSize(width: 1180, height: 760)
         .windowStyle(.titleBar)
-        .commands { PiLotCommands() }
+        .commands { PiLotCommands(updates: updates) }
 
         Settings {
             SettingsView(engine: supervisor.runtime, notifications: supervisor.notifications)
@@ -25,6 +26,11 @@ struct PiLotApp: App {
         Window("PiLot Help", id: "help") {
             HelpView()
                 .frame(minWidth: 420, minHeight: 260)
+        }
+
+        Window("Software Update", id: "updates") {
+            UpdateView(checker: updates)
+                .frame(width: 460, height: 300)
         }
     }
 
@@ -38,6 +44,7 @@ struct PiLotApp: App {
 private struct PiLotCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.workbenchActions) private var actions
+    let updates: ManualUpdateChecker
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -72,13 +79,62 @@ private struct PiLotCommands: Commands {
         }
 
         CommandGroup(after: .appInfo) {
-            Button("Check for Updates…") {}
-                .disabled(true)
+            Button("Check for Updates…") {
+                updates.check()
+                openWindow(id: "updates")
+            }
         }
 
         CommandGroup(replacing: .help) {
             Button("PiLot Help") { openWindow(id: "help") }
                 .keyboardShortcut("?", modifiers: [.command])
+        }
+    }
+}
+
+private struct UpdateView: View {
+    @ObservedObject var checker: ManualUpdateChecker
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("PiLot Software Update", systemImage: "arrow.down.circle")
+                .font(.title2.bold())
+            content
+            Spacer()
+            HStack {
+                Button("Check Again", action: checker.check)
+                    .disabled(checker.state == .checking)
+                Spacer()
+                if case .available = checker.state {
+                    Button("Open Official Download Page") {
+                        NSWorkspace.shared.open(PiLotDistribution.releases)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .padding(24)
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch checker.state {
+        case .idle:
+            Text("Choose Check Again to query the official HTTPS release metadata.")
+        case .checking:
+            HStack { ProgressView(); Text("Checking official release metadata…") }
+        case .current(let release):
+            Text("PiLot is up to date (version \(release.version)).")
+        case .available(let release):
+            VStack(alignment: .leading, spacing: 8) {
+                Text("PiLot \(release.version) is available.").font(.headline)
+                Text(release.releaseNotes.isEmpty ? "No release notes were provided." : release.releaseNotes)
+                    .foregroundStyle(.secondary)
+            }
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
         }
     }
 }

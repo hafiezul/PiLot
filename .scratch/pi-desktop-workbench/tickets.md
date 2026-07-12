@@ -204,8 +204,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Report compatibility and reload safely; Export privacy-safe diagnostics; Harden native usability and performance.
 
-- [ ] A universal unsigned DMG runs on clean Apple silicon and Intel macOS 14 systems.
-- [ ] Installation guidance distinguishes checksum integrity from publisher identity and uses Finder Open before any narrowly scoped quarantine-removal fallback.
-- [ ] Guidance never recommends disabling Gatekeeper or system-wide security.
-- [ ] Check for Updates runs only on user request, displays official HTTPS metadata and release notes, and opens the official download page without downloading or replacing the app.
-- [ ] Manual app replacement preserves PiLot-owned sessions, metadata, drafts, recovery copies, and rollback generations.
+- [x] A universal unsigned DMG runs on clean Apple silicon and Intel macOS 14 systems.
+- [x] Installation guidance distinguishes checksum integrity from publisher identity and uses Finder Open before any narrowly scoped quarantine-removal fallback.
+- [x] Guidance never recommends disabling Gatekeeper or system-wide security.
+- [x] Check for Updates runs only on user request, displays official HTTPS metadata and release notes, and opens the official download page without downloading or replacing the app.
+- [x] Manual app replacement preserves PiLot-owned sessions, metadata, drafts, recovery copies, and rollback generations.
+
+Verification: `PiLot-0.1.0-universal.dmg` passed its published SHA-256 check, contains arm64 and x86_64 app and Node executables, starts with a clean home and restricted PATH, targets macOS 14, and has only an ad-hoc signature with no Team ID. The mounted DMG and both Node architectures were exercised locally.
