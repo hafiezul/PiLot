@@ -43,12 +43,67 @@ final class PiEngineTests: XCTestCase {
         XCTAssertTrue(state.isSettled)
     }
 
+    func testQueuedWorkPreservesPiSubmissionOrderUntilDelivered() throws {
+        var state = PiSessionState()
+        try state.apply([
+            "type": "queue_update",
+            "steering": ["first steer", "second steer"],
+            "followUp": ["first follow-up", "second follow-up"],
+        ])
+
+        XCTAssertEqual(state.steeringQueue, ["first steer", "second steer"])
+        XCTAssertEqual(state.followUpQueue, ["first follow-up", "second follow-up"])
+
+        try state.apply([
+            "type": "queue_update",
+            "steering": ["second steer"],
+            "followUp": ["first follow-up", "second follow-up"],
+        ])
+        XCTAssertEqual(state.steeringQueue, ["second steer"])
+    }
+
+    func testRetryAndCompactionRemainRunningUntilAgentSettles() throws {
+        var state = PiSessionState()
+        try state.apply(["type": "agent_start"])
+        try state.apply([
+            "type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
+            "delayMs": 500, "errorMessage": "Rate limited",
+        ])
+        XCTAssertTrue(state.isRunning)
+        XCTAssertTrue(state.isRetrying)
+
+        try state.apply(["type": "auto_retry_end", "success": true, "attempt": 1])
+        try state.apply(["type": "compaction_start", "reason": "threshold"])
+        XCTAssertTrue(state.isRunning)
+        XCTAssertFalse(state.isRetrying)
+        XCTAssertTrue(state.isCompacting)
+
+        try state.apply([
+            "type": "compaction_end", "reason": "threshold", "aborted": false,
+            "willRetry": true, "result": ["summary": "shorter"],
+        ])
+        XCTAssertTrue(state.isRunning)
+        XCTAssertFalse(state.isCompacting)
+        XCTAssertFalse(state.isSettled)
+
+        try state.apply(["type": "agent_settled"])
+        XCTAssertFalse(state.isRunning)
+        XCTAssertTrue(state.isSettled)
+    }
+
     func testMalformedOrUnknownProtocolDataFailsTheSession() {
         var decoder = LFJSONDecoder()
         XCTAssertThrowsError(try decoder.append(Data("not-json\n".utf8)))
 
         var state = PiSessionState()
         XCTAssertThrowsError(try state.apply(["type": "future_event"]))
+    }
+
+    func testBusyPromptDeliveryUsesPiStreamingSemantics() {
+        let prompt = PiPrompt(message: "next", images: [])
+
+        XCTAssertEqual(prompt.rpcFields(delivery: .steer)["streamingBehavior"] as? String, "steer")
+        XCTAssertEqual(prompt.rpcFields(delivery: .followUp)["streamingBehavior"] as? String, "followUp")
     }
 
     func testModelsReportWhetherTheyAcceptImageContext() throws {

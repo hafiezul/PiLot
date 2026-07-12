@@ -499,6 +499,18 @@ private struct LiveSessionDetail: View {
                 )
             }
 
+            if engine.session.isRetrying || engine.session.isCompacting {
+                Label(
+                    engine.session.isRetrying ? "Pi is retrying the active run" : "Pi is compacting context for the active run",
+                    systemImage: "arrow.triangle.2.circlepath"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                .background(.quaternary)
+            }
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if !engine.session.lastPrompt.isEmpty {
@@ -519,6 +531,12 @@ private struct LiveSessionDetail: View {
                 .frame(maxWidth: .infinity)
             }
             Divider()
+            if !engine.session.steeringQueue.isEmpty || !engine.session.followUpQueue.isEmpty {
+                QueuedWorkView(
+                    steering: engine.session.steeringQueue,
+                    followUps: engine.session.followUpQueue
+                )
+            }
             LiveComposer(engine: engine, draft: $draft, focus: composerFocus)
         }
         .navigationTitle("Pi session")
@@ -569,6 +587,35 @@ private struct RecoveryBanner: View {
     }
 }
 
+private struct QueuedWorkView: View {
+    let steering: [String]
+    let followUps: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Queued work").font(.caption.bold())
+            queue(steering, label: "Steer")
+            queue(followUps, label: "Follow-up")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func queue(_ messages: [String], label: String) -> some View {
+        ForEach(Array(messages.enumerated()), id: \.offset) { index, message in
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("\(label) \(index + 1)")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text(message).font(.caption).lineLimit(2)
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+}
+
 private struct LiveToolRow: View {
     let tool: PiToolRun
     @State private var expanded = true
@@ -616,6 +663,7 @@ private struct LiveComposer: View {
     let focus: FocusState<WorkbenchFocus?>.Binding
     @State private var attachments: [PromptAttachment] = []
     @State private var contextError: String?
+    @State private var choosingBusyDelivery = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -681,9 +729,9 @@ private struct LiveComposer: View {
 
                 if engine.configurationPending { ProgressView().controlSize(.small) }
                 Spacer()
-                Button("Send", systemImage: "arrow.up", action: submit)
+                Button(engine.session.isRunning ? "Direct…" : "Send", systemImage: "arrow.up", action: submit)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!engine.isReady || engine.session.isRunning || engine.configurationPending || engine.session.model == nil || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!engine.isReady || engine.configurationPending || engine.session.model == nil || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .controlSize(.small)
             .padding(7)
@@ -702,6 +750,17 @@ private struct LiveComposer: View {
             Button("OK") { contextError = nil }
         } message: {
             Text(contextError ?? "Unknown context error")
+        }
+        .confirmationDialog(
+            "Direct message while Pi is busy",
+            isPresented: $choosingBusyDelivery,
+            titleVisibility: .visible
+        ) {
+            Button("Steer current run") { submit(delivery: .steer) }
+            Button("Queue follow-up") { submit(delivery: .followUp) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Steering changes the active work after its current tool calls. A follow-up waits until the active work finishes.")
         }
         .padding(16)
     }
@@ -739,14 +798,23 @@ private struct LiveComposer: View {
     }
 
     private func submit() {
-        guard !engine.session.isRunning, !engine.configurationPending, engine.session.model != nil else { return }
+        guard !engine.session.isRunning else {
+            choosingBusyDelivery = true
+            return
+        }
+        submit(delivery: nil)
+    }
+
+    private func submit(delivery: PiPromptDelivery?) {
+        guard !engine.configurationPending, engine.session.model != nil else { return }
         do {
             let prompt = try PromptContext(attachments: attachments).prepare(message: draft)
             guard prompt.images.isEmpty || engine.session.model?.supportsImages == true else {
                 contextError = "The selected model does not accept images. Remove them or choose an image-capable model."
                 return
             }
-            guard engine.sendPrompt(prompt) else { return }
+            let sent = delivery.map { engine.directPrompt(prompt, as: $0) } ?? engine.sendPrompt(prompt)
+            guard sent else { return }
             draft = ""
             attachments = []
         } catch {

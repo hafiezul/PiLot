@@ -100,6 +100,10 @@ struct PiSessionState {
     var thinkingLevel: PiThinkingLevel = .off
     var isRunning = false
     var isSettled = false
+    var isRetrying = false
+    var isCompacting = false
+    var steeringQueue: [String] = []
+    var followUpQueue: [String] = []
     var lastPrompt = ""
 
     var orderedTools: [PiToolRun] { toolOrder.compactMap { tools[$0] } }
@@ -111,12 +115,46 @@ struct PiSessionState {
             isRunning = true
             isSettled = false
         case "agent_end", "turn_start", "turn_end", "message_start", "message_end",
-             "queue_update", "compaction_start", "compaction_end", "auto_retry_start",
-             "auto_retry_end", "extension_error", "extension_ui_request":
+             "extension_error", "extension_ui_request":
             break
+        case "queue_update":
+            guard let steering = record["steering"] as? [String],
+                  let followUp = record["followUp"] as? [String]
+            else { throw PiEngineError.malformedOutput }
+            steeringQueue = steering
+            followUpQueue = followUp
+        case "compaction_start":
+            guard record["reason"] is String else { throw PiEngineError.malformedOutput }
+            isCompacting = true
+            isRunning = true
+            isSettled = false
+        case "compaction_end":
+            guard record["reason"] is String,
+                  record["aborted"] is Bool,
+                  record["willRetry"] is Bool
+            else { throw PiEngineError.malformedOutput }
+            isCompacting = false
+        case "auto_retry_start":
+            guard record["attempt"] is Int,
+                  record["maxAttempts"] is Int,
+                  record["delayMs"] is Int,
+                  record["errorMessage"] is String
+            else { throw PiEngineError.malformedOutput }
+            isRetrying = true
+            isRunning = true
+            isSettled = false
+        case "auto_retry_end":
+            guard record["success"] is Bool, record["attempt"] is Int else {
+                throw PiEngineError.malformedOutput
+            }
+            isRetrying = false
         case "agent_settled":
             isRunning = false
             isSettled = true
+            isRetrying = false
+            isCompacting = false
+            steeringQueue = []
+            followUpQueue = []
         case "message_update":
             guard let event = record["assistantMessageEvent"] as? [String: Any],
                   let eventType = event["type"] as? String
@@ -356,6 +394,14 @@ final class PiEngine: ObservableObject {
         return true
     }
 
+    @discardableResult
+    func directPrompt(_ prompt: PiPrompt, as delivery: PiPromptDelivery) -> Bool {
+        guard !prompt.message.isEmpty, isReady, session.isRunning, !configurationPending else { return false }
+        status = delivery == .steer ? "Steering current run…" : "Queueing follow-up…"
+        send(type: "prompt", fields: prompt.rpcFields(delivery: delivery))
+        return true
+    }
+
     func setModel(_ model: PiModel) {
         guard isReady, !session.isRunning, model != session.model else { return }
         let id = send(type: "set_model", fields: ["provider": model.provider, "modelId": model.id])
@@ -514,8 +560,13 @@ final class PiEngine: ObservableObject {
             case "extension_ui_request":
                 status = "Waiting for input"
                 setAttention(.waiting)
+            case "queue_update":
+                let count = session.steeringQueue.count + session.followUpQueue.count
+                status = count == 0 ? "Running" : "Running · \(count) queued"
             case "auto_retry_start": status = "Retrying…"
+            case "auto_retry_end": status = "Running"
             case "compaction_start": status = "Compacting…"
+            case "compaction_end": status = "Running"
             default: break
             }
         }
@@ -562,7 +613,8 @@ final class PiEngine: ObservableObject {
             guard pendingThinking.removeValue(forKey: id) != nil else { throw PiEngineError.malformedOutput }
             send(type: "get_state")
         case "prompt":
-            status = "Running"
+            let count = session.steeringQueue.count + session.followUpQueue.count
+            status = count == 0 ? "Running" : "Running · \(count) queued"
         case "abort":
             break
         default:

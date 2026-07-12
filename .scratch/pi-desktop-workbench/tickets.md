@@ -100,10 +100,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Complete one durable coding run.
 
-- [ ] Sending while busy requires an explicit steering or follow-up choice.
-- [ ] Queued work remains visible and preserves submission order.
-- [ ] Retry and compaction activity updates the session state without falsely settling it.
-- [ ] Decline, cancel, abort, and Stop Session remain distinct actions.
+- [x] Sending while busy requires an explicit steering or follow-up choice.
+- [x] Queued work remains visible and preserves submission order.
+- [x] Retry and compaction activity updates the session state without falsely settling it.
+- [x] Decline, cancel, abort, and Stop Session remain distinct actions.
 
 ## Answer Pi and extension interruptions
 

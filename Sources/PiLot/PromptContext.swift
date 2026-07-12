@@ -39,6 +39,11 @@ struct PiPromptImage: Equatable {
     }
 }
 
+enum PiPromptDelivery: String {
+    case steer
+    case followUp
+}
+
 struct PiPrompt {
     let message: String
     let images: [PiPromptImage]
@@ -50,9 +55,12 @@ struct PiPrompt {
         self.displayMessage = displayMessage ?? message
     }
 
-    var rpcFields: [String: Any] {
+    var rpcFields: [String: Any] { rpcFields(delivery: nil) }
+
+    func rpcFields(delivery: PiPromptDelivery?) -> [String: Any] {
         var fields: [String: Any] = ["message": message]
         if !images.isEmpty { fields["images"] = images.map(\.rpcValue) }
+        if let delivery { fields["streamingBehavior"] = delivery.rawValue }
         return fields
     }
 }
