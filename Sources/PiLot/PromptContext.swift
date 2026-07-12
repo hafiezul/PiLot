@@ -75,7 +75,7 @@ enum PromptContextError: LocalizedError {
 }
 
 struct PromptContext {
-    var attachments: [PromptAttachment]
+    let attachments: [PromptAttachment]
 
     func prepare(message: String) throws -> PiPrompt {
         let displayMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -86,16 +86,17 @@ struct PromptContext {
             case .image(let data, let mimeType):
                 images.append(try image(data, mimeType: mimeType, name: attachment.name))
             case .file(let file):
-                guard FileManager.default.fileExists(atPath: file.path) else {
-                    throw PromptContextError.missing(attachment.name)
-                }
                 let type = UTType(filenameExtension: file.pathExtension)
                 guard type?.conforms(to: .image) == true || type?.conforms(to: .text) == true || type == nil else {
                     throw PromptContextError.unsupported(attachment.name)
                 }
                 let data: Data
                 do { data = try Data(contentsOf: file) }
-                catch { throw PromptContextError.inaccessible(attachment.name) }
+                catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                    throw PromptContextError.missing(attachment.name)
+                } catch {
+                    throw PromptContextError.inaccessible(attachment.name)
+                }
                 if type?.conforms(to: .image) == true {
                     images.append(try image(data, mimeType: type?.preferredMIMEType ?? "application/octet-stream", name: attachment.name))
                 } else if let text = String(data: data, encoding: .utf8) {

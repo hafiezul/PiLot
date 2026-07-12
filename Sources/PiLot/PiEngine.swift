@@ -338,11 +338,6 @@ final class PiEngine: ObservableObject {
     }
 
     @discardableResult
-    func sendPrompt(_ text: String) -> Bool {
-        sendPrompt(PiPrompt(message: text.trimmingCharacters(in: .whitespacesAndNewlines), images: []))
-    }
-
-    @discardableResult
     func sendPrompt(_ prompt: PiPrompt) -> Bool {
         guard !prompt.message.isEmpty, isReady, !session.isRunning, !configurationPending else { return false }
         session.lastPrompt = prompt.displayMessage
