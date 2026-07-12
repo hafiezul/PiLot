@@ -22,6 +22,7 @@ A standalone, decision-ready product, UX, and technical specification for an uns
 - [Research Pi runtime and shared state](issues/01-research-pi-runtime-and-state.md) — Pi supports SDK and RPC desktop integration; auth/settings can share their locking managers, while each session file requires one live writer and safe handoff or forking.
 - [Map Pi TUI capabilities to desktop](issues/02-research-pi-tui-portability.md) — Most Pi engine semantics port directly or through native adapters, while terminal presentation must be redesigned and extension compatibility must explicitly exclude unsupported TUI-only surfaces.
 - [Research native agent workbench patterns](issues/03-research-desktop-workbenches.md) — PiLot should use a native project/session workbench with structured activity, scoped approvals, and a read-only diff inspector while rejecting chat-only, embedded-IDE, default-full-access, and web-chrome patterns.
+- [Choose Pi engine sourcing and version strategy](issues/04-decide-pi-engine-strategy.md) — PiLot bundles a release-pinned Pi RPC engine, isolates each live session in its own process and store, forks CLI sessions by default, and gates unsafe shared-state operations on version drift.
 
 ## Not yet specified
 
