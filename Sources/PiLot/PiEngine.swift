@@ -95,13 +95,22 @@ struct PiCommand: Identifiable, Equatable {
     }
 }
 
+enum PiCompatibilityState: String, Equatable {
+    case compatible = "Compatible"
+    case degraded = "Degraded"
+    case actionRequired = "Action required"
+    case unsupported = "Unsupported"
+}
+
 struct PiResourceDiagnostic: Identifiable, Equatable {
     let surface: String
     let title: String
+    var state: PiCompatibilityState = .degraded
     let scope: String
     let path: String
     let reason: String
     let consequence: String
+    var retainedState = "The session and source resource are unchanged."
     let repairAction: String
     var id: String { surface }
 }
@@ -247,6 +256,13 @@ struct PiSessionState {
         for (index, value) in values.enumerated() {
             if let command = PiCommand(value) {
                 commands.append(command)
+                addDiagnostic(.init(
+                    surface: "command:\(command.id)", title: command.name, state: .compatible,
+                    scope: command.scope, path: command.path, reason: "Loaded by the bundled Pi engine.",
+                    consequence: "This \(command.source.rawValue) command is available with Pi semantics.",
+                    retainedState: "The resource is read in place and was not copied or changed.",
+                    repairAction: "No action needed."
+                ))
             } else {
                 let info = value["sourceInfo"] as? [String: Any]
                 addDiagnostic(.init(
@@ -267,6 +283,14 @@ struct PiSessionState {
         for (index, value) in values.enumerated() {
             if let model = PiModel(value) {
                 models.append(model)
+                addDiagnostic(.init(
+                    surface: "model:\(model.provider):\(model.id)", title: model.name, state: .compatible,
+                    scope: "user or built-in", path: "\(model.provider)/\(model.id)",
+                    reason: "The bundled Pi engine loaded this model definition.",
+                    consequence: "The model can be selected when its provider authentication is available.",
+                    retainedState: "The model configuration and credentials were not changed.",
+                    repairAction: "No action needed."
+                ))
             } else {
                 addDiagnostic(.init(
                     surface: "model:\(index)", title: "Invalid Pi model", scope: "user",
@@ -485,6 +509,11 @@ struct PiSessionState {
         }
     }
 
+    mutating func reportDiagnostic(_ diagnostic: PiResourceDiagnostic) {
+        resourceDiagnostics.removeAll { $0.surface == diagnostic.surface }
+        resourceDiagnostics.append(diagnostic)
+    }
+
     private mutating func addDiagnostic(_ diagnostic: PiResourceDiagnostic) {
         guard !resourceDiagnostics.contains(where: { $0.surface == diagnostic.surface }) else { return }
         resourceDiagnostics.append(diagnostic)
@@ -544,6 +573,7 @@ final class PiEngine: ObservableObject {
     @Published private(set) var attentionState: SessionAttentionState = .done
     @Published private(set) var activityDate = Date()
     @Published private(set) var attentionAnnouncement = 0
+    @Published private(set) var reloadAvailable = false
 
     private var process: Process?
     private var input: FileHandle?
@@ -560,6 +590,13 @@ final class PiEngine: ObservableObject {
     private let recoveryStore = SessionRecoveryStore()
     private var metadata: SessionMetadata?
     private var writerLease: SessionWriterLease?
+    private var resourceSnapshot: ResourceSnapshot?
+    private var reloadPending = false
+    private var blockedSettingsScopes: Set<String> = []
+    private lazy var cliMatrix = PiCLIMatrix(
+        bundledVersion: VersionInfo.current.pi,
+        detectedVersion: InstalledPiCLI.version()
+    )
 
     func start(resources: URL) {
         self.resources = resources
@@ -766,17 +803,41 @@ final class PiEngine: ObservableObject {
     }
 
     func setModel(_ model: PiModel) {
-        guard isReady, !session.isRunning, model != session.model else { return }
+        guard canWriteSharedSettings(), isReady, !session.isRunning, model != session.model else { return }
         let id = send(type: "set_model", fields: ["provider": model.provider, "modelId": model.id])
         pendingModels[id] = model
         configurationPending = true
     }
 
     func setThinkingLevel(_ level: PiThinkingLevel) {
-        guard isReady, !session.isRunning, level != session.thinkingLevel else { return }
+        guard canWriteSharedSettings(), isReady, !session.isRunning, level != session.thinkingLevel else { return }
         let id = send(type: "set_thinking_level", fields: ["level": level.rawValue])
         pendingThinking[id] = level
         configurationPending = true
+    }
+
+    func checkForResourceChanges() {
+        let project = launchProject
+        Task {
+            let latest = await Task.detached { ResourceSnapshot.capture(project: project) }.value
+            guard let resourceSnapshot else { self.resourceSnapshot = latest; return }
+            guard latest != resourceSnapshot else { return }
+            if session.isRunning { reloadPending = true } else { reloadAvailable = true }
+        }
+    }
+
+    func reloadResources() {
+        guard reloadAvailable, !session.isRunning,
+              let resources, let project = launchProject, let metadata
+        else { return }
+        reloadAvailable = false
+        reloadPending = false
+        status = "Reloading Pi resources…"
+        stopProcess(status: nil, releaseLease: false) { [weak self] in
+            guard let self else { return }
+            self.resourceSnapshot = ResourceSnapshot.capture(project: project)
+            self.launch(resources: resources, project: project, sessionID: metadata.id)
+        }
     }
 
     func abort() {
@@ -897,6 +958,9 @@ final class PiEngine: ObservableObject {
             input = inputPipe.fileHandleForWriting
             launchProject = project
             session = PiSessionState()
+            session.reportDiagnostic(cliMatrix.report)
+            UnsupportedPiPresentation.reports(project: project).forEach { session.reportDiagnostic($0) }
+            resourceSnapshot = ResourceSnapshot.capture(project: project)
             status = project.map { "Loading \($0.lastPathComponent)…" } ?? "Starting bundled Pi engine…"
             send(type: "get_state")
             send(type: "get_available_models")
@@ -938,6 +1002,10 @@ final class PiEngine: ObservableObject {
                 setAttention(.running)
             case "agent_settled":
                 send(type: "get_commands")
+                if reloadPending {
+                    reloadPending = false
+                    reloadAvailable = true
+                }
                 if session.isWaitingForInput {
                     status = "Waiting for input"
                     setAttention(.waiting)
@@ -972,7 +1040,22 @@ final class PiEngine: ObservableObject {
               let success = record["success"] as? Bool
         else { throw PiEngineError.malformedOutput }
         guard success else {
-            throw PiEngineError.command(record["error"] as? String ?? "Pi rejected the \(command) command.")
+            let message = record["error"] as? String ?? "Pi rejected the \(command) command."
+            if command == "set_model" {
+                let model = pendingModels.removeValue(forKey: id)
+                configurationPending = false
+                session.reportDiagnostic(.init(
+                    surface: "authentication:\(model?.provider ?? "provider")", title: "Authentication required", state: .actionRequired,
+                    scope: "user", path: "~/.pi/agent/auth.json",
+                    reason: "Pi reported that authentication is unavailable for \(model?.provider ?? "the selected provider").",
+                    consequence: "The requested model was not selected; this session remains usable with its current model.",
+                    retainedState: "No credential value was read, displayed, logged, or changed.",
+                    repairAction: "Run `pi`, use `/login` for \(model?.provider ?? "the provider"), then retry."
+                ))
+                status = "Authentication required — repair in Pi CLI"
+                return
+            }
+            throw PiEngineError.command(message)
         }
 
         switch command {
@@ -1002,11 +1085,11 @@ final class PiEngine: ObservableObject {
             }
             session.loadCommands(values)
         case "set_model":
-            guard pendingModels.removeValue(forKey: id) != nil else { throw PiEngineError.malformedOutput }
-            send(type: "get_state")
+            guard let model = pendingModels[id] else { throw PiEngineError.malformedOutput }
+            persistSettings(.model(provider: model.provider, id: model.id), requestID: id)
         case "set_thinking_level":
-            guard pendingThinking.removeValue(forKey: id) != nil else { throw PiEngineError.malformedOutput }
-            send(type: "get_state")
+            guard let level = pendingThinking[id] else { throw PiEngineError.malformedOutput }
+            persistSettings(.thinking(level), requestID: id)
         case "prompt":
             let count = session.steeringQueue.count + session.followUpQueue.count
             status = count == 0 ? "Running" : "Running · \(count) queued"
@@ -1014,6 +1097,46 @@ final class PiEngine: ObservableObject {
             break
         default:
             throw PiEngineError.unknownProtocol(command)
+        }
+    }
+
+    private func canWriteSharedSettings() -> Bool {
+        guard cliMatrix.allowsSharedStateWrites, !blockedSettingsScopes.contains("global") else {
+            session.reportDiagnostic(cliMatrix.state == .actionRequired ? cliMatrix.report : .init(
+                surface: "settings:global", title: "Global Pi settings writes are blocked", state: .actionRequired,
+                scope: "user", path: "~/.pi/agent/settings.json", reason: "A previous settings flush failed.",
+                consequence: "Further writes to global Pi settings are blocked; sessions continue with their current snapshot.",
+                retainedState: "Unknown settings fields and the last durable file are preserved.",
+                repairAction: "Repair file permissions or syntax in Pi CLI, then reopen PiLot."
+            ))
+            return false
+        }
+        return true
+    }
+
+    private func persistSettings(_ change: PiSettingsWrite, requestID: String) {
+        guard let resources, let project = launchProject else { return }
+        let writer = PiSettingsWriter(resources: resources, project: project)
+        Task {
+            do {
+                try await Task.detached { try writer.persist(change) }.value
+                pendingModels.removeValue(forKey: requestID)
+                pendingThinking.removeValue(forKey: requestID)
+                send(type: "get_state")
+            } catch {
+                pendingModels.removeValue(forKey: requestID)
+                pendingThinking.removeValue(forKey: requestID)
+                configurationPending = false
+                blockedSettingsScopes.insert("global")
+                session.reportDiagnostic(.init(
+                    surface: "settings:global", title: "Pi setting was not saved", state: .actionRequired,
+                    scope: "user", path: "~/.pi/agent/settings.json", reason: error.localizedDescription,
+                    consequence: "The current session may use the selection, but further global setting writes are blocked.",
+                    retainedState: "The last durable settings file and all unknown fields were preserved.",
+                    repairAction: "Repair the global settings file or lock in Pi CLI, then reopen PiLot."
+                ))
+                status = "Pi setting was not saved"
+            }
         }
     }
 
@@ -1070,24 +1193,30 @@ final class PiEngine: ObservableObject {
         }
     }
 
-    private func stopProcess(status newStatus: String?) {
+    private func stopProcess(
+        status newStatus: String?,
+        releaseLease: Bool = true,
+        afterExit: (@MainActor @Sendable () -> Void)? = nil
+    ) {
         generation = UUID()
         let stoppedProcess = process
-        let stoppedLease = writerLease
+        let stoppedLease = releaseLease ? writerLease : nil
         (stoppedProcess?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         (stoppedProcess?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         stoppedProcess?.terminationHandler = nil
         stoppedProcess?.terminate()
         process = nil
         input = nil
-        writerLease = nil
+        if releaseLease { writerLease = nil }
         if let stoppedProcess, stoppedProcess.isRunning {
             DispatchQueue.global().async {
                 stoppedProcess.waitUntilExit()
                 stoppedLease?.release()
+                if let afterExit { Task { @MainActor in afterExit() } }
             }
         } else {
             stoppedLease?.release()
+            if let afterExit { Task { @MainActor in afterExit() } }
         }
         decodeQueue.sync { recordDecoder.reset() }
         interruptionTimeouts.values.forEach { $0.cancel() }

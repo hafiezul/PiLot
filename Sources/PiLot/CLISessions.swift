@@ -42,15 +42,18 @@ struct CLISessionStore {
     let root: URL
     let cliRoot: URL
     private let engineFork: CLISessionEngineFork
+    private let cliCompatibilityReason: String?
 
     init(
         root: URL? = nil,
         cliRoot: URL? = nil,
         runtimeRoot: URL? = nil,
+        cliCompatibilityReason: String? = nil,
         engineFork: CLISessionEngineFork? = nil
     ) {
         self.root = root ?? SessionRecoveryStore().root
         self.cliRoot = cliRoot ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".pi/agent/sessions")
+        self.cliCompatibilityReason = cliCompatibilityReason
         let runtime = runtimeRoot ?? Bundle.main.resourceURL?.appending(path: "PiEngine")
         self.engineFork = engineFork ?? { staged, output, id, project, source in
             guard let runtime else { throw PiEngineError.missingRuntime("PiEngine") }
@@ -67,7 +70,9 @@ struct CLISessionStore {
             guard let header = try? Self.header(at: url) else { continue }
             let version = header["version"] as? Int ?? 1
             let compatibility: CLISessionCompatibility
-            if version > bundledPiSessionVersion {
+            if let cliCompatibilityReason {
+                compatibility = .actionRequired(cliCompatibilityReason)
+            } else if version > bundledPiSessionVersion {
                 compatibility = .actionRequired("Session schema \(version) is newer than bundled schema \(bundledPiSessionVersion)")
             } else if (try? Self.validate(url)) == nil {
                 compatibility = .actionRequired("Session contains malformed durable data")

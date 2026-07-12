@@ -595,6 +595,19 @@ private struct LiveSessionDetail: View {
                 PiResourceDiagnosticsView(diagnostics: engine.session.resourceDiagnostics)
             }
 
+            if engine.reloadAvailable {
+                HStack {
+                    Label("Pi resources changed. Reload rebuilds this settled runtime and its subscriptions.", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                    Spacer()
+                    Button("Reload", action: engine.reloadResources)
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(.horizontal, 16)
+                .frame(minHeight: 38)
+                .background(Color.orange.opacity(0.10))
+            }
+
             if engine.session.isRetrying || engine.session.isCompacting {
                 Label(
                     engine.session.isRetrying ? "Pi is retrying the active run" : "Pi is compacting context for the active run",
@@ -661,6 +674,15 @@ private struct LiveSessionDetail: View {
         .onChange(of: engine.session.requestedEditorText) { _, value in
             if let value { draft = value }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            engine.checkForResourceChanges()
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                engine.checkForResourceChanges()
+            }
+        }
     }
 }
 
@@ -671,11 +693,12 @@ private struct PiResourceDiagnosticsView: View {
         DisclosureGroup("Pi compatibility · \(diagnostics.count) item\(diagnostics.count == 1 ? "" : "s")") {
             ForEach(diagnostics) { diagnostic in
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(diagnostic.title).font(.caption.bold())
+                    Text("\(diagnostic.state.rawValue) · \(diagnostic.title)").font(.caption.bold())
                     Text("\(diagnostic.scope) · \(diagnostic.path)")
                         .font(.caption2.monospaced()).foregroundStyle(.secondary)
                     Text(diagnostic.reason).font(.caption)
                     Text(diagnostic.consequence).font(.caption).foregroundStyle(.secondary)
+                    Text("Retained: \(diagnostic.retainedState)").font(.caption).foregroundStyle(.secondary)
                     Text("Next: \(diagnostic.repairAction)").font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

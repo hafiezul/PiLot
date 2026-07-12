@@ -168,11 +168,11 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Continue a CLI session by fork; Use existing Pi resources.
 
-- [ ] Resources report Compatible, Degraded, Action required, or Unsupported with scope, path, consequence, retained state, and next action.
-- [ ] The exact tested Pi/CLI matrix gates only unsafe shared-state writes and CLI continuation; PiLot-owned sessions remain usable outside it.
-- [ ] Authentication failures expose no secret and link an exact Pi CLI repair or login action.
-- [ ] Supported settings changes persist only after the Pi settings manager flushes; failure blocks further writes only to that scope and preserves unknown fields.
-- [ ] Resource changes offer reload only after settlement, then rebuild the runtime and subscriptions rather than hot-swapping an active run.
+- [x] Resources report Compatible, Degraded, Action required, or Unsupported with scope, path, consequence, retained state, and next action.
+- [x] The exact tested Pi/CLI matrix gates only unsafe shared-state writes and CLI continuation; PiLot-owned sessions remain usable outside it.
+- [x] Authentication failures expose no secret and link an exact Pi CLI repair or login action.
+- [x] Supported settings changes persist only after the Pi settings manager flushes; failure blocks further writes only to that scope and preserves unknown fields.
+- [x] Resource changes offer reload only after settlement, then rebuild the runtime and subscriptions rather than hot-swapping an active run.
 
 ## Export privacy-safe diagnostics
 

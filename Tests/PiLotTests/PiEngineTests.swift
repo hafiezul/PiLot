@@ -177,8 +177,8 @@ final class PiEngineTests: XCTestCase {
 
         XCTAssertEqual(state.commands.map(\.invocation), ["/review", "/skill:check"])
         XCTAssertEqual(state.commands.first?.scope, "project")
-        XCTAssertEqual(state.resourceDiagnostics.count, 1)
-        XCTAssertTrue(state.resourceDiagnostics[0].consequence.contains("skipped"))
+        XCTAssertEqual(state.resourceDiagnostics.filter { $0.state == .compatible }.count, 2)
+        XCTAssertTrue(state.resourceDiagnostics.first { $0.state == .degraded }?.consequence.contains("skipped") == true)
     }
 
     func testRichToolDataUsesGenericPresentationAndOneDiagnosticPerSurface() throws {

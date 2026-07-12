@@ -29,6 +29,21 @@ final class CLISessionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: source), bytes)
     }
 
+    func testUntestedCLIVersionBlocksContinuationWithoutBlockingDiscovery() throws {
+        let source = cliRoot.appending(path: "session.jsonl")
+        try Data("{\"type\":\"session\",\"version\":3,\"id\":\"cli-drift\",\"cwd\":\"/project\"}\n".utf8).write(to: source)
+        let store = CLISessionStore(
+            root: root.appending(path: "PiLot"), cliRoot: cliRoot,
+            cliCompatibilityReason: "Installed Pi CLI is outside the tested matrix"
+        )
+
+        let session = try XCTUnwrap(store.discover().first)
+
+        XCTAssertEqual(session.compatibility, .actionRequired("Installed Pi CLI is outside the tested matrix"))
+        XCTAssertThrowsError(try store.continueSession(session, in: root))
+        XCTAssertEqual(try Data(contentsOf: source), Data("{\"type\":\"session\",\"version\":3,\"id\":\"cli-drift\",\"cwd\":\"/project\"}\n".utf8))
+    }
+
     func testContinuationStagesThenPublishesANewOwnedSessionWithoutChangingSource() throws {
         let source = cliRoot.appending(path: "session.jsonl")
         let bytes = Data("{\"type\":\"session\",\"version\":2,\"id\":\"cli-2\",\"cwd\":\"/old\"}\n{\"type\":\"message\",\"id\":\"entry-1\",\"parentId\":null}\n".utf8)

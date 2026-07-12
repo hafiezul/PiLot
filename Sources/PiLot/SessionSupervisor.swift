@@ -84,6 +84,13 @@ final class SessionSupervisor: ObservableObject {
     private var announcementObservations: [String: AnyCancellable] = [:]
     private var windowOwnership = SessionWindowOwnership()
     private let recoveryStore = SessionRecoveryStore()
+    private lazy var cliStore: CLISessionStore = {
+        let matrix = PiCLIMatrix(bundledVersion: VersionInfo.current.pi, detectedVersion: InstalledPiCLI.version())
+        let reason = matrix.allowsCLIContinuation ? nil : matrix.detectedVersion.map {
+            "Installed Pi CLI \($0) is outside the tested \(matrix.bundledVersion) matrix"
+        } ?? "No installed Pi CLI was detected"
+        return CLISessionStore(cliCompatibilityReason: reason)
+    }()
 
     var sortedSessions: [SupervisedSessionSummary] { index.sortedSessions }
 
@@ -127,15 +134,17 @@ final class SessionSupervisor: ObservableObject {
 
     func refreshCLIHistory() {
         Task {
-            do { cliSessions = try await Task.detached { try CLISessionStore().discover() }.value }
+            let store = cliStore
+            do { cliSessions = try await Task.detached { try store.discover() }.value }
             catch { cliSessions = [] }
         }
     }
 
     func continueCLISession(_ session: CLISessionRecord, project: URL, resources: URL) async -> String? {
         do {
+            let store = cliStore
             let metadata = try await Task.detached {
-                try CLISessionStore().continueSession(session, in: project)
+                try store.continueSession(session, in: project)
             }.value
             return registerCLIContinuation(metadata, project: project, resources: resources)
         } catch let failure as CLISessionContinuationFailure {
@@ -153,8 +162,9 @@ final class SessionSupervisor: ObservableObject {
         resources: URL
     ) async -> String? {
         do {
+            let store = cliStore
             let metadata = try await Task.detached {
-                try CLISessionStore().salvageVerifiedEntries(from: failure, session: session, in: project)
+                try store.salvageVerifiedEntries(from: failure, session: session, in: project)
             }.value
             return registerCLIContinuation(metadata, project: project, resources: resources)
         } catch let nextFailure as CLISessionContinuationFailure {
