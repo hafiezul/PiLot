@@ -179,6 +179,9 @@ final class PiEngine: ObservableObject {
     @Published private(set) var isReady = false
     @Published private(set) var session = PiSessionState()
     @Published private(set) var configurationPending = false
+    @Published private(set) var recovery: RecoveredSession?
+    @Published private(set) var restoredDraft = ""
+    @Published private(set) var ownershipRequiresFork = false
 
     private var process: Process?
     private var input: FileHandle?
@@ -191,9 +194,13 @@ final class PiEngine: ObservableObject {
     private var pendingThinking: [String: PiThinkingLevel] = [:]
     private var requestNumber = 0
     private var generation = UUID()
+    private let recoveryStore = SessionRecoveryStore()
+    private var metadata: SessionMetadata?
+    private var writerLease: SessionWriterLease?
 
     func start(resources: URL) {
         self.resources = resources
+        guard process == nil, launchProject == nil else { return }
         launch(resources: resources, project: nil, sessionID: nil)
     }
 
@@ -202,7 +209,37 @@ final class PiEngine: ObservableObject {
         guard launchProject != canonical || process == nil else { return }
         self.resources = resources
         stopProcess(status: nil)
-        launch(resources: resources, project: canonical, sessionID: UUID().uuidString)
+        launchProject = canonical
+        do {
+            if let existing = try recoveryStore.latest(projectPath: canonical.path) {
+                let lease = SessionWriterLease(root: recoveryStore.root, sessionID: existing.id)
+                guard try lease.acquire() == .acquired else {
+                    let recovered = try recoveryStore.recover(sessionID: existing.id, allowRepair: false)
+                    metadata = recovered.metadata
+                    recovery = recovered
+                    restoredDraft = recovered.draft
+                    ownershipRequiresFork = true
+                    status = "Another owner may be writing this session — fork to continue"
+                    return
+                }
+                writerLease = lease
+                let recovered = try recoveryStore.recover(sessionID: existing.id)
+                metadata = recovered.metadata
+                recovery = recovered
+                restoredDraft = recovered.draft
+                guard recovered.metadata.state != .interrupted, recovered.issue == nil else {
+                    status = recovered.actions.isEmpty
+                        ? "Interrupted — restart or fork without replaying unfinished work"
+                        : "Transcript needs recovery — open read-only, export, or fork verified entries"
+                    return
+                }
+                launch(resources: resources, project: canonical, sessionID: existing.id)
+            } else {
+                try beginNewSession(project: canonical, resources: resources)
+            }
+        } catch {
+            fail(error)
+        }
     }
 
     func openSafeSurface(resources: URL) {
@@ -210,13 +247,48 @@ final class PiEngine: ObservableObject {
         guard launchProject != nil else { return }
         stopProcess(status: nil)
         launchProject = nil
+        metadata = nil
+        recovery = nil
+        restoredDraft = ""
         launch(resources: resources, project: nil, sessionID: nil)
     }
 
     func newSession() {
         guard let resources, let project = launchProject else { return }
+        markMetadata(.done)
         stopProcess(status: nil)
-        launch(resources: resources, project: project, sessionID: UUID().uuidString)
+        do { try beginNewSession(project: project, resources: resources) }
+        catch { fail(error) }
+    }
+
+    func restartRecoveredSession() {
+        guard let resources, let project = launchProject, let recovery,
+              recovery.actions.isEmpty, !ownershipRequiresFork
+        else { return }
+        self.recovery = nil
+        launch(resources: resources, project: project, sessionID: recovery.metadata.id)
+    }
+
+    func forkRecoveredSession() {
+        guard let resources, let project = launchProject, let recovery else { return }
+        do {
+            let fork = try recoveryStore.forkVerifiedEntries(from: recovery)
+            writerLease?.release()
+            writerLease = nil
+            let lease = SessionWriterLease(root: recoveryStore.root, sessionID: fork.id)
+            guard try lease.acquire() == .acquired else { throw PiEngineError.command("The recovery fork could not acquire its writer lease.") }
+            metadata = fork
+            writerLease = lease
+            self.recovery = nil
+            ownershipRequiresFork = false
+            launch(resources: resources, project: project, sessionID: fork.id)
+        } catch { fail(error) }
+    }
+
+    func saveDraft(_ draft: String) {
+        guard let metadata, writerLease != nil else { return }
+        do { try recoveryStore.saveDraft(draft, sessionID: metadata.id) }
+        catch { status = "Composer draft could not be saved: \(error.localizedDescription)" }
     }
 
     func sendPrompt(_ text: String) {
@@ -228,6 +300,10 @@ final class PiEngine: ObservableObject {
         session.toolOrder = []
         session.isRunning = true
         session.isSettled = false
+        guard markMetadata(.running) else {
+            session.isRunning = false
+            return
+        }
         status = "Submitting prompt…"
         send(type: "prompt", fields: ["message": message])
     }
@@ -253,7 +329,22 @@ final class PiEngine: ObservableObject {
     }
 
     func stopSession() {
+        markMetadata(.done)
+        recovery = nil
         stopProcess(status: "Session stopped")
+    }
+
+    private func beginNewSession(project: URL, resources: URL) throws {
+        let session = SessionMetadata(id: UUID().uuidString, projectPath: project.path, state: .ready)
+        try recoveryStore.save(metadata: session)
+        let lease = SessionWriterLease(root: recoveryStore.root, sessionID: session.id)
+        guard try lease.acquire() == .acquired else { throw PiEngineError.command("The new session could not acquire its writer lease.") }
+        metadata = session
+        writerLease = lease
+        recovery = nil
+        ownershipRequiresFork = false
+        restoredDraft = ""
+        launch(resources: resources, project: project, sessionID: session.id)
     }
 
     private func launch(resources: URL, project: URL?, sessionID: String?) {
@@ -273,8 +364,7 @@ final class PiEngine: ObservableObject {
         task.executableURL = layout.node
         var arguments = [layout.cli.path, "--mode", "rpc", project == nil ? "--no-approve" : "--approve", "--offline"]
         if let project, let sessionID {
-            let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appending(path: "PiLot/Sessions", directoryHint: .isDirectory)
+            let directory = recoveryStore.root
             do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
             catch { fail(error); return }
             arguments += ["--session-dir", directory.path, "--session-id", sessionID]
@@ -365,7 +455,9 @@ final class PiEngine: ObservableObject {
             try session.apply(record)
             switch type {
             case "agent_start": status = "Running"
-            case "agent_settled": status = "Done"
+            case "agent_settled":
+                status = "Done"
+                markMetadata(.done)
             case "auto_retry_start": status = "Retrying…"
             case "compaction_start": status = "Compacting…"
             default: break
@@ -423,17 +515,44 @@ final class PiEngine: ObservableObject {
     }
 
     private func fail(_ error: Error) {
+        if process != nil { markMetadata(.interrupted) }
         stopProcess(status: error.localizedDescription)
+    }
+
+    @discardableResult
+    private func markMetadata(_ state: SessionMetadata.State) -> Bool {
+        guard var metadata else { return true }
+        metadata.state = state
+        metadata.updatedAt = Date()
+        do {
+            try recoveryStore.save(metadata: metadata)
+            self.metadata = metadata
+            return true
+        } catch {
+            status = "Session state could not be saved: \(error.localizedDescription)"
+            return false
+        }
     }
 
     private func stopProcess(status newStatus: String?) {
         generation = UUID()
-        (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        (process?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        process?.terminationHandler = nil
-        process?.terminate()
+        let stoppedProcess = process
+        let stoppedLease = writerLease
+        (stoppedProcess?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (stoppedProcess?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        stoppedProcess?.terminationHandler = nil
+        stoppedProcess?.terminate()
         process = nil
         input = nil
+        writerLease = nil
+        if let stoppedProcess, stoppedProcess.isRunning {
+            DispatchQueue.global().async {
+                stoppedProcess.waitUntilExit()
+                stoppedLease?.release()
+            }
+        } else {
+            stoppedLease?.release()
+        }
         decodeQueue.sync { recordDecoder.reset() }
         pendingCommands = [:]
         pendingModels = [:]
@@ -444,5 +563,10 @@ final class PiEngine: ObservableObject {
         if let newStatus { status = newStatus }
     }
 
-    deinit { process?.terminate() }
+    deinit {
+        if let process, process.isRunning {
+            process.terminate()
+            kill(process.processIdentifier, SIGKILL)
+        }
+    }
 }

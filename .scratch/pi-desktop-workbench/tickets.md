@@ -55,11 +55,11 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Complete one durable coding run.
 
-- [ ] One exclusive writer lease is enforced across windows and app instances; uncertain ownership requires a fork.
-- [ ] Valid transcript entries, session metadata, and the saved composer draft survive restart.
-- [ ] Incomplete trailing data is repaired only after original bytes are preserved.
-- [ ] Ambiguous or malformed durable data remains preserved with an actionable recovery choice.
-- [ ] Restart marks unfinished work interrupted and never automatically retries or replays it.
+- [x] One exclusive writer lease is enforced across windows and app instances; uncertain ownership requires a fork.
+- [x] Valid transcript entries, session metadata, and the saved composer draft survive restart.
+- [x] Incomplete trailing data is repaired only after original bytes are preserved.
+- [x] Ambiguous or malformed durable data remains preserved with an actionable recovery choice.
+- [x] Restart marks unfinished work interrupted and never automatically retries or replays it.
 
 ## Supervise concurrent sessions
 

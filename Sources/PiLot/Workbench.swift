@@ -284,6 +284,8 @@ struct WorkbenchView: View {
         .onOpenURL { url in Task { await requestOpen(url) } }
         .onChange(of: selectedSessionID) { _, _ in saveNavigation() }
         .onChange(of: inspectorPresented) { _, _ in saveNavigation() }
+        .onChange(of: draft) { _, value in engine.saveDraft(value) }
+        .onChange(of: engine.restoredDraft) { _, value in draft = value }
         .sheet(isPresented: Binding(
             get: { projects.pendingTrustURL != nil },
             set: { if !$0 { projects.pendingTrustURL = nil } }
@@ -406,6 +408,15 @@ private struct LiveSessionDetail: View {
             .padding(.horizontal, 16)
             .frame(minHeight: 54)
 
+            if let recovery = engine.recovery {
+                RecoveryBanner(
+                    recovery: recovery,
+                    forkRequired: engine.ownershipRequiresFork,
+                    restart: engine.restartRecoveredSession,
+                    fork: engine.forkRecoveredSession
+                )
+            }
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if !engine.session.lastPrompt.isEmpty {
@@ -429,6 +440,48 @@ private struct LiveSessionDetail: View {
             LiveComposer(engine: engine, draft: $draft, focus: composerFocus)
         }
         .navigationTitle("Pi session")
+    }
+}
+
+private struct RecoveryBanner: View {
+    let recovery: RecoveredSession
+    let forkRequired: Bool
+    let restart: () -> Void
+    let fork: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                .font(.headline)
+            Text(detail)
+                .font(.callout)
+            HStack {
+                if recovery.actions.isEmpty, !forkRequired {
+                    Button("Restart session", action: restart).buttonStyle(.borderedProminent)
+                }
+                Button("Fork preserved work", action: fork)
+                if let copy = recovery.recoveryCopy {
+                    Text("Original preserved: \(copy.lastPathComponent)")
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.10))
+        .accessibilityElement(children: .contain)
+    }
+
+    private var title: String {
+        if forkRequired { return "Writer ownership is uncertain" }
+        if !recovery.actions.isEmpty { return "Transcript recovery needs your choice" }
+        return "Session was interrupted"
+    }
+
+    private var detail: String {
+        if forkRequired { return "This window remains read-only. Fork to obtain a new session, writer lease, and process." }
+        if !recovery.actions.isEmpty { return "Malformed durable data was left unchanged. Fork verified entries, or use the preserved original for read-only export." }
+        return "\(recovery.validEntryCount) durable transcript entries and your composer draft were restored. Restart will not retry the unfinished prompt."
     }
 }
 
@@ -517,7 +570,7 @@ private struct LiveComposer: View {
                 Spacer()
                 Button("Send", systemImage: "arrow.up", action: submit)
                     .buttonStyle(.borderedProminent)
-                    .disabled(engine.session.isRunning || engine.configurationPending || engine.session.model == nil || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!engine.isReady || engine.session.isRunning || engine.configurationPending || engine.session.model == nil || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .controlSize(.small)
             .padding(7)
