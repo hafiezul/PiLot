@@ -195,6 +195,7 @@ struct PiToolRun: Identifiable, Equatable {
     enum Status: Equatable { case running, succeeded, failed }
     let id: String
     let name: String
+    var changedPath: String?
     var arguments = ""
     var output = ""
     var details = ""
@@ -232,6 +233,7 @@ struct PiSessionState {
     var steeringQueue: [String] = []
     var followUpQueue: [String] = []
     var lastPrompt = ""
+    var lastRunChangedPaths: [String] = []
     var interruptions: [PiInterruption] = []
     var timelineItems: [PiTimelineItem] = []
 
@@ -405,6 +407,10 @@ struct PiSessionState {
             let (id, name) = try toolIdentity(record)
             guard tools[id] == nil else { throw PiEngineError.malformedOutput }
             var tool = PiToolRun(id: id, name: name)
+            let arguments = record["args"] as? [String: Any]
+            if name == "edit" || name == "write" {
+                tool.changedPath = arguments?["path"] as? String ?? arguments?["file_path"] as? String
+            }
             tool.arguments = Self.structuredText(record["args"])
             tools[id] = tool
             toolOrder.append(id)
@@ -423,6 +429,9 @@ struct PiSessionState {
             else { throw PiEngineError.malformedOutput }
             apply(result, to: &tool, surface: "tool:\(name)")
             tool.status = isError ? .failed : .succeeded
+            if !isError, let path = tool.changedPath, !lastRunChangedPaths.contains(path) {
+                lastRunChangedPaths.append(path)
+            }
             tools[id] = tool
         default:
             throw PiEngineError.unknownProtocol(type)
@@ -681,6 +690,7 @@ final class PiEngine: ObservableObject {
         session.assistantText = ""
         session.tools = [:]
         session.toolOrder = []
+        session.lastRunChangedPaths = []
         session.interruptions = []
         session.timelineItems = []
         session.isRunning = true

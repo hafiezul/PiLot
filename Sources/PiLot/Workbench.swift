@@ -234,6 +234,10 @@ struct WorkbenchView: View {
 
     private var selectedEngine: PiEngine? { supervisor.engine(for: selectedSessionID) }
 
+    private var selectedProjectURL: URL? {
+        supervisor.projectURL(for: selectedSessionID) ?? activeProject?.url
+    }
+
     var body: some View {
         GeometryReader { geometry in
             NavigationSplitView {
@@ -278,8 +282,13 @@ struct WorkbenchView: View {
                 }
             }
             .inspector(isPresented: $inspectorPresented) {
-                ChangesInspector(scope: $inspectorScope, selectedFile: $selectedFile)
-                    .inspectorColumnWidth(min: 260, ideal: 340, max: 480)
+                ChangesInspector(
+                    scope: $inspectorScope,
+                    selectedFile: $selectedFile,
+                    project: selectedProjectURL,
+                    lastRunPaths: selectedEngine?.session.lastRunChangedPaths ?? []
+                )
+                .inspectorColumnWidth(min: 300, ideal: 380, max: 560)
             }
             .onAppear { adaptInspector(to: geometry.size.width) }
             .onChange(of: geometry.size.width) { _, width in adaptInspector(to: width) }
@@ -1447,7 +1456,13 @@ private struct Composer: View {
 private struct ChangesInspector: View {
     @Binding var scope: String
     @Binding var selectedFile: String
-    private let files = ["docs/install.md", "README.md"]
+    let project: URL?
+    let lastRunPaths: [String]
+    @StateObject private var store = ChangesStore()
+
+    private var selected: ChangedFile? {
+        store.inspection.files.first { $0.path == selectedFile } ?? store.inspection.files.first
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1458,47 +1473,125 @@ private struct ChangesInspector: View {
             .pickerStyle(.segmented)
             .padding(10)
 
-            List(files, id: \.self, selection: $selectedFile) { file in
+            Text(scope == "Last turn"
+                 ? "Paths changed by the latest run; diffs show current workspace state. Shared-root peer changes may be present."
+                 : "Current Git working-tree and index changes. Read only.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+
+            if store.isLoading {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 100)
+            } else if let reason = store.inspection.unavailableReason {
+                ContentUnavailableView("Aggregate diff unavailable", systemImage: "doc.text.magnifyingglass", description: Text(reason))
+                    .frame(minHeight: 120)
+            }
+
+            List(store.inspection.files, selection: $selectedFile) { file in
                 HStack {
-                    Text(file).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(file.path).lineLimit(1)
+                        Text(file.status.rawValue).font(.caption2).foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    Text(file == files[0] ? "+8 −2" : "+2")
+                    Text("+\(file.additions) −\(file.deletions)")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
-                .tag(file)
-                .accessibilityLabel("\(file), \(file == files[0] ? "8 additions, 2 deletions" : "2 additions")")
+                .tag(file.path)
+                .accessibilityLabel("\(file.path), \(file.status.rawValue), \(file.additions) additions, \(file.deletions) deletions")
             }
-            .frame(minHeight: 115, maxHeight: 150)
+            .frame(minHeight: 115, maxHeight: 180)
 
             Divider()
-            ScrollView([.horizontal, .vertical]) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("@@ Installation guidance @@").foregroundStyle(.secondary)
-                    DiffLine(symbol: "−", text: "Open System Settings manually", color: .red)
-                    DiffLine(symbol: "+", text: "Verify the downloaded DMG path.", color: .green)
-                    DiffLine(symbol: "+", text: "Run xattr only for that exact path.", color: .green)
+            if let file = selected {
+                HStack {
+                    Text(file.path).font(.caption.monospaced()).lineLimit(1)
+                    Spacer()
+                    Button("Open in Editor", systemImage: "square.and.pencil") { open(file) }
+                    Button("Reveal in Finder", systemImage: "folder") { reveal(file) }
                 }
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(12)
+                .labelStyle(.iconOnly)
+                .padding(8)
+                ScrollView([.horizontal, .vertical]) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(file.hunks) { hunk in
+                            Text(hunk.header).foregroundStyle(.secondary).padding(.vertical, 5)
+                            ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
+                                NativeDiffLine(line: line)
+                            }
+                        }
+                        if file.hunks.isEmpty {
+                            Text("No current textual diff is available for this path.")
+                                .foregroundStyle(.secondary).padding(12)
+                        }
+                    }
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 8)
+                }
             }
             Spacer(minLength: 0)
         }
         .navigationTitle("Changes")
         .accessibilityLabel("Read-only changes inspector")
+        .task(id: refreshID) { refresh() }
+        .onChange(of: store.inspection.files) { _, files in
+            if !files.contains(where: { $0.path == selectedFile }) { selectedFile = files.first?.path ?? "" }
+        }
+    }
+
+    private var refreshID: String {
+        "\(project?.path ?? "")|\(scope)|\(lastRunPaths.joined(separator: "|"))"
+    }
+
+    private func refresh() {
+        store.refresh(project: project, lastRunPaths: lastRunPaths, lastRunOnly: scope == "Last turn")
+    }
+
+    private func fileURL(_ file: ChangedFile) -> URL? { project?.appending(path: file.path) }
+
+    private func open(_ file: ChangedFile) {
+        guard let project, let url = fileURL(file), FileManager.default.fileExists(atPath: url.path) else { return }
+        FileHandoff.openInEditor(url, project: project)
+    }
+
+    private func reveal(_ file: ChangedFile) {
+        guard let url = fileURL(file) else { return }
+        FileHandoff.revealInFinder(url)
     }
 }
 
-private struct DiffLine: View {
-    let symbol: String
-    let text: String
-    let color: Color
+private struct NativeDiffLine: View {
+    let line: DiffLine
 
     var body: some View {
-        Text("\(symbol) \(text)")
-            .padding(.horizontal, 3)
-            .background(color.opacity(0.10))
-            .accessibilityLabel("\(symbol == "+" ? "Added" : "Removed") line: \(text)")
+        HStack(spacing: 0) {
+            Text(line.oldLine.map(String.init) ?? " ").frame(width: 34, alignment: .trailing)
+            Text(line.newLine.map(String.init) ?? " ").frame(width: 34, alignment: .trailing)
+            Text(" \(symbol) \(line.text)").frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 3)
+        .background(color.opacity(0.10))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var symbol: String {
+        switch line.kind { case .addition: "+"; case .deletion: "−"; case .context: " " }
+    }
+
+    private var color: Color {
+        switch line.kind { case .addition: .green; case .deletion: .red; case .context: .clear }
+    }
+
+    private var accessibilityText: String {
+        switch line.kind {
+        case .addition: "Added line \(line.newLine ?? 0): \(line.text)"
+        case .deletion: "Removed line \(line.oldLine ?? 0): \(line.text)"
+        case .context: "Context line \(line.newLine ?? 0): \(line.text)"
+        }
     }
 }

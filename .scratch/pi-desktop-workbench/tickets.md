@@ -134,11 +134,11 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Complete one durable coding run.
 
-- [ ] Last-run paths come from structured activity and are labelled as current workspace state, not a historical snapshot.
-- [ ] Project inspection shows the current Git working-tree/index difference without pagers, external diff drivers, or writes.
-- [ ] Non-Git or unavailable-Git projects show known changed paths and state why an aggregate diff is unavailable.
-- [ ] Native textual diffs expose path, status, counts, hunks, and accessible line semantics.
-- [ ] Open in Editor follows the usable Pi editor preference or system default; Reveal in Finder works for existing paths.
+- [x] Last-run paths come from structured activity and are labelled as current workspace state, not a historical snapshot.
+- [x] Project inspection shows the current Git working-tree/index difference without pagers, external diff drivers, or writes.
+- [x] Non-Git or unavailable-Git projects show known changed paths and state why an aggregate diff is unavailable.
+- [x] Native textual diffs expose path, status, counts, hunks, and accessible line semantics.
+- [x] Open in Editor follows the usable Pi editor preference or system default; Reveal in Finder works for existing paths.
 
 ## Manage project and session navigation
 

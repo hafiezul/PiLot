@@ -54,6 +54,10 @@ final class SessionSupervisor: ObservableObject {
 
     func engine(for sessionID: String) -> PiEngine? { engines[sessionID] }
 
+    func projectURL(for sessionID: String) -> URL? {
+        index.session(id: sessionID).map { URL(fileURLWithPath: $0.projectPath, isDirectory: true) }
+    }
+
     func peers(of sessionID: String) -> [SupervisedSessionSummary] { index.peers(of: sessionID) }
 
     func refreshCLIHistory() {
