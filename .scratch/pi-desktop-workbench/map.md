@@ -20,10 +20,10 @@ A standalone, decision-ready product, UX, and technical specification for an uns
 ## Decisions so far
 
 - [Research Pi runtime and shared state](issues/01-research-pi-runtime-and-state.md) — Pi supports SDK and RPC desktop integration; auth/settings can share their locking managers, while each session file requires one live writer and safe handoff or forking.
+- [Map Pi TUI capabilities to desktop](issues/02-research-pi-tui-portability.md) — Most Pi engine semantics port directly or through native adapters, while terminal presentation must be redesigned and extension compatibility must explicitly exclude unsupported TUI-only surfaces.
 
 ## Not yet specified
 
-- Capability-specific compatibility and UX questions that only become visible after the Pi runtime and TUI surfaces are inventoried.
 - Detailed recovery, migration, and concurrency edge cases exposed by the chosen engine/state architecture.
 - Additional prototype variants needed after the first workbench interaction model is tested with the product owner.
 
