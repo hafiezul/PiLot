@@ -10,10 +10,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** None — can start immediately.
 
-- [ ] The app launches the bundled Pi RPC runtime on both Apple silicon and Intel without using an installed Node, Pi, npm, PATH lookup, terminal, or PTY.
-- [ ] Startup performs no package-manager or network operation.
-- [ ] Build verification checks dependency locks and upstream runtime checksums.
-- [ ] The running app can display its PiLot, Pi, Node, macOS, and CPU versions.
+- [x] The app launches the bundled Pi RPC runtime on both Apple silicon and Intel without using an installed Node, Pi, npm, PATH lookup, terminal, or PTY.
+- [x] Startup performs no package-manager or network operation.
+- [x] Build verification checks dependency locks and upstream runtime checksums.
+- [x] The running app can display its PiLot, Pi, Node, macOS, and CPU versions.
 
 ## Build the native workbench shell
 
