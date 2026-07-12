@@ -157,10 +157,10 @@ Work the **frontier**: any ticket whose blockers are all done.
 
 **Blocked by:** Supervise concurrent sessions; Answer Pi and extension interruptions.
 
-- [ ] Notifications are requested only after the user enables them.
-- [ ] Notifications fire only while PiLot is inactive and only for input needed, failure, or completion.
-- [ ] Selecting a notification focuses the exact project, session, and active interruption when applicable.
-- [ ] Disabled or denied notifications do not impair in-app attention state.
+- [x] Notifications are requested only after the user enables them.
+- [x] Notifications fire only while PiLot is inactive and only for input needed, failure, or completion.
+- [x] Selecting a notification focuses the exact project, session, and active interruption when applicable.
+- [x] Disabled or denied notifications do not impair in-app attention state.
 
 ## Report compatibility and reload safely
 

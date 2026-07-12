@@ -74,6 +74,7 @@ struct SupervisedSessionIndex {
 @MainActor
 final class SessionSupervisor: ObservableObject {
     let runtime = PiEngine()
+    let notifications = SessionNotifications()
     @Published private(set) var index = SupervisedSessionIndex()
     @Published private(set) var cliSessions: [CLISessionRecord] = []
     @Published var cliContinuationFailure: CLISessionContinuationFailure?
@@ -233,8 +234,16 @@ final class SessionSupervisor: ObservableObject {
     }
 
     private func observe(_ engine: PiEngine, id: String) {
-        observations[id] = engine.$attentionState.combineLatest(engine.$activityDate).dropFirst().sink { [weak self] state, date in
-            self?.index.update(sessionID: id, state: state, at: date)
+        observations[id] = engine.$attentionState.combineLatest(engine.$activityDate).dropFirst().sink { [weak self, weak engine] state, date in
+            guard let self, let previous = self.index.session(id: id)?.state else { return }
+            self.index.update(sessionID: id, state: state, at: date)
+            if let session = self.index.session(id: id) {
+                self.notifications.post(
+                    session: session,
+                    previous: previous,
+                    interruptionID: engine?.session.activeInterruptions.first?.id
+                )
+            }
         }
         announcementObservations[id] = engine.$attentionAnnouncement.dropFirst().sink { _ in
             NSAccessibility.post(

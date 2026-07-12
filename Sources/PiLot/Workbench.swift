@@ -188,7 +188,7 @@ final class WorkbenchStore: ObservableObject {
 
 // MARK: - Workbench
 
-enum WorkbenchFocus: Hashable { case sidebar, composer }
+enum WorkbenchFocus: Hashable { case sidebar, composer, interruption(String) }
 
 struct WorkbenchActions {
     let openProject: () -> Void
@@ -318,6 +318,7 @@ struct WorkbenchView: View {
         .task {
             supervisor.refreshCLIHistory()
             if let project = activeProject { await requestOpen(project.url) }
+            if let destination = supervisor.notifications.destination { openNotification(destination) }
         }
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
@@ -328,6 +329,9 @@ struct WorkbenchView: View {
         .onChange(of: selectedSessionID) { _, id in
             windowAccess = supervisor.windowAccess(to: id, from: windowID)
             saveNavigation()
+        }
+        .onChange(of: supervisor.notifications.destination) { _, destination in
+            if let destination { openNotification(destination) }
         }
         .onChange(of: inspectorPresented) { _, _ in saveNavigation() }
         .onChange(of: draft) { _, value in selectedEngine?.saveDraft(value) }
@@ -406,6 +410,20 @@ struct WorkbenchView: View {
     private func beginRenaming(_ session: SupervisedSessionSummary) {
         renamingSessionID = session.id
         sessionTitle = session.title
+    }
+
+    private func openNotification(_ destination: NotificationDestination) {
+        guard supervisor.index.session(id: destination.sessionID)?.projectPath == destination.projectPath else {
+            supervisor.notifications.consumeDestination()
+            return
+        }
+        if let project = projects.index.recents.first(where: { $0.path == destination.projectPath }) {
+            activeProjectID = project.id
+            projects.activeProjectID = project.id
+        }
+        selectedSessionID = destination.sessionID
+        focus = destination.interruptionID.map(WorkbenchFocus.interruption) ?? .composer
+        supervisor.notifications.consumeDestination()
     }
 
     private func continueCLISession(_ session: CLISessionRecord) {
@@ -630,6 +648,8 @@ private struct LiveSessionDetail: View {
                 LiveInterruptionView(interruption: interruption) { response in
                     engine.answerInterruption(interruption.id, response: response)
                 }
+                .focusable()
+                .focused(composerFocus, equals: .interruption(interruption.id))
                 .disabled(isReadOnly)
             }
             LiveComposer(engine: engine, draft: $draft, focus: composerFocus)

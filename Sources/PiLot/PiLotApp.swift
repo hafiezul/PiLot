@@ -16,8 +16,8 @@ struct PiLotApp: App {
         .commands { PiLotCommands() }
 
         Settings {
-            SettingsView(engine: supervisor.runtime)
-                .frame(width: 460, height: 250)
+            SettingsView(engine: supervisor.runtime, notifications: supervisor.notifications)
+                .frame(width: 460, height: 320)
                 .task { startEngine() }
         }
 
@@ -84,6 +84,7 @@ private struct PiLotCommands: Commands {
 
 private struct SettingsView: View {
     @ObservedObject var engine: PiEngine
+    @ObservedObject var notifications: SessionNotifications
     private let versions = VersionInfo.current
 
     var body: some View {
@@ -98,6 +99,15 @@ private struct SettingsView: View {
             Section("Status") {
                 Label(engine.status, systemImage: engine.isReady ? "checkmark.circle.fill" : "gearshape.2")
                     .foregroundStyle(engine.isReady ? .green : .secondary)
+            }
+            Section("Notifications") {
+                Toggle("Notify when attention is needed", isOn: Binding(
+                    get: { notifications.enabled },
+                    set: notifications.setEnabled
+                ))
+                Text(notifications.authorization)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
