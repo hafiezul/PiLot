@@ -3,9 +3,10 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
+import { createServer as createPortServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createServer } from "vite";
 
 const appPath = path.resolve(import.meta.dirname, "..");
 const electronPath = createRequire(import.meta.url)("electron") as string;
@@ -27,7 +28,7 @@ async function fixture(version = 3) {
 
 async function availablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
-    const server = createServer();
+    const server = createPortServer();
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
@@ -106,6 +107,23 @@ test("launches a sandboxed command center from the canonical Pi environment", as
     });
   } finally {
     await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("loads the renderer from Vite during development", async () => {
+  const environment = await fixture();
+  const server = await createServer();
+  let app: Awaited<ReturnType<typeof launch>> | undefined;
+
+  try {
+    await server.listen();
+    app = await launch(environment.agentDir, false, { PILOT_DEV_SERVER: "1" });
+    await expect(app.window).toHaveURL("http://127.0.0.1:5173/");
+    await expect(app.window.locator('script[src*="/@vite/client"]')).toHaveCount(1);
+  } finally {
+    if (app) await close(app);
+    await server.close();
     await rm(environment.root, { recursive: true, force: true });
   }
 });

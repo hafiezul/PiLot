@@ -6,6 +6,7 @@
   "main": "dist/main/main/main.js",
   "scripts": {
     "build": "npm run typecheck && vite build && tsc -p tsconfig.main.json",
+    "dev": "npm run typecheck && tsc -p tsconfig.main.json && node scripts/dev.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
     "test": "npm run build && playwright test"

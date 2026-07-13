@@ -9,6 +9,9 @@ import { getStartupState } from "./readiness.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
+const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
+  ? "http://127.0.0.1:5173"
+  : undefined;
 const debuggingPort = process.argv.find((argument) => argument.startsWith("--pilot-debug-port="))?.split("=")[1];
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
@@ -51,7 +54,9 @@ function createWindow() {
   });
 
   window.once("ready-to-show", () => window.show());
-  void window.loadFile(path.join(directory, "../../renderer/index.html"));
+  void (developmentRenderer
+    ? window.loadURL(developmentRenderer)
+    : window.loadFile(path.join(directory, "../../renderer/index.html")));
 }
 
 app.whenReady().then(async () => {
