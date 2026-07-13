@@ -1,0 +1,31 @@
+{
+  "name": "pilot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/main/main.js",
+  "scripts": {
+    "build": "npm run typecheck && vite build && tsc -p tsconfig.main.json",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
+    "test": "npm run build && playwright test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "24.12.4",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "electron": "43.1.0",
+    "typescript": "5.9.3",
+    "vite": "8.1.4"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
