@@ -125,7 +125,7 @@ test("configures providers on a dedicated settings page without exposing secrets
   const app = await launch(environment.agentDir, false, { OPENAI_API_KEY: "fixture-env-secret" });
 
   try {
-    const settingsButton = app.window.getByRole("button", { name: "Settings" });
+    const settingsButton = app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("button", { name: "Settings" });
     await settingsButton.click();
     const settings = app.window.getByRole("main", { name: "Settings" });
     await expect(app.window.getByRole("dialog")).toHaveCount(0);
@@ -213,6 +213,12 @@ test("applies and persists PiLot appearance preferences", async () => {
     await settings.getByRole("radio", { name: "Dark" }).check();
     await expect.poll(() => first.window.evaluate(() => getComputedStyle(document.documentElement).color)).toBe("rgb(232, 232, 229)");
     await expect(first.window.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page");
+    await first.window.getByRole("button", { name: "Providers" }).click();
+    await expect(settings.getByRole("region", { name: "Provider authentication" })).toBeVisible();
+    expect(await first.window.evaluate(() => {
+      const background = (selector: string) => getComputedStyle(document.querySelector(selector)!).backgroundColor;
+      return background(".provider-setup") === background(".settings-main");
+    })).toBe(true);
   } finally {
     await close(first);
   }

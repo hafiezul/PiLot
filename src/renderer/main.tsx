@@ -204,7 +204,10 @@ function App() {
           ) : (
             <p className="muted nav-empty">Projects with Pi tasks will appear here.</p>
           )}
-          <div className="nav-footer"><span aria-hidden="true">⌘</span> Command center</div>
+          <div className="nav-footer">
+            <span className="command-center"><span aria-hidden="true">⌘</span> Command center</span>
+            <button ref={settingsButton} className="settings-button" aria-label="Settings" title="Settings" onClick={() => setShowSettings(true)}><span aria-hidden="true">⚙</span></button>
+          </div>
         </nav>
 
         <main id="content" className="workspace-main">
@@ -213,7 +216,7 @@ function App() {
               <span className="eyebrow">Command center</span>
               <h1>Good to have you here.</h1>
             </div>
-            <div className="top-actions"><span className="privacy"><i /> Local only</span><button ref={settingsButton} className="account-button" onClick={() => setShowSettings(true)}>Settings</button></div>
+            <span className="privacy"><i /> Local only</span>
           </header>
 
           {!state ? (
