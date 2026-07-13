@@ -1,4 +1,4 @@
-import { AuthStorage, getAgentDir, ModelRegistry, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, getAgentDir, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { shell, type WebContents } from "electron";
 import path from "node:path";
 import type { OAuthEvent, ProviderState } from "../shared/providers.js";
@@ -7,8 +7,7 @@ function services() {
   const agentDir = getAgentDir();
   const auth = AuthStorage.create(path.join(agentDir, "auth.json"));
   const models = ModelRegistry.create(auth, path.join(agentDir, "models.json"));
-  const settings = SettingsManager.create(process.cwd(), agentDir);
-  return { auth, models, settings };
+  return { auth, models };
 }
 
 function source(status: ReturnType<ModelRegistry["getProviderAuthStatus"]>) {
@@ -24,7 +23,7 @@ function source(status: ReturnType<ModelRegistry["getProviderAuthStatus"]>) {
 }
 
 export function getProviderState(): ProviderState {
-  const { auth, models, settings } = services();
+  const { auth, models } = services();
   const oauthIds = new Set(auth.getOAuthProviders().map(({ id }) => id));
   const ids = new Set([...models.getAll().map(({ provider }) => provider), ...auth.list(), ...oauthIds]);
   const providers = [...ids].map((id) => {
@@ -43,17 +42,8 @@ export function getProviderState(): ProviderState {
     id: model.id,
     name: model.name || model.id,
     provider: model.provider,
-    value: `${model.provider}/${model.id}`,
   })).sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
-  const provider = settings.getDefaultProvider();
-  const model = settings.getDefaultModel();
-  return {
-    providers,
-    models: available,
-    selectedModel: provider && model && available.some(({ value }) => value === `${provider}/${model}`)
-      ? `${provider}/${model}`
-      : undefined,
-  };
+  return { providers, models: available };
 }
 
 export function setApiKey(provider: string, key: string) {
@@ -70,21 +60,6 @@ export function removeApiKey(provider: string) {
 
 export function logout(provider: string) {
   services().auth.logout(provider);
-  return getProviderState();
-}
-
-export async function selectModel(value: string) {
-  const separator = value.indexOf("/");
-  const provider = value.slice(0, separator);
-  const modelId = value.slice(separator + 1);
-  const { models, settings } = services();
-  if (separator < 1 || !models.getAvailable().some((model) => model.provider === provider && model.id === modelId)) {
-    throw new Error("That model is not currently available.");
-  }
-  settings.setDefaultModelAndProvider(provider, modelId);
-  await settings.flush();
-  const error = settings.drainErrors()[0];
-  if (error) throw error.error;
   return getProviderState();
 }
 

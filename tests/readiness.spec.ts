@@ -107,7 +107,7 @@ test("launches a sandboxed command center from the canonical Pi environment", as
   }
 });
 
-test("configures providers and persists the selected model in the shared Pi environment", async () => {
+test("configures providers in dismissible settings without exposing secrets", async () => {
   const environment = await fixture();
   await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
     providers: {
@@ -119,11 +119,12 @@ test("configures providers and persists the selected model in the shared Pi envi
       },
     },
   }));
-  let app = await launch(environment.agentDir, false, { OPENAI_API_KEY: "fixture-env-secret" });
+  const app = await launch(environment.agentDir, false, { OPENAI_API_KEY: "fixture-env-secret" });
 
   try {
-    await app.window.getByRole("button", { name: "Providers and models" }).click();
-    const setup = app.window.getByRole("region", { name: "Providers and models" });
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    const dialog = app.window.getByRole("dialog", { name: "Settings" });
+    const setup = dialog.getByRole("region", { name: "Provider authentication" });
     await expect(setup).toContainText("Anthropic");
     await expect(setup).toContainText("Stored API key");
     await expect(setup).toContainText("Environment");
@@ -132,13 +133,8 @@ test("configures providers and persists the selected model in the shared Pi envi
     await expect(setup).not.toContainText("fixture-env-secret");
     await expect(setup).not.toContainText("local-placeholder");
 
-    await setup.getByLabel("Model").selectOption("fixture/fixture-model");
-    await expect(setup).toContainText("Model saved");
-    expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8"))).toMatchObject({
-      defaultProvider: "fixture",
-      defaultModel: "fixture-model",
-    });
-
+    await setup.getByLabel("Provider").selectOption("fixture");
+    await expect(setup).toContainText("1 model available");
     await setup.getByLabel("Provider").selectOption("anthropic");
     await setup.getByRole("button", { name: "Replace API key" }).click();
     await setup.getByLabel("API key for Anthropic").fill("replacement-secret");
@@ -152,10 +148,11 @@ test("configures providers and persists the selected model in the shared Pi envi
     await expect(setup).toContainText("Environment");
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "auth.json"), "utf8")).anthropic).toBeUndefined();
 
-    await close(app);
-    app = await launch(environment.agentDir, false, { OPENAI_API_KEY: "fixture-env-secret" });
-    await app.window.getByRole("button", { name: "Providers and models" }).click();
-    await expect(app.window.getByLabel("Model", { exact: true })).toHaveValue("fixture/fixture-model");
+    await dialog.getByRole("button", { name: "Close settings" }).click();
+    await expect(dialog).not.toBeVisible();
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    await app.window.keyboard.press("Escape");
+    await expect(app.window.getByRole("dialog", { name: "Settings" })).not.toBeVisible();
   } finally {
     await close(app);
     await rm(environment.root, { recursive: true, force: true });

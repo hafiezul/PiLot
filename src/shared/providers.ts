@@ -14,13 +14,11 @@ export type ModelSummary = {
   id: string;
   name: string;
   provider: string;
-  value: string;
 };
 
 export type ProviderState = {
   models: ModelSummary[];
   providers: ProviderSummary[];
-  selectedModel?: string;
 };
 
 export type OAuthEvent =
@@ -36,7 +34,6 @@ export type PiLotApi = {
   removeApiKey(provider: string): Promise<ProviderState>;
   login(provider: string): Promise<ProviderState>;
   logout(provider: string): Promise<ProviderState>;
-  selectModel(value: string): Promise<ProviderState>;
   respondToOAuth(value?: string): Promise<void>;
   onOAuthEvent(listener: (event: OAuthEvent) => void): () => void;
 };

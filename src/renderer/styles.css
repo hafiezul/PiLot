@@ -51,7 +51,13 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .readiness li p { margin: 0; color: #62625e; font-size: 12px; line-height: 1.5; }
 .gap-mark { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid #9b702c; border-radius: 50%; color: #805814; font-size: 11px; font-weight: 800; }
 .loading { color: #686864; text-align: center; }
-.provider-setup { max-width: 620px; margin: 0 auto; padding: 24px; border: 1px solid #d8d8d4; background: #fdfdfc; }
+.settings-dialog { width: min(680px, calc(100% - 48px)); max-height: calc(100% - 72px); padding: 0; border: 1px solid #c8c8c4; border-radius: 8px; color: inherit; background: #fdfdfc; box-shadow: 0 8px 8px rgb(0 0 0 / 14%); }
+.settings-dialog::backdrop { background: rgb(20 20 19 / 32%); }
+.settings-dialog > header { display: flex; justify-content: space-between; align-items: center; height: 48px; padding: 0 14px 0 24px; border-bottom: 1px solid #d8d8d4; }
+.settings-dialog > header h1 { margin: 0; font-size: 16px; }
+.settings-dialog > header button { width: 30px; height: 30px; border: 0; border-radius: 4px; color: #686864; background: transparent; font-size: 20px; cursor: pointer; }
+.settings-dialog > header button:hover { background: #ededeb; }
+.provider-setup { padding: 24px; background: #fdfdfc; }
 .setup-heading { display: flex; justify-content: space-between; gap: 24px; align-items: start; margin-bottom: 20px; }
 .setup-heading > span { max-width: 220px; font-size: 12px; text-align: right; }
 .provider-setup label { display: grid; gap: 6px; color: #686864; font-size: 12px; font-weight: 650; }
@@ -92,7 +98,10 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   main { background: #1d1e1c; }
   .navigation, .inspector, .tabs, dl div, .nav-footer { border-color: #393a37; }
   .project-list li:first-child { background: #343532; }
-  .readiness, .provider-setup { border-color: #40413d; background: #242523; }
+  .readiness { border-color: #40413d; background: #242523; }
+  .settings-dialog, .provider-setup { color: #e8e8e5; background: #242523; }
+  .settings-dialog, .settings-dialog > header { border-color: #40413d; }
+  .settings-dialog > header button:hover { background: #343532; }
   .account-button, .provider-setup button, .provider-setup select, .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
   .provider-detail, .credential-summary li { border-color: #40413d; }
   .key-form, .oauth-flow { background: #2c2d2a; }

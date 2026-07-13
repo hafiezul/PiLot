@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, nativeTheme } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getStartupState } from "./readiness.js";
-import { getProviderState, login, logout, removeApiKey, respondToOAuth, selectModel, setApiKey } from "./providers.js";
+import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const debuggingPort = process.argv.find((argument) => argument.startsWith("--pilot-debug-port="))?.split("=")[1];
@@ -41,7 +41,6 @@ app.whenReady().then(() => {
   ipcMain.handle("providers:remove-key", (_event, provider: string) => removeApiKey(provider));
   ipcMain.handle("providers:login", (event, provider: string) => login(provider, event.sender));
   ipcMain.handle("providers:logout", (_event, provider: string) => logout(provider));
-  ipcMain.handle("providers:select-model", (_event, value: string) => selectModel(value));
   ipcMain.handle("providers:oauth-reply", (_event, value?: string) => respondToOAuth(value));
   createWindow();
   app.on("activate", () => {

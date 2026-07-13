@@ -9,7 +9,6 @@ const api: PiLotApi = {
   removeApiKey: (provider) => ipcRenderer.invoke("providers:remove-key", provider),
   login: (provider) => ipcRenderer.invoke("providers:login", provider),
   logout: (provider) => ipcRenderer.invoke("providers:logout", provider),
-  selectModel: (value) => ipcRenderer.invoke("providers:select-model", value),
   respondToOAuth: (value) => ipcRenderer.invoke("providers:oauth-reply", value),
   onOAuthEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, value: OAuthEvent) => listener(value);

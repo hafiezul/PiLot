@@ -1,10 +1,10 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import type { StartupState } from "../shared/readiness";
 import "./styles.css";
 
-function ProviderSetup({ onChange }: { onChange(): void }) {
+function ProviderSettings({ onChange }: { onChange(): void }) {
   const [state, setState] = useState<ProviderState>();
   const [providerId, setProviderId] = useState("");
   const [editingKey, setEditingKey] = useState(false);
@@ -35,12 +35,13 @@ function ProviderSetup({ onChange }: { onChange(): void }) {
     try { update(await action(), notice); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
 
-  if (!state) return <section className="provider-setup" aria-label="Providers and models"><p role="status">Loading providers…</p></section>;
+  if (!state) return <section className="provider-setup" aria-label="Provider authentication"><p role="status">Loading providers…</p></section>;
 
+  const modelCount = state.models.filter((model) => model.provider === providerId).length;
   return (
-    <section className="provider-setup" aria-label="Providers and models">
+    <section className="provider-setup" aria-label="Provider authentication">
       <div className="setup-heading">
-        <div><p className="eyebrow">Pi environment</p><h2>Providers &amp; models</h2></div>
+        <div><p className="eyebrow">Pi environment</p><h2>Provider authentication</h2></div>
         <span className="muted">Secrets stay in Pi's credential store.</span>
       </div>
       <ul className="credential-summary" aria-label="Detected credentials">
@@ -54,7 +55,7 @@ function ProviderSetup({ onChange }: { onChange(): void }) {
       </label>
 
       {provider && <div className="provider-detail">
-        <div><strong>{provider.name}</strong><span className={provider.configured ? "connected" : "muted"}>{provider.sourceLabel ?? "Not configured"}</span></div>
+        <div><strong>{provider.name}</strong><span className={provider.configured ? "connected" : "muted"}>{provider.sourceLabel ?? "Not configured"}</span><span className="muted">{modelCount} model{modelCount === 1 ? "" : "s"} available</span></div>
         <div className="actions">
           <button onClick={() => setEditingKey(true)}>{provider.credentialType === "api_key" ? "Replace API key" : "Add API key"}</button>
           {provider.credentialType === "api_key" && <button onClick={() => void attempt(() => window.pilot.removeApiKey(provider.id), "API key removed")}>Remove API key</button>}
@@ -91,22 +92,24 @@ function ProviderSetup({ onChange }: { onChange(): void }) {
         {oauth.type === "select" && <div><p>{oauth.message}</p>{oauth.options.map((option) => <button key={option.id} onClick={() => void window.pilot.respondToOAuth(option.id)}>{option.label}</button>)}</div>}
       </div>}
 
-      <label>Model
-        <select aria-label="Model" value={state.selectedModel ?? ""} onChange={(event) => void attempt(() => window.pilot.selectModel(event.target.value), "Model saved")}>
-          <option value="" disabled>Select an available model</option>
-          {state.models.map((model) => <option key={model.value} value={model.value}>{model.name} · {model.provider}</option>)}
-        </select>
-      </label>
-      {state.models.length === 0 && <p className="muted">Connect a provider to make its models available.</p>}
       {message && <p className="success" role="status">{message}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
   );
 }
 
+function SettingsDialog({ onChange, onClose }: { onChange(): void; onClose(): void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => dialog.current?.showModal(), []);
+  return <dialog className="settings-dialog" ref={dialog} onClose={onClose} aria-labelledby="settings-title">
+    <header><h1 id="settings-title">Settings</h1><button aria-label="Close settings" onClick={() => dialog.current?.close()}>×</button></header>
+    <ProviderSettings onChange={onChange} />
+  </dialog>;
+}
+
 function App() {
   const [state, setState] = useState<StartupState>();
-  const [showProviders, setShowProviders] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const refresh = () => void window.pilot.getStartupState().then(setState);
 
   useEffect(refresh, []);
@@ -147,10 +150,10 @@ function App() {
               <span className="eyebrow">Command center</span>
               <h1>Good to have you here.</h1>
             </div>
-            <div className="top-actions"><span className="privacy"><i /> Local only</span><button className="account-button" onClick={() => setShowProviders((shown) => !shown)}>Providers and models</button></div>
+            <div className="top-actions"><span className="privacy"><i /> Local only</span><button className="account-button" onClick={() => setShowSettings(true)}>Settings</button></div>
           </header>
 
-          {showProviders ? <ProviderSetup onChange={refresh} /> : !state ? (
+          {!state ? (
             <p role="status" className="loading">Checking your Pi environment…</p>
           ) : state.gaps.length === 0 ? (
             <section className="ready" aria-label={`${state.passed} readiness checks passed`}>
@@ -193,6 +196,7 @@ function App() {
           </div>
         </aside>
       </div>
+      {showSettings && <SettingsDialog onChange={refresh} onClose={() => setShowSettings(false)} />}
     </>
   );
 }
