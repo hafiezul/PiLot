@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { LiveInputMode, RunEvidence, RunEvidenceItem, RunStatus, TaskRunState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
-import { assertRunnableTask, withTaskWrite } from "./tasks.js";
+import { assertRunnableTask, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
 
 const runMetadataType = "pilot.run";
 const maximumOutputCharacters = 12_000;
@@ -428,6 +428,7 @@ export class LocalRunCoordinator {
       settingsManager: settings,
       resourceLoader: resources,
       sessionManager: manager,
+      ...getTaskSessionSelection(manager, models),
     });
     return { session, manager };
   }

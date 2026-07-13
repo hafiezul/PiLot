@@ -8,8 +8,10 @@ import { loadPreferences, saveAppearance, saveExpandThinking } from "./preferenc
 import { addProject, createTask, getProjectsState, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { LocalRunCoordinator } from "./runs.js";
+import { getTaskModelState, setTaskModel, setTaskThinking } from "./tasks.js";
 import { getStartupState } from "./readiness.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
+import type { ThinkingLevel } from "../shared/projects.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
@@ -114,6 +116,16 @@ app.whenReady().then(async () => {
     createTask(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
   ipcMain.handle("tasks:get-run", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskRun(requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-model", async (_event, projectPath: unknown, taskPath: unknown) =>
+    getTaskModelState(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:set-model", async (_event, projectPath: unknown, taskPath: unknown, provider: unknown, modelId: unknown) => {
+    if (typeof provider !== "string" || typeof modelId !== "string") throw new Error("A provider and model are required");
+    return setTaskModel(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), provider, modelId);
+  });
+  ipcMain.handle("tasks:set-thinking", async (_event, projectPath: unknown, taskPath: unknown, level: unknown) => {
+    if (typeof level !== "string") throw new Error("A thinking level is required");
+    return setTaskThinking(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), level as ThinkingLevel);
+  });
   ipcMain.handle("tasks:submit", async (_event, projectPath: unknown, taskPath: unknown, prompt: unknown) => {
     if (typeof prompt !== "string") throw new Error("A prompt is required");
     return runs.submitPrompt(requireProjectPath(projectPath), requireProjectPath(taskPath), prompt);

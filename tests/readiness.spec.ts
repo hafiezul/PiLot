@@ -181,6 +181,16 @@ async function deterministicProvider(root: string) {
         response.end("data: [DONE]\n\n");
         return;
       }
+      if (body.includes("model controls stats")) {
+        chunk({ index: 0, delta: { role: "assistant", content: "Usage recorded." }, finish_reason: null });
+        response.write(`data: ${JSON.stringify({
+          id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "reasoning-model", choices: [],
+          usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150, prompt_tokens_details: { cached_tokens: 20 } },
+        })}\n\n`);
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       chunk({ index: 0, delta: { role: "assistant", content: "Streaming " }, finish_reason: null });
       setTimeout(() => {
         if (response.destroyed) return;
@@ -232,7 +242,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await app.window.getByRole("button", { name: "New Task" }).click();
 
     const composer = app.window.getByRole("form", { name: "Task composer" });
-    const modelControl = composer.getByRole("button", { name: "Provider and model" });
+    const modelControl = composer.getByRole("combobox", { name: "Provider and model" });
     await expect(modelControl).toBeVisible();
     await modelControl.focus();
     await expect(modelControl).toBeFocused();
@@ -430,6 +440,121 @@ test("renders Run evidence, disclosures, and inline commands through the Electro
     await expect(timeline.locator('details[aria-label="Thinking"]')).toHaveAttribute("open", "");
   } finally {
     await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("controls a Task model and shows usage through the Electron boundary", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  const modelsPath = path.join(environment.agentDir, "models.json");
+  const settingsPath = path.join(environment.agentDir, "settings.json");
+  await writeFile(modelsPath, JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [
+          { id: "basic-model", name: "Basic model", contextWindow: 1_000, maxTokens: 200 },
+          {
+            id: "reasoning-model", name: "Reasoning model", reasoning: true, contextWindow: 1_000, maxTokens: 200,
+            thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: null, max: "max" },
+            cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1 },
+          },
+        ],
+      },
+      locked: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        models: [{ id: "locked-model", name: "Locked model" }],
+      },
+    },
+  }));
+  await writeFile(settingsPath, JSON.stringify({ defaultProvider: "fixture", defaultModel: "basic-model", defaultThinkingLevel: "high" }));
+  await writeFile(path.join(environment.agentDir, "auth.json"), "{}");
+  const userData = path.join(environment.root, "pilot-user-data");
+  const first = await launch(environment.agentDir, true, { PILOT_TEST_PROJECT_DIR: environment.project, PILOT_USER_DATA_DIR: userData });
+  let taskFile = "";
+
+  try {
+    await first.window.getByRole("button", { name: "Add project" }).click();
+    await first.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await first.window.getByRole("button", { name: "New Task" }).click();
+
+    const composer = first.window.getByRole("form", { name: "Task composer" });
+    const modelControl = composer.getByRole("combobox", { name: "Provider and model" });
+    await expect(modelControl).toHaveValue("fixture/basic-model");
+    await modelControl.focus();
+    await expect(modelControl).toBeFocused();
+    await expect(modelControl.locator('optgroup[label="Fixture"]')).toBeAttached();
+    const optionsButton = composer.getByRole("button", { name: "Model options" });
+    await optionsButton.press("Enter");
+    const controls = composer.getByRole("group", { name: "Model options" });
+    await controls.getByRole("button", { name: /Unavailable providers/ }).click();
+    await expect(controls).toContainText("Locked");
+    await expect(controls).toContainText("Credentials not configured");
+    const providerSettings = controls.getByRole("button", { name: "Open provider Settings" });
+    await expect(providerSettings).toBeVisible();
+    await providerSettings.click();
+    await expect(first.window.getByRole("region", { name: "Provider authentication" })).toBeVisible();
+    await first.window.getByRole("button", { name: "Back to command center" }).click();
+
+    await modelControl.selectOption("fixture/reasoning-model");
+    await expect(modelControl).toHaveValue("fixture/reasoning-model");
+    await optionsButton.press("Enter");
+    const thinking = controls.getByRole("combobox", { name: "Thinking level" });
+    await expect(thinking.getByRole("option")).toHaveText(["Off", "High", "Max"]);
+    await thinking.selectOption("max");
+
+    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    await prompt.fill("model controls stats");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(first.window.getByRole("region", { name: "Run timeline" })).toContainText("Usage recorded.");
+    await expect(first.window.getByRole("region", { name: "Task details" })).toContainText("150 / 1,000");
+    await expect(first.window.getByRole("region", { name: "Task details" })).toContainText("$0.00019");
+
+    const directory = sessionDirectory(environment.agentDir, await realpath(environment.project));
+    taskFile = path.join(directory, (await readdir(directory)).find((file) => file.endsWith(".jsonl"))!);
+    const saved = (await readFile(taskFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(saved.filter((entry) => entry.type === "model_change").at(-1)).toMatchObject({ provider: "fixture", modelId: "reasoning-model" });
+    expect(saved.filter((entry) => entry.type === "thinking_level_change").at(-1)).toMatchObject({ thinkingLevel: "max" });
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toMatchObject({ defaultModel: "basic-model", defaultThinkingLevel: "high" });
+
+    await first.window.getByRole("button", { name: "New Task" }).click();
+    await expect(first.window.getByRole("form", { name: "Task composer" }).getByRole("combobox", { name: "Provider and model" })).toHaveValue("fixture/basic-model");
+  } finally {
+    await close(first);
+  }
+
+  SessionManager.open(taskFile).appendSessionInfo("model controls stats");
+  await writeFile(modelsPath, JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "basic-model", name: "Basic model", contextWindow: 1_000, maxTokens: 200 }],
+      },
+    },
+  }));
+  const second = await launch(environment.agentDir, true, { PILOT_USER_DATA_DIR: userData });
+  try {
+    await second.window.getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button", { name: "model controls stats" }).click();
+    const fallback = second.window.getByRole("status", { name: "Model fallback" });
+    await expect(fallback).toContainText("Could not restore fixture/reasoning-model");
+    await expect(fallback).toContainText("Using fixture/basic-model");
+    const choose = fallback.getByRole("button", { name: "Choose another model" });
+    await choose.focus();
+    await choose.press("Enter");
+    await expect(second.window.getByRole("combobox", { name: "Provider and model" })).toBeFocused();
+    await fallback.getByRole("button", { name: "Use fallback model" }).click();
+    await expect(fallback).toHaveCount(0);
+    const restored = (await readFile(taskFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(restored.filter((entry) => entry.type === "model_change").at(-1)).toMatchObject({ provider: "fixture", modelId: "basic-model" });
+  } finally {
+    await close(second);
     await provider.close();
     await rm(environment.root, { recursive: true, force: true });
   }

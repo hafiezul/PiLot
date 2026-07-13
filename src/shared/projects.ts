@@ -36,6 +36,33 @@ export type ProjectsState = {
 
 export type RunStatus = "preparing" | "running" | "settled" | "failed" | "aborted" | "interrupted";
 export type LiveInputMode = "steer" | "followUp";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type TaskModelState = {
+  taskPath: string;
+  selected?: { provider: string; id: string; name: string };
+  thinkingLevel: ThinkingLevel;
+  thinkingLevels: ThinkingLevel[];
+  fallback?: string;
+  providers: Array<{
+    id: string;
+    name: string;
+    configured: boolean;
+    credentialStatus: string;
+    models: Array<{ provider: string; id: string; name: string }>;
+  }>;
+  usage: {
+    contextTokens: number | null;
+    contextWindow?: number;
+    contextPercent?: number | null;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    totalTokens: number;
+    cost: number;
+  };
+};
 
 export type AssistantEvidence = {
   id: string;
@@ -108,6 +135,9 @@ export type ProjectsApi = {
   removeProject(path: string): Promise<ProjectsState>;
   createTask(projectPath: string): Promise<TaskSummary>;
   getTaskRun(projectPath: string, taskPath: string): Promise<TaskRunState>;
+  getTaskModel(projectPath: string, taskPath: string): Promise<TaskModelState>;
+  setTaskModel(projectPath: string, taskPath: string, provider: string, modelId: string): Promise<TaskModelState>;
+  setTaskThinking(projectPath: string, taskPath: string, level: ThinkingLevel): Promise<TaskModelState>;
   submitPrompt(projectPath: string, taskPath: string, prompt: string): Promise<void>;
   queuePrompt(taskPath: string, prompt: string, mode: LiveInputMode): Promise<void>;
   executeCommand(projectPath: string, taskPath: string, command: string, includeInContext: boolean): Promise<void>;

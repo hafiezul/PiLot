@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import type { CommandEvidence, LiveInputMode, ProjectAccess, ProjectsState, RunEvidence, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
+import type { CommandEvidence, LiveInputMode, ProjectAccess, ProjectsState, RunEvidence, TaskModelState, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import "./styles.css";
 
@@ -264,12 +264,80 @@ function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: num
   </article>;
 }
 
-function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: TaskSummary; onCreate(): void }) {
+function TaskModelControls({ project, task, state, disabled, onChange, onOpenSettings }: {
+  project: ProjectAccess;
+  task: TaskSummary;
+  state?: TaskModelState;
+  disabled: boolean;
+  onChange(next: TaskModelState): void;
+  onOpenSettings(): void;
+}) {
+  const disclosure = useRef<HTMLDetailsElement>(null);
+  const modelPicker = useRef<HTMLSelectElement>(null);
+  const [error, setError] = useState("");
+  const unavailable = state?.providers.filter(({ configured }) => !configured) ?? [];
+  const attempt = async (action: () => Promise<TaskModelState>) => {
+    setError("");
+    try { onChange(await action()); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+
+  return <div className="task-model-controls">
+    {state?.fallback && <div className="model-fallback" role="status" aria-label="Model fallback">
+      <span>{state.fallback}</span>
+      {state.selected && <button type="button" onClick={() => {
+        void attempt(() => window.pilot.setTaskModel(project.path, task.path, state.selected!.provider, state.selected!.id));
+      }}>Use fallback model</button>}
+      <button type="button" onClick={() => modelPicker.current?.focus()}>Choose another model</button>
+      <button type="button" onClick={onOpenSettings}>Open provider Settings</button>
+    </div>}
+    <div className="model-control-row">
+      <select ref={modelPicker} className="model-picker" aria-label="Provider and model" value={state?.selected ? `${state.selected.provider}/${state.selected.id}` : ""} disabled={disabled || !state?.selected} onChange={(event) => {
+        const provider = state?.providers.find((item) => item.models.some((model) => `${model.provider}/${model.id}` === event.target.value));
+        const model = provider?.models.find((item) => `${item.provider}/${item.id}` === event.target.value);
+        if (model) void attempt(() => window.pilot.setTaskModel(project.path, task.path, model.provider, model.id));
+      }}>
+        {!state?.selected && <option value="">Connect provider</option>}
+        {state?.providers.filter(({ models }) => models.length).map((provider) => <optgroup key={provider.id} label={provider.name}>
+          {provider.models.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name} · {model.id}</option>)}
+        </optgroup>)}
+      </select>
+      <details ref={disclosure} className="model-control">
+        <summary role="button" aria-label="Model options">•••</summary>
+        <div className="model-control-menu" role="group" aria-label="Model options">
+        {unavailable.length > 0 && <details className="unavailable-providers">
+          <summary role="button">Unavailable providers ({unavailable.length})</summary>
+          {unavailable.map((provider) => <p key={provider.id}><strong>{provider.name}</strong><span>{provider.credentialStatus}</span></p>)}
+          <button type="button" onClick={onOpenSettings}>Open provider Settings</button>
+        </details>}
+        <label className="thinking-control">Thinking level
+          <select aria-label="Thinking level" value={state?.thinkingLevel ?? "off"} disabled={disabled || !state?.selected} onChange={(event) => {
+            void attempt(() => window.pilot.setTaskThinking(project.path, task.path, event.target.value as TaskModelState["thinkingLevel"]));
+          }}>
+            {(state?.thinkingLevels ?? ["off"]).map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
+          </select>
+        </label>
+        {error && <p className="error" role="alert">{error}</p>}
+        </div>
+      </details>
+    </div>
+  </div>;
+}
+
+function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
+  project: ProjectAccess;
+  task: TaskSummary;
+  onCreate(): void;
+  onDetails(next: TaskModelState): void;
+  onOpenSettings(): void;
+}) {
   const [timeline, setTimeline] = useState<TaskRunState>();
+  const [modelState, setModelState] = useState<TaskModelState>();
   const [expandThinking, setExpandThinking] = useState(false);
   const [draft, setDraft] = useState("");
   const [liveMode, setLiveMode] = useState<LiveInputMode>("steer");
   const [error, setError] = useState("");
+  const updateModelState = (next: TaskModelState) => { setModelState(next); onDetails(next); };
+  const refreshDetails = () => window.pilot.getTaskModel(project.path, task.path).then(updateModelState);
 
   useEffect(() => {
     let cancelled = false;
@@ -285,10 +353,12 @@ function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: T
     void Promise.all([
       window.pilot.getTaskRun(project.path, task.path),
       window.pilot.getPreferences(),
-    ]).then(([next, preferences]) => {
+      window.pilot.getTaskModel(project.path, task.path),
+    ]).then(([next, preferences, model]) => {
       if (cancelled) return;
       if (!receivedRunEvent) setTimeline(next);
       setExpandThinking(preferences.expandThinking);
+      updateModelState(model);
     }).catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
     return () => { cancelled = true; unsubscribe(); };
   }, [project.path, task.path]);
@@ -311,7 +381,7 @@ function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: T
       : command !== undefined
         ? window.pilot.executeCommand(project.path, task.path, command, !hiddenCommand)
         : window.pilot.submitPrompt(project.path, task.path, input);
-    void operation.catch((reason) => {
+    void operation.then(() => refreshDetails()).catch((reason) => {
       setDraft((current) => [input, current].filter((value) => value.trim()).join("\n\n"));
       setError(reason instanceof Error ? reason.message : String(reason));
     });
@@ -348,14 +418,14 @@ function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: T
         <ul className="pending-queue" aria-label="Pending follow-ups">{queues.followUp.length ? queues.followUp.map((text, index) => <li key={`${text}-${index}`}><strong>Follow-up</strong><span>{text}</span></li>) : <li className="queue-empty"><strong>Follow-up</strong><span>None pending</span></li>}</ul>
       </div>}
       <div className="composer-controls">
-        <button type="button" className="model-control-slot" aria-label="Provider and model" aria-disabled="true">Model</button>
+        <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={updateModelState} onOpenSettings={onOpenSettings} />
         <button type="submit" className="run-button" disabled={!draft.trim() || (active && !liveReady)}>{live ? "Queue input" : "Run"}</button>
       </div>
     </form>
   </div>;
 }
 
-function ProjectPage({ project, needsAccess, selectedTaskPath, onSelectTask, onCreateTask, onOpenAccess, onChange }: {
+function ProjectPage({ project, needsAccess, selectedTaskPath, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onOpenSettings }: {
   project: ProjectAccess;
   needsAccess: boolean;
   selectedTaskPath?: string;
@@ -363,11 +433,13 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, onSelectTask, onC
   onCreateTask(): void;
   onOpenAccess(): void;
   onChange(state: ProjectsState): void;
+  onDetails(state: TaskModelState): void;
+  onOpenSettings(): void;
 }) {
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   const selectedTask = active.find(({ path }) => path === selectedTaskPath);
-  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} onCreate={onCreateTask} />;
+  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} onCreate={onCreateTask} onDetails={onDetails} onOpenSettings={onOpenSettings} />;
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
@@ -434,8 +506,8 @@ function GeneralSettings() {
   </section>;
 }
 
-function SettingsPage({ onChange, onClose }: { onChange(): void; onClose(): void }) {
-  const [destination, setDestination] = useState<"general" | "providers">("general");
+function SettingsPage({ initialDestination, onChange, onClose }: { initialDestination: "general" | "providers"; onChange(): void; onClose(): void }) {
+  const [destination, setDestination] = useState<"general" | "providers">(initialDestination);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus();
@@ -464,7 +536,9 @@ function App() {
   const [projects, setProjects] = useState<ProjectsState>();
   const [selectedTaskPath, setSelectedTaskPath] = useState<string>();
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsDestination, setSettingsDestination] = useState<"general" | "providers">("general");
   const [showProjectAccess, setShowProjectAccess] = useState(false);
+  const [taskDetails, setTaskDetails] = useState<TaskModelState>();
   const settingsButton = useRef<HTMLButtonElement>(null);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
     setState(startup);
@@ -485,8 +559,13 @@ function App() {
     if (!project) return;
     const task = await window.pilot.createTask(project.path);
     setProjects(await window.pilot.getProjects());
+    setTaskDetails(undefined);
     setSelectedTaskPath(task.path);
   }, [projects?.selected?.path]);
+  const openProviderSettings = useCallback(() => {
+    setSettingsDestination("providers");
+    setShowSettings(true);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -494,9 +573,10 @@ function App() {
   }, []);
 
   const selectedProject = projects?.selected;
+  const selectedTask = selectedProject?.tasks.find(({ path }) => path === selectedTaskPath);
   const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
 
-  if (showSettings) return <><div className="window-bar" aria-hidden="true" /><SettingsPage onChange={refresh} onClose={closeSettings} /></>;
+  if (showSettings) return <><div className="window-bar" aria-hidden="true" /><SettingsPage initialDestination={settingsDestination} onChange={refresh} onClose={closeSettings} /></>;
 
   return (
     <>
@@ -518,6 +598,7 @@ function App() {
                 <li key={project.path}>
                   <button aria-current={projects.selected?.path === project.path ? "page" : undefined} onClick={() => {
                     setSelectedTaskPath(undefined);
+                    setTaskDetails(undefined);
                     void window.pilot.selectProject(project.path).then(setProjects);
                   }}>
                     <span className="project-icon" aria-hidden="true">◇</span>
@@ -525,7 +606,7 @@ function App() {
                     <small>{project.taskCount}</small>
                   </button>
                   {projects.selected?.path === project.path && <ul className="task-nav-list" aria-label={`Active Tasks in ${project.name}`}>
-                    {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => <li key={task.path}><button aria-current={selectedTaskPath === task.path ? "page" : undefined} onClick={() => setSelectedTaskPath(task.path)}>{task.title}</button></li>)}
+                    {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => <li key={task.path}><button aria-current={selectedTaskPath === task.path ? "page" : undefined} onClick={() => { setTaskDetails(undefined); setSelectedTaskPath(task.path); }}>{task.title}</button></li>)}
                   </ul>}
                 </li>
               ))}
@@ -535,7 +616,7 @@ function App() {
           )}
           <div className="nav-footer">
             <span className="command-center"><span aria-hidden="true">⌘</span> Command center</span>
-            <button ref={settingsButton} className="settings-button" aria-label="Settings" title="Settings" onClick={() => setShowSettings(true)}><span aria-hidden="true">⚙</span></button>
+            <button ref={settingsButton} className="settings-button" aria-label="Settings" title="Settings" onClick={() => { setSettingsDestination("general"); setShowSettings(true); }}><span aria-hidden="true">⚙</span></button>
           </div>
         </nav>
 
@@ -544,10 +625,12 @@ function App() {
             project={selectedProject}
             needsAccess={needsProjectAccess}
             selectedTaskPath={selectedTaskPath}
-            onSelectTask={setSelectedTaskPath}
+            onSelectTask={(path) => { setTaskDetails(undefined); setSelectedTaskPath(path); }}
             onCreateTask={() => void createSelectedTask()}
             onOpenAccess={() => setShowProjectAccess(true)}
             onChange={setProjects}
+            onDetails={setTaskDetails}
+            onOpenSettings={openProviderSettings}
           /> : <>
             <header className="topbar">
               <div>
@@ -595,7 +678,17 @@ function App() {
               <p className="eyebrow">Project</p>
               <h2>{selectedProject.name}</h2>
               <p className="muted inspector-note">Complete the open access decision to continue.</p>
-            </> : <section className="project-details" aria-label="Project details">
+            </> : selectedTask && taskDetails ? <section className="task-details" aria-label="Task details">
+              <p className="eyebrow">Task details</p>
+              <h2>{selectedTask.title}</h2>
+              <dl>
+                <div><dt>Model</dt><dd>{taskDetails.selected ? `${taskDetails.selected.provider}/${taskDetails.selected.id}` : "Unavailable"}</dd></div>
+                <div><dt>Thinking</dt><dd>{taskDetails.thinkingLevel}</dd></div>
+                <div><dt>Context</dt><dd>{taskDetails.usage.contextWindow ? `${taskDetails.usage.contextTokens === null ? "Calculating" : taskDetails.usage.contextTokens.toLocaleString()} / ${taskDetails.usage.contextWindow.toLocaleString()}` : "Unavailable"}</dd></div>
+                <div><dt>Total tokens</dt><dd>{taskDetails.usage.totalTokens.toLocaleString()}</dd></div>
+                <div><dt>Cost</dt><dd>${taskDetails.usage.cost.toFixed(5)}</dd></div>
+              </dl>
+            </section> : <section className="project-details" aria-label="Project details">
               <p className="eyebrow">Project</p>
               <h2>{selectedProject.name}</h2>
               <p className="muted inspector-note">{selectedProject.path}</p>
