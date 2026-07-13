@@ -54,7 +54,13 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .project-topbar { padding-bottom: 42px; }
 .project-topbar code { display: block; max-width: 70ch; margin-top: 7px; color: #686864; font-size: 11px; overflow-wrap: anywhere; }
 .project-top-actions { display: flex; align-items: center; gap: 12px; }
-.project-top-actions button { display: none; border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #fdfdfc; cursor: pointer; }
+.project-actions { position: relative; }
+.project-actions summary { display: grid; place-items: center; width: 30px; height: 28px; border: 1px solid #c8c8c4; border-radius: 5px; color: inherit; background: #fdfdfc; cursor: pointer; font-weight: 700; letter-spacing: .08em; list-style: none; }
+.project-actions summary::-webkit-details-marker { display: none; }
+.project-actions summary:hover, .project-actions[open] summary { background: #ededeb; }
+.project-actions-menu { position: absolute; top: 34px; right: 0; z-index: 3; min-width: 170px; padding: 4px; border: 1px solid #c8c8c4; border-radius: 6px; background: #fdfdfc; box-shadow: 0 4px 8px rgb(20 20 19 / 16%); }
+.project-actions-menu button { display: block; width: 100%; border: 0; border-radius: 4px; padding: 7px 9px; color: inherit; background: transparent; cursor: pointer; font-size: 12px; text-align: left; }
+.project-actions-menu button:hover, .project-actions-menu button:focus-visible { background: #ededeb; }
 .project-empty { max-width: 440px; margin: 70px auto 0; text-align: center; }
 .project-empty p { margin: 0; color: #686864; font-size: 13px; }
 .task-overview { max-width: 720px; margin: 0 auto; }
@@ -87,6 +93,7 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .inspector .access-actions { display: grid; }
 .inspector .project-access button { width: 100%; }
 .inspector-note { font-size: 12px; line-height: 1.5; }
+.project-details .inspector-note { overflow-wrap: anywhere; }
 .project-access > header { padding-bottom: 18px; }
 .project-access > header p { margin: 0; color: #686864; font-size: 13px; }
 .project-access > section { padding: 20px 0; border-top: 1px solid #dededb; }
@@ -171,7 +178,6 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 210px minmax(470px, 1fr); }
   .inspector { display: none; }
-  .project-top-actions button { display: block; }
 }
 
 :root[data-appearance="dark"] { color: #e8e8e5; background: #1d1e1c; }
@@ -181,7 +187,8 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] .project-list button:hover, :root[data-appearance="dark"] .project-list button[aria-current="page"], :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover, :root[data-appearance="dark"] .settings-button:hover { background: #343532; }
 :root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
 :root[data-appearance="dark"] .project-access-dialog { border-color: #50514d; background: #242523; }
-:root[data-appearance="dark"] .project-top-actions button { border-color: #50514d; background: #30312e; }
+:root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu { border-color: #50514d; background: #30312e; }
+:root[data-appearance="dark"] .project-actions summary:hover, :root[data-appearance="dark"] .project-actions[open] summary, :root[data-appearance="dark"] .project-actions-menu button:hover, :root[data-appearance="dark"] .project-actions-menu button:focus-visible { background: #3a3b38; }
 :root[data-appearance="dark"] .dialog-close:hover { background: #343532; }
 :root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-main, :root[data-appearance="dark"] .provider-setup { color: #e8e8e5; }
 :root[data-appearance="dark"] .general-settings label, :root[data-appearance="dark"] .provider-detail, :root[data-appearance="dark"] .credential-summary li, :root[data-appearance="dark"] .model-inspection ul, :root[data-appearance="dark"] .model-inspection li, :root[data-appearance="dark"] .project-access > section, :root[data-appearance="dark"] .access-status, :root[data-appearance="dark"] .task-diagnostics, :root[data-appearance="dark"] .task-diagnostics > div, :root[data-appearance="dark"] .task-section-heading, :root[data-appearance="dark"] .task-section li { border-color: #40413d; }
@@ -202,7 +209,8 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-button:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access-dialog { border-color: #50514d; background: #242523; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-top-actions button { border-color: #50514d; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu { border-color: #50514d; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions[open] summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu button:focus-visible { background: #3a3b38; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .dialog-close:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-main, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup { color: #e8e8e5; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-detail, :root:is(:not([data-appearance]), [data-appearance="system"]) .credential-summary li, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection ul, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection li, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access > section, :root:is(:not([data-appearance]), [data-appearance="system"]) .access-status, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-diagnostics, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-diagnostics > div, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-section-heading, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-section li { border-color: #40413d; }

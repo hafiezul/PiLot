@@ -328,9 +328,16 @@ test("admits a Project before presenting its existing Pi sessions as Tasks", asy
     await expect(app.window.getByRole("region", { name: "Archived tasks" })).toContainText("Repair release build");
     expect(await readFile(named, "utf8")).toContain('"lifecycle":"archived"');
 
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await expect(inspector).not.toContainText("Pi resource trust");
+    await expect(inspector).not.toContainText("Agent execution");
+    await expect(inspector).not.toContainText("Remove Project");
+
     const beforeRemoval = await readFile(named);
-    const projectAccess = app.window.getByRole("complementary", { name: "Inspector" }).getByRole("region", { name: "Project access" });
-    await projectAccess.getByRole("button", { name: "Remove Project" }).click();
+    await app.window.getByRole("button", { name: "Project actions" }).click();
+    const projectMenu = app.window.getByRole("menu", { name: "Project actions" });
+    await expect(projectMenu.getByRole("menuitem", { name: "Project access" })).toBeVisible();
+    await projectMenu.getByRole("menuitem", { name: "Remove Project" }).click();
     await expect(navigation).not.toContainText("fixture-project");
     expect(await readFile(named)).toEqual(beforeRemoval);
     expect(await readFile(newer)).toEqual(newerBytes);
@@ -404,14 +411,21 @@ test("adds a Project and keeps Pi resource trust separate from execution consent
 
     await projectAccess.getByRole("button", { name: "Allow agent execution" }).click();
     await expect(projectAccess).toHaveCount(0);
-    const inspectorAccess = first.window.getByRole("complementary", { name: "Inspector" }).getByRole("region", { name: "Project access" });
-    await expect(inspectorAccess.getByRole("status", { name: "Agent execution" })).toContainText("Granted");
+    const inspector = first.window.getByRole("complementary", { name: "Inspector" });
+    await expect(inspector).not.toContainText("Pi resource trust");
+    await expect(inspector).not.toContainText("Agent execution");
     expect(JSON.parse(await readFile(path.join(userData, "projects.json"), "utf8")).executionConsent[canonicalProject]).toBe(true);
 
-    await first.window.setViewportSize({ width: 800, height: 700 });
-    await expect(inspectorAccess).not.toBeVisible();
-    await first.window.getByRole("button", { name: "Project access" }).click();
+    const projectActions = first.window.getByRole("button", { name: "Project actions" });
+    await projectActions.focus();
+    await projectActions.press("Enter");
+    await expect(first.window.getByRole("menuitem", { name: "Project access" })).toBeFocused();
+    await first.window.keyboard.press("Escape");
+    await expect(projectActions).toBeFocused();
+    await projectActions.click();
+    await first.window.getByRole("menuitem", { name: "Project access" }).click();
     const reopenedAccess = first.window.getByRole("dialog", { name: "Project access" });
+    await expect(reopenedAccess.getByRole("status", { name: "Agent execution" })).toContainText("Granted");
     await reopenedAccess.getByRole("button", { name: "Revoke agent execution" }).click();
     const revokedAccess = first.window.getByRole("dialog", { name: "Project access" });
     await expect(revokedAccess.getByRole("button", { name: "Close project access" })).toHaveCount(0);

@@ -151,10 +151,6 @@ function ProjectAccessPanel({ project, onChange }: { project: ProjectAccess; onC
           : <button className="primary-action" onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, true))}>Allow agent execution</button>}
       </div>
     </section>
-    {project.admitted && <section aria-labelledby="project-removal-title">
-      <div className="access-heading"><div><h3 id="project-removal-title">Project removal</h3><p>Hides this Project and its Tasks without changing Pi resource trust or task history.</p></div></div>
-      <div className="access-actions"><button onClick={() => void attempt(() => window.pilot.removeProject(project.path))}>Remove Project</button></div>
-    </section>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>;
 }
@@ -178,13 +174,43 @@ function ProjectAccessDialog({ project, dismissible, onChange, onClose }: { proj
   </dialog>;
 }
 
+function ProjectActions({ project, onOpenAccess, onChange }: { project: ProjectAccess; onOpenAccess(): void; onChange(state: ProjectsState): void }) {
+  const details = useRef<HTMLDetailsElement>(null);
+  const close = () => details.current?.removeAttribute("open");
+  return <details ref={details} className="project-actions" onToggle={(event) => {
+    const menu = event.currentTarget;
+    if (menu.open) requestAnimationFrame(() => menu.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus());
+  }} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) close();
+  }} onKeyDown={(event) => {
+    if (event.key === "Escape") {
+      close();
+      details.current?.querySelector("summary")?.focus();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[role=menuitem]")];
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : event.key === "ArrowDown" ? (current + 1) % items.length : (current - 1 + items.length) % items.length;
+    event.preventDefault();
+    items[next]?.focus();
+  }}>
+    <summary role="button" aria-label="Project actions" title="Project actions">•••</summary>
+    <div className="project-actions-menu" role="menu" aria-label="Project actions">
+      <button role="menuitem" onClick={() => { close(); onOpenAccess(); }}>Project access</button>
+      <button role="menuitem" onClick={() => { close(); void window.pilot.removeProject(project.path).then(onChange); }}>Remove Project</button>
+    </div>
+  </details>;
+}
+
 function ProjectPage({ project, needsAccess, onOpenAccess, onChange }: { project: ProjectAccess; needsAccess: boolean; onOpenAccess(): void; onChange(state: ProjectsState): void }) {
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
-      <div className="project-top-actions"><button onClick={onOpenAccess}>Project access</button><span className="privacy"><i /> Local only</span></div>
+      <div className="project-top-actions"><span className="privacy"><i /> Local only</span><ProjectActions project={project} onOpenAccess={onOpenAccess} onChange={onChange} /></div>
     </header>
     {needsAccess ? <section className="project-empty" aria-live="polite">
       <h2>Access required</h2>
@@ -373,7 +399,16 @@ function App() {
               <p className="eyebrow">Project</p>
               <h2>{selectedProject.name}</h2>
               <p className="muted inspector-note">Complete the open access decision to continue.</p>
-            </> : <ProjectAccessPanel project={selectedProject} onChange={updateProjectAccess} /> : <>
+            </> : <section className="project-details" aria-label="Project details">
+              <p className="eyebrow">Project</p>
+              <h2>{selectedProject.name}</h2>
+              <p className="muted inspector-note">{selectedProject.path}</p>
+              <dl>
+                <div><dt>Active Tasks</dt><dd>{selectedProject.tasks.filter(({ lifecycle }) => lifecycle === "active").length}</dd></div>
+                <div><dt>Archived Tasks</dt><dd>{selectedProject.tasks.filter(({ lifecycle }) => lifecycle === "archived").length}</dd></div>
+                <div><dt>Execution location</dt><dd>Local</dd></div>
+              </dl>
+            </section> : <>
               <p className="eyebrow">Startup</p>
               <h2>Readiness</h2>
               <dl>
