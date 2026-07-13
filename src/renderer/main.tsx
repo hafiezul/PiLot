@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import type { CommandEvidence, ProjectAccess, ProjectsState, RunEvidence, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
+import type { CommandEvidence, LiveInputMode, ProjectAccess, ProjectsState, RunEvidence, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import "./styles.css";
 
@@ -268,20 +268,56 @@ function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: T
   const [timeline, setTimeline] = useState<TaskRunState>();
   const [expandThinking, setExpandThinking] = useState(false);
   const [draft, setDraft] = useState("");
+  const [liveMode, setLiveMode] = useState<LiveInputMode>("steer");
   const [error, setError] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
+    let receivedRunEvent = false;
     setTimeline(undefined);
     setError("");
+    const unsubscribe = window.pilot.onTaskRunEvent((next) => {
+      if (next.taskPath !== task.path) return;
+      receivedRunEvent = true;
+      if (next.recoveredInput) setDraft((current) => [next.recoveredInput, current].filter((value) => value?.trim()).join("\n\n"));
+      setTimeline(next);
+    });
     void Promise.all([
       window.pilot.getTaskRun(project.path, task.path),
       window.pilot.getPreferences(),
-    ]).then(([next, preferences]) => { setTimeline(next); setExpandThinking(preferences.expandThinking); })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-    return window.pilot.onTaskRunEvent((next) => { if (next.taskPath === task.path) setTimeline(next); });
+    ]).then(([next, preferences]) => {
+      if (cancelled) return;
+      if (!receivedRunEvent) setTimeline(next);
+      setExpandThinking(preferences.expandThinking);
+    }).catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
+    return () => { cancelled = true; unsubscribe(); };
   }, [project.path, task.path]);
 
-  const active = Boolean(timeline?.activeRunId);
+  useEffect(() => setLiveMode("steer"), [timeline?.activeRunId]);
+
+  const activeRun = timeline?.runs.find(({ id }) => id === timeline.activeRunId);
+  const active = Boolean(activeRun);
+  const live = activeRun?.input.kind === "prompt";
+  const liveReady = live && activeRun.status === "running";
+  const submit = (mode?: LiveInputMode) => {
+    const input = draft.trim();
+    if (!input || (active && (!liveReady || !mode))) return;
+    setError("");
+    setDraft("");
+    const hiddenCommand = !active && input.startsWith("!!");
+    const command = hiddenCommand ? input.slice(2) : !active && input.startsWith("!") ? input.slice(1) : undefined;
+    const operation = active
+      ? window.pilot.queuePrompt(task.path, input, mode!)
+      : command !== undefined
+        ? window.pilot.executeCommand(project.path, task.path, command, !hiddenCommand)
+        : window.pilot.submitPrompt(project.path, task.path, input);
+    void operation.catch((reason) => {
+      setDraft((current) => [input, current].filter((value) => value.trim()).join("\n\n"));
+      setError(reason instanceof Error ? reason.message : String(reason));
+    });
+  };
+  const queues = timeline?.queues ?? { steering: [], followUp: [] };
+
   return <div className="task-page">
     <header className="topbar task-topbar">
       <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">Local execution location</span></div>
@@ -293,24 +329,27 @@ function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: T
       {active && <button className="abort-button" onClick={() => void window.pilot.abortTask(task.path)}>Abort</button>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
-    <form className="task-composer" aria-label="Task composer" onSubmit={(event) => {
-      event.preventDefault();
-      const input = draft.trim();
-      if (!input || active) return;
-      setError("");
-      setDraft("");
-      const hiddenCommand = input.startsWith("!!");
-      const command = hiddenCommand ? input.slice(2) : input.startsWith("!") ? input.slice(1) : undefined;
-      const operation = command !== undefined
-        ? window.pilot.executeCommand(project.path, task.path, command, !hiddenCommand)
-        : window.pilot.submitPrompt(project.path, task.path, input);
-      void operation.catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-    }}>
-      <label htmlFor="task-prompt">Prompt or inline command</label>
-      <textarea id="task-prompt" aria-label="Prompt" value={draft} disabled={active} onChange={(event) => setDraft(event.target.value)} placeholder="Ask Pi to work, or run !command…" rows={3} />
+    <form className="task-composer" aria-label="Task composer" onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
+      <label htmlFor="task-prompt">{live ? "Guide the active Run" : "Prompt or inline command"}</label>
+      {live && <fieldset className="live-input-mode" role="radiogroup" aria-label="Live input mode">
+        <legend>Delivery</legend>
+        <label><input type="radio" name="live-input-mode" checked={liveMode === "steer"} onChange={() => setLiveMode("steer")} />Steer <small>after the current tool batch</small></label>
+        <label><input type="radio" name="live-input-mode" checked={liveMode === "followUp"} onChange={() => setLiveMode("followUp")} />Follow-up <small>after this Run settles</small></label>
+      </fieldset>}
+      <textarea id="task-prompt" aria-label="Prompt" value={draft} disabled={active && !live} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
+        if (!liveReady || event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+        event.preventDefault();
+        const mode = event.altKey ? "followUp" : liveMode;
+        if (event.altKey) setLiveMode(mode);
+        submit(mode);
+      }} placeholder={live ? "Steer Pi now, or queue work for later…" : "Ask Pi to work, or run !command…"} rows={3} />
+      {live && <div className="pending-queues" aria-label="Pending live input">
+        <ul className="pending-queue" aria-label="Pending steering">{queues.steering.length ? queues.steering.map((text, index) => <li key={`${text}-${index}`}><strong>Steer</strong><span>{text}</span></li>) : <li className="queue-empty"><strong>Steer</strong><span>None pending</span></li>}</ul>
+        <ul className="pending-queue" aria-label="Pending follow-ups">{queues.followUp.length ? queues.followUp.map((text, index) => <li key={`${text}-${index}`}><strong>Follow-up</strong><span>{text}</span></li>) : <li className="queue-empty"><strong>Follow-up</strong><span>None pending</span></li>}</ul>
+      </div>}
       <div className="composer-controls">
         <button type="button" className="model-control-slot" aria-label="Provider and model" aria-disabled="true">Model</button>
-        <button type="submit" className="run-button" disabled={active || !draft.trim()}>Run</button>
+        <button type="submit" className="run-button" disabled={!draft.trim() || (active && !liveReady)}>{live ? "Queue input" : "Run"}</button>
       </div>
     </form>
   </div>;

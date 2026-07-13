@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { RunEvidence, RunEvidenceItem, RunStatus, TaskRunState } from "../shared/projects.js";
+import type { LiveInputMode, RunEvidence, RunEvidenceItem, RunStatus, TaskRunState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
 import { assertRunnableTask, withTaskWrite } from "./tasks.js";
 
@@ -247,7 +247,7 @@ export class LocalRunCoordinator {
     const saved = savedState(file, SessionManager.open(file));
     const active: ActiveRun = {
       project,
-      state: { ...saved, activeRunId: run.id, runs: [...saved.runs, run] },
+      state: { ...saved, activeRunId: run.id, runs: [...saved.runs, run], queues: { steering: [], followUp: [] } },
       runId: run.id,
       abortRequested: false,
       accepted: false,
@@ -281,18 +281,26 @@ export class LocalRunCoordinator {
         } finally {
           unsubscribe();
           session.dispose();
-          this.emit({ ...active.state, activeRunId: undefined });
         }
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
       if (!active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Run failed", detail);
-      this.emit({ ...active.state, activeRunId: undefined });
     } finally {
       this.activeTasks.delete(file);
       this.activeProjects.delete(project);
+      this.emit({ ...active.state, activeRunId: undefined });
     }
+  }
+
+  async queuePrompt(taskPath: string, prompt: string, mode: LiveInputMode) {
+    const text = prompt.trim();
+    if (!text) throw new Error("Enter a prompt");
+    const active = this.activeTasks.get(path.resolve(taskPath));
+    if (!active || currentRun(active).input.kind !== "prompt") throw new Error("This Task has no active agent Run");
+    if (!active.session || !active.session.isStreaming || active.abortRequested) throw new Error("The Run is not ready for live input");
+    await (mode === "steer" ? active.session.steer(text) : active.session.followUp(text));
   }
 
   async executeCommand(projectPath: string, taskPath: string, command: string, includeInContext: boolean) {
@@ -367,17 +375,16 @@ export class LocalRunCoordinator {
           manager.appendCustomEntry(runMetadataType, { version: 1, outcome: currentRun(active).status });
         } finally {
           session.dispose();
-          this.emit({ ...active.state, activeRunId: undefined });
         }
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       replaceItem(active, "command", (item) => item.kind === "command" ? { ...item, output: detail, status: "failed" } : item);
       updateRun(active, (value) => ({ ...value, status: "failed" }));
-      this.emit({ ...active.state, activeRunId: undefined });
     } finally {
       this.activeTasks.delete(file);
       this.activeProjects.delete(project);
+      this.emit({ ...active.state, activeRunId: undefined });
     }
   }
 
@@ -385,10 +392,16 @@ export class LocalRunCoordinator {
     const active = this.activeTasks.get(path.resolve(taskPath));
     if (!active) return;
     active.abortRequested = true;
+    const queued = active.session?.clearQueue();
+    const recoveredInput = queued ? [...queued.steering, ...queued.followUp].join("\n\n") : "";
+    if (recoveredInput) {
+      active.state = { ...active.state, recoveredInput };
+      this.emit(active.state);
+      active.state = { ...active.state, recoveredInput: undefined };
+    }
     active.session?.abortBash();
     await active.session?.abort();
     updateRun(active, (run) => ({ ...run, status: "aborted" }));
-    this.emit(active.state);
   }
 
   async abortAll() {
@@ -488,6 +501,9 @@ export class LocalRunCoordinator {
         break;
       case "auto_retry_end":
         if (!event.success && event.finalError) addNotice(active, `retry-${event.attempt}`, "error", "Provider retry failed", event.finalError);
+        break;
+      case "queue_update":
+        active.state = { ...active.state, queues: { steering: [...event.steering], followUp: [...event.followUp] } };
         break;
       case "compaction_start":
         addNotice(active, `compaction-${event.reason}`, "attention", "Compacting context", `Reason: ${event.reason}`);

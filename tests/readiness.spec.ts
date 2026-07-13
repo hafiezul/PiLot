@@ -84,10 +84,16 @@ async function launch(
 }
 
 async function close(app: { browser: Browser; process: ChildProcess }) {
-  await app.browser.close();
   const exit = app.process.exitCode === null ? once(app.process, "exit") : undefined;
-  app.process.kill();
+  await app.browser.close();
+  if (app.process.exitCode === null) app.process.kill();
   await exit;
+}
+
+function latestUserText(body: string) {
+  const messages = (JSON.parse(body) as { messages?: Array<{ role?: string; content?: string | Array<{ type?: string; text?: string }> }> }).messages ?? [];
+  const content = [...messages].reverse().find(({ role }) => role === "user")?.content;
+  return typeof content === "string" ? content : content?.filter(({ type }) => type === "text").map(({ text }) => text ?? "").join("") ?? "";
 }
 
 async function deterministicProvider(root: string) {
@@ -104,6 +110,30 @@ async function deterministicProvider(root: string) {
       const chunk = (choice: object) => response.write(`data: ${JSON.stringify({
         id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [choice],
       })}\n\n`);
+      const latestUser = latestUserText(body);
+      if (latestUser === "start live queue check" || latestUser === "start abort queue check") {
+        chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
+          index: 0, id: `queue-tool-${requests.length}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "sleep 2" }) },
+        }] }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (latestUser === "steer with keyboard") {
+        setTimeout(() => {
+          if (response.destroyed) return;
+          chunk({ index: 0, delta: { role: "assistant", content: "Steering received." }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+          response.end("data: [DONE]\n\n");
+        }, 400);
+        return;
+      }
+      if (latestUser === "follow up with pointer") {
+        chunk({ index: 0, delta: { role: "assistant", content: "Follow-up received." }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       if (body.includes("show failure")) {
         if (body.includes("failure-tool")) {
           chunk({ index: 0, delta: { role: "assistant", content: "Failure recorded." }, finish_reason: null });
@@ -254,6 +284,71 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
       (await readFile(path.join(directory, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
         .find((entry) => entry.customType === "pilot.run")?.data.outcome));
     expect(outcomes.sort()).toEqual(["aborted", "aborted", "settled"]);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("steers, follows up, shows live queues, and restores queued input on abort", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+    defaultProvider: "fixture",
+    defaultModel: "fixture-model",
+  }));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    await prompt.fill("start live queue check");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(app.window.locator('details[aria-label="bash tool, running"]')).toBeVisible();
+
+    const liveMode = composer.getByRole("radiogroup", { name: "Live input mode" });
+    await expect(liveMode.getByRole("radio", { name: "Steer" })).toBeChecked();
+    await expect(liveMode.getByRole("radio", { name: "Follow-up" })).not.toBeChecked();
+
+    await prompt.fill("steer with keyboard");
+    await prompt.press("Enter");
+    await expect(composer.getByRole("list", { name: "Pending steering" })).toContainText("steer with keyboard");
+
+    await liveMode.getByRole("radio", { name: "Follow-up" }).check();
+    await prompt.fill("follow up with pointer");
+    await composer.getByRole("button", { name: "Queue input" }).click();
+    await expect(composer.getByRole("list", { name: "Pending follow-ups" })).toContainText("follow up with pointer");
+    await expect(app.window.getByRole("region", { name: "Run timeline" })).toContainText("Follow-up received.");
+    await expect.poll(() => provider.requests.map(latestUserText)).toEqual([
+      "start live queue check",
+      "steer with keyboard",
+      "follow up with pointer",
+    ]);
+
+    await prompt.fill("start abort queue check");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(app.window.locator('details[aria-label="bash tool, running"]')).toBeVisible();
+    await prompt.fill("recover queued follow-up");
+    await prompt.press("Alt+Enter");
+    await expect(composer.getByRole("list", { name: "Pending follow-ups" })).toContainText("recover queued follow-up");
+    await prompt.fill("keep unsent draft");
+    await app.window.getByRole("button", { name: "Abort" }).click();
+    await expect(prompt).toHaveValue("recover queued follow-up\n\nkeep unsent draft");
   } finally {
     await close(app);
     await provider.close();

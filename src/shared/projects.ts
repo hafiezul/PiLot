@@ -35,6 +35,7 @@ export type ProjectsState = {
 };
 
 export type RunStatus = "preparing" | "running" | "settled" | "failed" | "aborted" | "interrupted";
+export type LiveInputMode = "steer" | "followUp";
 
 export type AssistantEvidence = {
   id: string;
@@ -93,6 +94,11 @@ export type TaskRunState = {
   taskPath: string;
   runs: RunEvidence[];
   activeRunId?: string;
+  queues?: {
+    steering: string[];
+    followUp: string[];
+  };
+  recoveredInput?: string;
 };
 
 export type ProjectsApi = {
@@ -103,6 +109,7 @@ export type ProjectsApi = {
   createTask(projectPath: string): Promise<TaskSummary>;
   getTaskRun(projectPath: string, taskPath: string): Promise<TaskRunState>;
   submitPrompt(projectPath: string, taskPath: string, prompt: string): Promise<void>;
+  queuePrompt(taskPath: string, prompt: string, mode: LiveInputMode): Promise<void>;
   executeCommand(projectPath: string, taskPath: string, command: string, includeInContext: boolean): Promise<void>;
   abortTask(taskPath: string): Promise<void>;
   openOutput(path: string): Promise<void>;

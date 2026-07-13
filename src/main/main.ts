@@ -118,6 +118,10 @@ app.whenReady().then(async () => {
     if (typeof prompt !== "string") throw new Error("A prompt is required");
     return runs.submitPrompt(requireProjectPath(projectPath), requireProjectPath(taskPath), prompt);
   });
+  ipcMain.handle("tasks:queue", async (_event, taskPath: unknown, prompt: unknown, mode: unknown) => {
+    if (typeof prompt !== "string" || (mode !== "steer" && mode !== "followUp")) throw new Error("A live input mode is required");
+    return runs.queuePrompt(requireProjectPath(taskPath), prompt, mode);
+  });
   ipcMain.handle("tasks:command", async (_event, projectPath: unknown, taskPath: unknown, command: unknown, includeInContext: unknown) => {
     if (typeof command !== "string" || typeof includeInContext !== "boolean") throw new Error("A command is required");
     return runs.executeCommand(requireProjectPath(projectPath), requireProjectPath(taskPath), command, includeInContext);

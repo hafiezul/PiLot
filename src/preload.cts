@@ -26,6 +26,7 @@ const api: PiLotApi = {
   createTask: (projectPath) => ipcRenderer.invoke("tasks:create", projectPath),
   getTaskRun: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-run", projectPath, taskPath),
   submitPrompt: (projectPath, taskPath, prompt) => ipcRenderer.invoke("tasks:submit", projectPath, taskPath, prompt),
+  queuePrompt: (taskPath, prompt, mode) => ipcRenderer.invoke("tasks:queue", taskPath, prompt, mode),
   executeCommand: (projectPath, taskPath, command, includeInContext) => ipcRenderer.invoke("tasks:command", projectPath, taskPath, command, includeInContext),
   abortTask: (taskPath) => ipcRenderer.invoke("tasks:abort", taskPath),
   openOutput: (path) => ipcRenderer.invoke("outputs:open", path),
