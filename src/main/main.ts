@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, nativeTheme } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getStartupState } from "./readiness.js";
@@ -8,12 +8,18 @@ const debuggingPort = process.argv.find((argument) => argument.startsWith("--pil
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 
 function createWindow() {
+  const dark = nativeTheme.shouldUseDarkColors;
+  const chromeColor = dark ? "#242523" : "#ebebea";
   const window = new BrowserWindow({
     width: 1180,
     height: 760,
     minWidth: 680,
     minHeight: 520,
-    backgroundColor: "#f4f4f3",
+    backgroundColor: chromeColor,
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
+    ...(process.platform === "darwin" ? {} : {
+      titleBarOverlay: { color: chromeColor, symbolColor: dark ? "#e8e8e5" : "#20211f", height: 38 },
+    }),
     show: false,
     webPreferences: {
       contextIsolation: true,

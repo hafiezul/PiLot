@@ -13,6 +13,7 @@ function App() {
   return (
     <>
       <a className="skip-link" href="#content">Skip to readiness</a>
+      <div className="window-bar" aria-hidden="true" />
       <div className="shell">
         <nav aria-label="Projects and tasks" className="navigation">
           <header className="brand">

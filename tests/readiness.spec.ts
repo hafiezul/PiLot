@@ -77,7 +77,23 @@ test("launches a sandboxed command center from the canonical Pi environment", as
     await expect(app.window.getByRole("main")).toContainText("Ready to work");
     await expect(app.window.getByText("fixture-secret")).toHaveCount(0);
     await expect(app.window.getByRole("complementary", { name: "Inspector" })).toBeVisible();
-    expect(await app.window.evaluate(() => ({ process: typeof process, require: typeof require }))).toEqual({
+    expect(await app.window.evaluate(() => {
+      const style = (selector: string) => getComputedStyle(document.querySelector(selector)!);
+      return {
+        bodyOverflow: style("body").overflow,
+        mainOverflow: style("main").overflowY,
+        navigationOverflow: style("nav").overflow,
+        inspectorOverflow: style("aside").overflow,
+        chromeMatchesLayout: style(".window-bar").backgroundColor === style("nav").backgroundColor,
+        process: typeof process,
+        require: typeof require,
+      };
+    })).toEqual({
+      bodyOverflow: "hidden",
+      mainOverflow: "auto",
+      navigationOverflow: "hidden",
+      inspectorOverflow: "hidden",
+      chromeMatchesLayout: true,
       process: "undefined",
       require: "undefined",
     });
