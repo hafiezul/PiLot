@@ -1,5 +1,15 @@
 export type CredentialSource = "stored" | "environment" | "runtime" | "models_json";
 
+export const BUILT_IN_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  "amazon-bedrock", "ant-ling", "anthropic", "azure-openai-responses", "cerebras",
+  "cloudflare-ai-gateway", "cloudflare-workers-ai", "deepseek", "fireworks", "google",
+  "google-vertex", "groq", "huggingface", "kimi-coding", "minimax", "minimax-cn",
+  "mistral", "moonshotai", "moonshotai-cn", "nvidia", "openai", "openai-codex",
+  "opencode", "opencode-go", "openrouter", "together", "vercel-ai-gateway", "xai",
+  "xiaomi", "xiaomi-token-plan-ams", "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp",
+  "zai", "zai-coding-cn",
+]);
+
 export type ProviderSummary = {
   id: string;
   name: string;

@@ -1,9 +1,10 @@
-import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
+import { StrictMode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import type { CommandEvidence, LiveInputMode, ProjectAccess, ProjectsState, RunEvidence, TaskModelState, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
+import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
 
 function ProviderSettings({ onChange }: { onChange(): void }) {
@@ -264,6 +265,104 @@ function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: num
   </article>;
 }
 
+type TaskModel = TaskModelState["providers"][number]["models"][number];
+type TaskProvider = TaskModelState["providers"][number];
+
+function fuzzyMatchScore(value: string, query: string) {
+  const candidate = value.toLocaleLowerCase();
+  if (candidate === query) return 0;
+  if (candidate.startsWith(query)) return 10 + candidate.length - query.length;
+  const includedAt = candidate.indexOf(query);
+  if (includedAt >= 0) return 30 + includedAt;
+
+  let queryIndex = 0;
+  let previous = -1;
+  let first = -1;
+  let gaps = 0;
+  for (let index = 0; index < candidate.length && queryIndex < query.length; index++) {
+    if (candidate[index] !== query[queryIndex]) continue;
+    if (first < 0) first = index;
+    if (previous >= 0) gaps += index - previous - 1;
+    previous = index;
+    queryIndex++;
+  }
+  return queryIndex === query.length ? 100 + first * 2 + gaps * 3 + candidate.length - query.length : null;
+}
+
+function modelSearchScore(provider: TaskProvider, model: TaskModel, query: string) {
+  let total = 0;
+  for (const token of query.toLocaleLowerCase().trim().split(/\s+/)) {
+    const scores = [provider.name, provider.id, model.name, model.id]
+      .map((value) => fuzzyMatchScore(value, token))
+      .filter((score): score is number => score !== null);
+    if (!scores.length) return null;
+    total += Math.min(...scores);
+  }
+  return total;
+}
+
+function placePicker(popover: HTMLElement, trigger: HTMLElement, preferredWidth: number) {
+  const bounds = trigger.getBoundingClientRect();
+  const width = Math.min(preferredWidth, window.innerWidth - 24);
+  popover.style.width = `${width}px`;
+  popover.style.left = `${Math.max(12, Math.min(bounds.left, window.innerWidth - width - 12))}px`;
+  popover.style.top = `${bounds.top - 7}px`;
+}
+
+function thinkingLevelLabel(level: TaskModelState["thinkingLevel"]) {
+  return level[0].toUpperCase() + level.slice(1);
+}
+
+function ThinkingPicker({ state, disabled, onSelect }: {
+  state: TaskModelState;
+  disabled: boolean;
+  onSelect(level: TaskModelState["thinkingLevel"]): Promise<boolean>;
+}) {
+  const popover = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const close = () => {
+    if (popover.current?.matches(":popover-open")) popover.current.hidePopover();
+    trigger.current?.focus();
+  };
+  const show = () => {
+    if (!popover.current || !trigger.current || disabled) return;
+    placePicker(popover.current, trigger.current, Math.max(180, trigger.current.offsetWidth));
+    if (!popover.current.matches(":popover-open")) popover.current.showPopover();
+    requestAnimationFrame(() => popover.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus());
+  };
+  const move = (event: React.KeyboardEvent, direction: number) => {
+    const options = [...(popover.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])];
+    const index = options.indexOf(event.currentTarget as HTMLElement);
+    options[(index + direction + options.length) % options.length]?.focus();
+    event.preventDefault();
+  };
+
+  return <>
+    <button ref={trigger} type="button" className="thinking-picker-trigger" aria-haspopup="dialog" aria-expanded={open} aria-label={`Thinking level: ${thinkingLevelLabel(state.thinkingLevel)}`} disabled={disabled} onClick={show}>
+      <span>Thinking · {thinkingLevelLabel(state.thinkingLevel)}</span><span aria-hidden="true">⌄</span>
+    </button>
+    <div ref={popover} popover="auto" className="model-picker-popover thinking-picker-popover" role="dialog" aria-label="Choose thinking level" onToggle={(event) => setOpen(event.currentTarget.matches(":popover-open"))} onKeyDown={(event) => {
+      if (event.key === "Escape") { event.preventDefault(); close(); }
+    }}>
+      <div className="model-results" role="listbox" aria-label="Thinking levels">
+        {state.thinkingLevels.map((level) => {
+          const selected = level === state.thinkingLevel;
+          return <button key={level} type="button" role="option" aria-selected={selected} onClick={() => {
+            void onSelect(level).then((changed) => { if (changed) close(); });
+          }} onKeyDown={(event) => {
+            if (event.key === "ArrowDown") move(event, 1);
+            if (event.key === "ArrowUp") move(event, -1);
+          }}>
+            <span><strong>{thinkingLevelLabel(level)}</strong></span>
+            {selected && <span className="model-selected" aria-hidden="true">✓</span>}
+          </button>;
+        })}
+      </div>
+    </div>
+  </>;
+}
+
 function TaskModelControls({ project, task, state, disabled, onChange, onOpenSettings }: {
   project: ProjectAccess;
   task: TaskSummary;
@@ -272,13 +371,56 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   onChange(next: TaskModelState): void;
   onOpenSettings(): void;
 }) {
-  const disclosure = useRef<HTMLDetailsElement>(null);
-  const modelPicker = useRef<HTMLSelectElement>(null);
+  const picker = useRef<HTMLDivElement>(null);
+  const pickerTrigger = useRef<HTMLButtonElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const modelListId = useId();
+  const [providerId, setProviderId] = useState("");
+  const [query, setQuery] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState("");
-  const unavailable = state?.providers.filter(({ configured }) => !configured) ?? [];
+  const providers = state?.providers.filter(({ models }) => models.length) ?? [];
+  const selectedProvider = providers.find(({ id }) => id === state?.selected?.provider);
+  const activeProvider = providers.find(({ id }) => id === providerId) ?? selectedProvider ?? providers[0];
+  const searching = Boolean(query.trim());
+  const models = searching
+    ? providers.flatMap((provider) => provider.models.map((model) => ({ provider, model, score: modelSearchScore(provider, model, query) })))
+      .filter((item): item is { provider: TaskProvider; model: TaskModel; score: number } => item.score !== null)
+      .sort((left, right) => left.score - right.score || left.model.name.localeCompare(right.model.name))
+    : (activeProvider?.models ?? []).map((model) => ({ provider: activeProvider!, model, score: 0 }));
+
+  useEffect(() => {
+    if (state?.selected?.provider) setProviderId(state.selected.provider);
+  }, [state?.selected?.provider]);
+
   const attempt = async (action: () => Promise<TaskModelState>) => {
     setError("");
-    try { onChange(await action()); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    try { onChange(await action()); return true; } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); return false; }
+  };
+  const closePicker = (restoreFocus = true) => {
+    if (picker.current?.matches(":popover-open")) picker.current.hidePopover();
+    if (restoreFocus) pickerTrigger.current?.focus();
+  };
+  const openPicker = () => {
+    if (!picker.current || !pickerTrigger.current || disabled) return;
+    setError("");
+    setQuery("");
+    setProviderId(state?.selected?.provider ?? providers[0]?.id ?? "");
+    placePicker(picker.current, pickerTrigger.current, 420);
+    if (!picker.current.matches(":popover-open")) picker.current.showPopover();
+    requestAnimationFrame(() => {
+      picker.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+      searchInput.current?.focus();
+    });
+  };
+  const moveFocus = (event: React.KeyboardEvent, selector: string, direction: number) => {
+    const items = [...(picker.current?.querySelectorAll<HTMLElement>(selector) ?? [])];
+    if (!items.length) return;
+    const index = items.indexOf(event.currentTarget as HTMLElement);
+    const next = items[(index + direction + items.length) % items.length];
+    next?.focus();
+    event.preventDefault();
+    return next;
   };
 
   return <div className="task-model-controls">
@@ -287,39 +429,64 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
       {state.selected && <button type="button" onClick={() => {
         void attempt(() => window.pilot.setTaskModel(project.path, task.path, state.selected!.provider, state.selected!.id));
       }}>Use fallback model</button>}
-      <button type="button" onClick={() => modelPicker.current?.focus()}>Choose another model</button>
+      <button type="button" onClick={openPicker}>Choose another model</button>
       <button type="button" onClick={onOpenSettings}>Open provider Settings</button>
     </div>}
-    <div className="model-control-row">
-      <select ref={modelPicker} className="model-picker" aria-label="Provider and model" value={state?.selected ? `${state.selected.provider}/${state.selected.id}` : ""} disabled={disabled || !state?.selected} onChange={(event) => {
-        const provider = state?.providers.find((item) => item.models.some((model) => `${model.provider}/${model.id}` === event.target.value));
-        const model = provider?.models.find((item) => `${item.provider}/${item.id}` === event.target.value);
-        if (model) void attempt(() => window.pilot.setTaskModel(project.path, task.path, model.provider, model.id));
+    {state?.selected && selectedProvider && <>
+      <div className="model-control-row">
+        <button ref={pickerTrigger} type="button" className="model-picker-trigger" aria-haspopup="dialog" aria-expanded={pickerOpen} aria-label={`Provider and model: ${selectedProvider.name} · ${state.selected.name} · ${state.selected.id}`} disabled={disabled} onClick={openPicker}>
+          <ProviderIcon id={selectedProvider.id} builtIn={selectedProvider.builtIn} />
+          <span className="model-trigger-label">{state.selected.name}</span><span aria-hidden="true">⌄</span>
+        </button>
+        <ThinkingPicker state={state} disabled={disabled || state.thinkingLevels.length === 1} onSelect={(level) => attempt(() => window.pilot.setTaskThinking(project.path, task.path, level))} />
+      </div>
+      <div ref={picker} popover="auto" className="model-picker-popover" role="dialog" aria-label="Choose model" onToggle={(event) => {
+        const open = event.currentTarget.matches(":popover-open");
+        setPickerOpen(open);
+        if (!open) setQuery("");
+      }} onKeyDown={(event) => {
+        if (event.key === "Escape") { event.preventDefault(); closePicker(); }
       }}>
-        {!state?.selected && <option value="">Connect provider</option>}
-        {state?.providers.filter(({ models }) => models.length).map((provider) => <optgroup key={provider.id} label={provider.name}>
-          {provider.models.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name} · {model.id}</option>)}
-        </optgroup>)}
-      </select>
-      <details ref={disclosure} className="model-control">
-        <summary role="button" aria-label="Model options">•••</summary>
-        <div className="model-control-menu" role="group" aria-label="Model options">
-        {unavailable.length > 0 && <details className="unavailable-providers">
-          <summary role="button">Unavailable providers ({unavailable.length})</summary>
-          {unavailable.map((provider) => <p key={provider.id}><strong>{provider.name}</strong><span>{provider.credentialStatus}</span></p>)}
-          <button type="button" onClick={onOpenSettings}>Open provider Settings</button>
-        </details>}
-        <label className="thinking-control">Thinking level
-          <select aria-label="Thinking level" value={state?.thinkingLevel ?? "off"} disabled={disabled || !state?.selected} onChange={(event) => {
-            void attempt(() => window.pilot.setTaskThinking(project.path, task.path, event.target.value as TaskModelState["thinkingLevel"]));
-          }}>
-            {(state?.thinkingLevels ?? ["off"]).map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
-          </select>
-        </label>
-        {error && <p className="error" role="alert">{error}</p>}
+        <div className="model-picker-layout">
+          {!searching && providers.length > 1 && <div className="model-provider-rail" role="tablist" aria-label="Available providers" aria-orientation="vertical">
+            {providers.map((provider) => <button key={provider.id} type="button" role="tab" data-provider-id={provider.id} aria-label={provider.name} title={provider.name} aria-selected={provider.id === activeProvider?.id} tabIndex={provider.id === activeProvider?.id ? 0 : -1} onClick={() => { setProviderId(provider.id); searchInput.current?.focus(); }} onKeyDown={(event) => {
+              const next = event.key === "ArrowUp" ? moveFocus(event, '[role="tab"]', -1)
+                : event.key === "ArrowDown" ? moveFocus(event, '[role="tab"]', 1) : undefined;
+              if (next?.dataset.providerId) setProviderId(next.dataset.providerId);
+            }}><ProviderIcon id={provider.id} builtIn={provider.builtIn} /></button>)}
+          </div>}
+          <div className="model-picker-main">
+            <label className="model-search">
+              <span>Search models</span>
+              <input ref={searchInput} type="search" role="combobox" aria-expanded="true" aria-controls={modelListId} aria-autocomplete="list" placeholder="Search models…" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  picker.current?.querySelector<HTMLElement>('[role="option"]')?.focus();
+                  event.preventDefault();
+                }
+              }} />
+            </label>
+            <div className="model-results" id={modelListId} role="listbox" aria-label={searching ? "Models from all providers" : `${activeProvider?.name ?? "Provider"} models`}>
+              {models.map(({ provider, model }) => {
+                const selected = model.provider === state.selected!.provider && model.id === state.selected!.id;
+                return <button key={`${model.provider}/${model.id}`} type="button" role="option" aria-selected={selected} onClick={() => {
+                  void attempt(() => window.pilot.setTaskModel(project.path, task.path, model.provider, model.id)).then((changed) => { if (changed) closePicker(); });
+                }} onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") moveFocus(event, '[role="option"]', 1);
+                  if (event.key === "ArrowUp") moveFocus(event, '[role="option"]', -1);
+                }}>
+                  <span><strong>{model.name}</strong><code>{model.id}</code></span>
+                  {searching && <small><ProviderIcon id={provider.id} builtIn={provider.builtIn} /><span>{provider.name}</span></small>}
+                  {selected && <span className="model-selected" aria-hidden="true">✓</span>}
+                </button>;
+              })}
+              {!models.length && <p>No models found</p>}
+            </div>
+            {error && <p className="error" role="alert">{error}</p>}
+          </div>
         </div>
-      </details>
-    </div>
+      </div>
+      {error && !pickerOpen && <p className="error" role="alert">{error}</p>}
+    </>}
   </div>;
 }
 

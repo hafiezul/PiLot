@@ -1,10 +1,11 @@
 import { AuthStorage, CURRENT_SESSION_VERSION, estimateTokens, ModelRegistry, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { appendFile, mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import type { ProjectDiagnostic, TaskModelState, TaskSummary, ThinkingLevel } from "../shared/projects.js";
+import { BUILT_IN_PROVIDER_IDS } from "../shared/providers.js";
 
 const metadataType = "pilot.task";
 const maximumTasks = 500;
@@ -363,8 +364,25 @@ function usage(manager: SessionManager, model?: RegisteredModel): TaskModelState
   };
 }
 
+function customEndpointProviders(agentDir: string) {
+  try {
+    const input = readFileSync(path.join(agentDir, "models.json"), "utf8")
+      .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (match) => match[0] === '"' ? match : "")
+      .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (match, tail) => tail ?? (match[0] === '"' ? match : ""));
+    const providers = JSON.parse(input).providers ?? {};
+    return new Set(Object.entries(providers).filter(([, value]) => {
+      if (!value || typeof value !== "object") return false;
+      const config = value as { baseUrl?: unknown; models?: Array<{ baseUrl?: unknown }> };
+      return typeof config.baseUrl === "string" || config.models?.some((model) => typeof model.baseUrl === "string");
+    }).map(([id]) => id));
+  } catch {
+    return new Set<string>();
+  }
+}
+
 function taskModelState(file: string, projectPath: string, agentDir: string, manager: SessionManager): TaskModelState {
   const { auth, models, settings } = modelServices(agentDir, projectPath);
+  const customEndpoints = customEndpointProviders(agentDir);
   const available = models.getAvailable();
   const availableByKey = new Map(available.map((model) => [`${model.provider}/${model.id}`, model]));
   const context = manager.buildSessionContext();
@@ -384,6 +402,7 @@ function taskModelState(file: string, projectPath: string, agentDir: string, man
     return {
       id,
       name: displayName === id ? id[0]?.toUpperCase() + id.slice(1) : displayName,
+      builtIn: BUILT_IN_PROVIDER_IDS.has(id) && !customEndpoints.has(id),
       configured: Boolean(status.source),
       credentialStatus: status.source ? "Credentials configured" : "Credentials not configured",
       models: available.filter((model) => model.provider === id).map((model) => ({

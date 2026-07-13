@@ -9,7 +9,7 @@
 html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 body { margin: 0; min-width: 680px; }
 button { font: inherit; }
-button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid #1668d4; outline-offset: 2px; }
+button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 2px solid #1668d4; outline-offset: 2px; }
 .skip-link { position: fixed; left: 12px; top: -48px; z-index: 2; padding: 8px 12px; color: #fff; background: #20211f; }
 .skip-link:focus { top: 42px; }
 .window-bar { position: fixed; inset: 0 0 auto; z-index: 1; height: 38px; background: #ebebea; -webkit-app-region: drag; }
@@ -147,22 +147,42 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .pending-queue span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pending-queue .queue-empty span { color: #858681; }
 .composer-controls { display: flex; justify-content: space-between; align-items: end; gap: 8px; }
-.composer-controls button, .model-control summary { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #f7f7f6; font-size: 12px; }
+.composer-controls button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #f7f7f6; font-size: 12px; }
 .task-model-controls { min-width: 0; }
-.model-control-row { display: flex; gap: 5px; }
-.model-picker { min-width: 120px; max-width: 260px; border: 1px solid #c8c8c4; border-radius: 5px; padding: 5px 6px; color: inherit; background: #f7f7f6; font: inherit; font-size: 12px; }
-.model-control { position: relative; }
-.model-control summary { min-width: 34px; cursor: pointer; list-style: none; text-align: center; }
-.model-control summary::-webkit-details-marker { display: none; }
-.model-control-menu { position: absolute; bottom: 36px; left: 0; z-index: 4; width: min(380px, calc(100vw - 80px)); max-height: min(480px, 65vh); padding: 8px; border: 1px solid #c8c8c4; border-radius: 6px; background: #fdfdfc; box-shadow: 0 4px 8px rgb(20 20 19 / 16%); overflow: auto; }
-.thinking-control { display: grid; color: #686864; font-size: 11px; font-weight: 650; }
-.thinking-control select { min-width: 100px; border: 1px solid #c8c8c4; border-radius: 4px; padding: 5px 6px; color: inherit; background: #fff; font: inherit; }
-.unavailable-providers { margin-top: 8px; padding: 8px 7px; border-top: 1px solid #e3e3df; }
-.unavailable-providers > summary { padding: 0 0 6px; border: 0; color: #686864; background: transparent; cursor: pointer; font-size: 11px; font-weight: 650; }
-.unavailable-providers p { display: flex; justify-content: space-between; gap: 12px; margin: 0 0 6px; font-size: 11px; }
-.unavailable-providers span { color: #686864; }
-.unavailable-providers button { padding: 3px 0; border: 0; color: #145fbf; background: transparent; cursor: pointer; text-decoration: underline; }
-.thinking-control { grid-template-columns: 1fr auto; align-items: center; gap: 12px; margin-top: 8px; padding: 9px 7px 2px; border-top: 1px solid #e3e3df; }
+.model-control-row { display: flex; min-width: 0; gap: 5px; }
+.model-picker-trigger, .thinking-picker-trigger { position: relative; display: flex; align-items: center; justify-content: space-between; min-width: 130px; gap: 8px; cursor: pointer; }
+.model-picker-trigger { max-width: 270px; }
+.model-trigger-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thinking-picker-trigger { flex: none; }
+.provider-icon { width: 16px; height: 16px; flex: none; overflow: visible; }
+.provider-icon.branded { fill: var(--provider-color); color: var(--provider-color); }
+.provider-icon.generic { fill: none; stroke: currentcolor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.model-picker-popover { position: fixed; inset: auto; max-height: min(430px, 65vh); margin: 0; padding: 0; transform: translateY(-100%); border: 1px solid #c8c8c4; border-radius: 7px; color: #20211f; background: #fdfdfc; box-shadow: 0 4px 8px rgb(20 20 19 / 16%); overflow: hidden; }
+.model-picker-popover:not(:popover-open) { display: none; }
+.model-picker-popover:popover-open { display: flex; flex-direction: column; }
+.model-picker-layout { display: flex; min-height: 0; flex: 1; }
+.model-picker-main { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; }
+.model-provider-rail { width: 44px; flex: none; overflow-y: auto; overscroll-behavior: contain; padding: 4px; border-right: 1px solid #e3e3df; scrollbar-width: none; }
+.model-provider-rail::-webkit-scrollbar { display: none; }
+.composer-controls .model-provider-rail button { display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 2px; border: 0; border-radius: 5px; padding: 0; color: #5f605b; background: transparent; cursor: pointer; }
+.composer-controls .model-provider-rail button:hover { background: #ededeb; }
+.composer-controls .model-provider-rail button[aria-selected="true"] { color: #20211f; background: #dededb; }
+.model-search { display: block; padding: 9px 10px; border-bottom: 1px solid #e3e3df; }
+.model-search > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.model-search input { width: 100%; border: 1px solid #c8c8c4; border-radius: 5px; padding: 7px 9px; color: inherit; background: #fff; font: inherit; font-size: 12px; }
+.model-search input::placeholder { color: #686864; opacity: 1; }
+.model-results { flex: 1; min-height: 44px; overflow-y: auto; padding: 4px; }
+.composer-controls .model-results button { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; width: 100%; gap: 10px; border: 0; border-radius: 4px; padding: 8px; background: transparent; cursor: pointer; text-align: left; }
+.composer-controls .model-results button:hover, .composer-controls .model-results button:focus-visible { background: #ededeb; }
+.model-results button > span:first-child { display: grid; min-width: 0; gap: 3px; }
+.model-results strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.model-results code { overflow: hidden; color: #686864; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.model-results small { display: flex; align-items: center; min-width: 0; gap: 5px; color: #686864; font-size: 10px; font-weight: 650; }
+.model-results small span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-results small .provider-icon { width: 12px; height: 12px; }
+.model-selected { color: #1668d4; font-size: 12px; font-weight: 700; }
+.model-results > p { margin: 16px 10px; color: #686864; font-size: 12px; text-align: center; }
+.model-picker-popover > .error, .task-model-controls > .error { margin: 7px 10px 10px; font-size: 11px; }
 .model-fallback { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 6px; color: #805814; font-size: 11px; }
 .model-fallback span { max-width: 48ch; }
 .model-fallback button { padding: 2px 4px; border: 0; color: #145fbf; background: transparent; cursor: pointer; text-decoration: underline; white-space: nowrap; }
@@ -278,11 +298,16 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] .project-list button:hover, :root[data-appearance="dark"] .project-list button[aria-current="page"], :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover, :root[data-appearance="dark"] .settings-button:hover { background: #343532; }
 :root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
 :root[data-appearance="dark"] .project-access-dialog { border-color: #50514d; background: #242523; }
-:root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu, :root[data-appearance="dark"] .new-task-button, :root[data-appearance="dark"] .task-composer, :root[data-appearance="dark"] .composer-controls button, :root[data-appearance="dark"] .model-control summary, :root[data-appearance="dark"] .model-control-menu { border-color: #50514d; background: #30312e; }
-:root[data-appearance="dark"] .thinking-control, :root[data-appearance="dark"] .unavailable-providers > summary, :root[data-appearance="dark"] .unavailable-providers span { color: #aaa9a4; }
-:root[data-appearance="dark"] .unavailable-providers, :root[data-appearance="dark"] .thinking-control { border-color: #40413d; }
-:root[data-appearance="dark"] .model-picker, :root[data-appearance="dark"] .thinking-control select { border-color: #50514d; color: #e8e8e5; background: #242523; }
-:root[data-appearance="dark"] .unavailable-providers button, :root[data-appearance="dark"] .model-fallback button { color: #72aef4; }
+:root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu, :root[data-appearance="dark"] .new-task-button, :root[data-appearance="dark"] .task-composer, :root[data-appearance="dark"] .composer-controls button { border-color: #50514d; background: #30312e; }
+:root[data-appearance="dark"] .model-search input { border-color: #50514d; color: #e8e8e5; background: #242523; }
+:root[data-appearance="dark"] .model-picker-popover { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] .model-provider-rail, :root[data-appearance="dark"] .model-search { border-color: #40413d; }
+:root[data-appearance="dark"] .composer-controls .model-provider-rail button, :root[data-appearance="dark"] .model-results code, :root[data-appearance="dark"] .model-results small, :root[data-appearance="dark"] .model-results > p, :root[data-appearance="dark"] .model-search input::placeholder { color: #aaa9a4; }
+:root[data-appearance="dark"] .composer-controls .model-provider-rail button:hover { background: #3a3b38; }
+:root[data-appearance="dark"] .composer-controls .model-provider-rail button[aria-selected="true"] { color: #e8e8e5; background: #454642; }
+:root[data-appearance="dark"] .provider-icon.branded { fill: var(--provider-color-dark); color: var(--provider-color-dark); }
+:root[data-appearance="dark"] .composer-controls .model-results button:hover, :root[data-appearance="dark"] .composer-controls .model-results button:focus-visible { background: #3a3b38; }
+:root[data-appearance="dark"] .model-fallback button { color: #72aef4; }
 :root[data-appearance="dark"] .live-input-mode label { border-color: #50514d; color: #bbbcb7; }
 :root[data-appearance="dark"] .live-input-mode label:has(input:checked) { border-color: #7d91aa; color: #9bc3f0; background: #293747; }
 :root[data-appearance="dark"] .pending-queues { border-color: #40413d; }
@@ -312,11 +337,16 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-button:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access-dialog { border-color: #50514d; background: #242523; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu, :root:is(:not([data-appearance]), [data-appearance="system"]) .new-task-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-composer, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls button, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-control summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-control-menu { border-color: #50514d; background: #30312e; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .thinking-control, :root:is(:not([data-appearance]), [data-appearance="system"]) .unavailable-providers > summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .unavailable-providers span { color: #aaa9a4; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .unavailable-providers, :root:is(:not([data-appearance]), [data-appearance="system"]) .thinking-control { border-color: #40413d; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .model-picker, :root:is(:not([data-appearance]), [data-appearance="system"]) .thinking-control select { border-color: #50514d; color: #e8e8e5; background: #242523; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .unavailable-providers button, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-fallback button { color: #72aef4; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu, :root:is(:not([data-appearance]), [data-appearance="system"]) .new-task-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-composer, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls button { border-color: #50514d; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .model-search input { border-color: #50514d; color: #e8e8e5; background: #242523; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .model-picker-popover { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .model-provider-rail, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-search { border-color: #40413d; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .model-provider-rail button, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-results code, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-results small, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-results > p, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-search input::placeholder { color: #aaa9a4; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .model-provider-rail button:hover { background: #3a3b38; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .model-provider-rail button[aria-selected="true"] { color: #e8e8e5; background: #454642; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-icon.branded { fill: var(--provider-color-dark); color: var(--provider-color-dark); }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .model-results button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .model-results button:focus-visible { background: #3a3b38; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .model-fallback button { color: #72aef4; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .live-input-mode label { border-color: #50514d; color: #bbbcb7; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .live-input-mode label:has(input:checked) { border-color: #7d91aa; color: #9bc3f0; background: #293747; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .pending-queues { border-color: #40413d; }

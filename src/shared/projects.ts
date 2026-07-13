@@ -47,6 +47,7 @@ export type TaskModelState = {
   providers: Array<{
     id: string;
     name: string;
+    builtIn: boolean;
     configured: boolean;
     credentialStatus: string;
     models: Array<{ provider: string; id: string; name: string }>;

@@ -242,7 +242,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await app.window.getByRole("button", { name: "New Task" }).click();
 
     const composer = app.window.getByRole("form", { name: "Task composer" });
-    const modelControl = composer.getByRole("combobox", { name: "Provider and model" });
+    const modelControl = composer.getByRole("button", { name: /Provider and model/ });
     await expect(modelControl).toBeVisible();
     await modelControl.focus();
     await expect(modelControl).toBeFocused();
@@ -465,6 +465,12 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
           },
         ],
       },
+      google: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "alternate-reasoning", name: "Alternate Reasoning" }],
+      },
       locked: {
         baseUrl: provider.baseUrl,
         api: "openai-completions",
@@ -473,7 +479,7 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     },
   }));
   await writeFile(settingsPath, JSON.stringify({ defaultProvider: "fixture", defaultModel: "basic-model", defaultThinkingLevel: "high" }));
-  await writeFile(path.join(environment.agentDir, "auth.json"), "{}");
+  await writeFile(path.join(environment.agentDir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: "fixture-secret" } }));
   const userData = path.join(environment.root, "pilot-user-data");
   const first = await launch(environment.agentDir, true, { PILOT_TEST_PROJECT_DIR: environment.project, PILOT_USER_DATA_DIR: userData });
   let taskFile = "";
@@ -484,29 +490,72 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     await first.window.getByRole("button", { name: "New Task" }).click();
 
     const composer = first.window.getByRole("form", { name: "Task composer" });
-    const modelControl = composer.getByRole("combobox", { name: "Provider and model" });
-    await expect(modelControl).toHaveValue("fixture/basic-model");
+    const modelControl = composer.getByRole("button", { name: /Provider and model/ });
+    await expect(modelControl.locator(":scope > span").first()).toHaveText("Basic model");
+    await expect(modelControl.locator('[data-provider-icon="generic"]')).toBeVisible();
+    await expect(modelControl.locator('[role="tooltip"]')).toHaveCount(0);
     await modelControl.focus();
     await expect(modelControl).toBeFocused();
-    await expect(modelControl.locator('optgroup[label="Fixture"]')).toBeAttached();
-    const optionsButton = composer.getByRole("button", { name: "Model options" });
-    await optionsButton.press("Enter");
-    const controls = composer.getByRole("group", { name: "Model options" });
-    await controls.getByRole("button", { name: /Unavailable providers/ }).click();
-    await expect(controls).toContainText("Locked");
-    await expect(controls).toContainText("Credentials not configured");
-    const providerSettings = controls.getByRole("button", { name: "Open provider Settings" });
-    await expect(providerSettings).toBeVisible();
-    await providerSettings.click();
-    await expect(first.window.getByRole("region", { name: "Provider authentication" })).toBeVisible();
-    await first.window.getByRole("button", { name: "Back to command center" }).click();
+    const thinking = composer.getByRole("button", { name: /Thinking level/ });
+    await expect(thinking).toBeDisabled();
+    await expect(thinking).toContainText("Thinking · Off");
 
-    await modelControl.selectOption("fixture/reasoning-model");
-    await expect(modelControl).toHaveValue("fixture/reasoning-model");
-    await optionsButton.press("Enter");
-    const thinking = controls.getByRole("combobox", { name: "Thinking level" });
-    await expect(thinking.getByRole("option")).toHaveText(["Off", "High", "Max"]);
-    await thinking.selectOption("max");
+    await modelControl.press("Enter");
+    const picker = first.window.getByRole("dialog", { name: "Choose model" });
+    const providerRail = picker.getByRole("tablist", { name: "Available providers" });
+    await expect(providerRail).toHaveAttribute("aria-orientation", "vertical");
+    expect(await providerRail.evaluate((element) => ({
+      overflowY: getComputedStyle(element).overflowY,
+      scrollbarWidth: getComputedStyle(element).scrollbarWidth,
+    }))).toEqual({ overflowY: "auto", scrollbarWidth: "none" });
+    await expect(picker.getByRole("tab")).toHaveCount(3);
+    await expect(picker.getByRole("tab").nth(0)).toHaveAccessibleName("Anthropic (Claude Pro/Max)");
+    await expect(picker.getByRole("tab").nth(1)).toHaveAccessibleName("Fixture");
+    await expect(picker.getByRole("tab").nth(2)).toHaveAccessibleName("Google Gemini");
+    const anthropicTab = picker.getByRole("tab", { name: "Anthropic (Claude Pro/Max)" });
+    await expect(anthropicTab).toHaveAttribute("title", "Anthropic (Claude Pro/Max)");
+    const anthropicIcon = anthropicTab.locator('[data-provider-icon="anthropic"]');
+    await expect(anthropicIcon).toBeVisible();
+    expect(await anthropicIcon.evaluate((element) => getComputedStyle(element).fill)).toBe("rgb(25, 25, 25)");
+    await first.window.evaluate(() => { document.documentElement.dataset.appearance = "dark"; });
+    expect(await anthropicIcon.evaluate((element) => getComputedStyle(element).fill)).toBe("rgb(242, 242, 239)");
+    await first.window.evaluate(() => { document.documentElement.dataset.appearance = "light"; });
+    await expect(picker.getByRole("tab", { name: "Google Gemini" }).locator('[data-provider-icon="generic"]')).toBeVisible();
+    await expect(picker).not.toContainText("Locked");
+    const search = picker.getByRole("combobox", { name: "Search models" });
+    await expect(search).toBeFocused();
+    await search.fill("altrsn");
+    await expect(picker.getByRole("tab")).toHaveCount(0);
+    const alternate = picker.getByRole("option", { name: /Alternate Reasoning/ });
+    await expect(alternate).toContainText("Google Gemini");
+    await expect(alternate.locator('[data-provider-icon="generic"]')).toBeVisible();
+    await search.fill("");
+    const fixtureTab = picker.getByRole("tab", { name: "Fixture" });
+    const googleTab = picker.getByRole("tab", { name: "Google Gemini" });
+    await search.press("Shift+Tab");
+    await expect(fixtureTab).toBeFocused();
+    await fixtureTab.press("ArrowDown");
+    await expect(googleTab).toHaveAttribute("aria-selected", "true");
+    await googleTab.press("ArrowUp");
+    await expect(fixtureTab).toHaveAttribute("aria-selected", "true");
+    await search.focus();
+    await search.fill("rsng mdl");
+    const reasoningModel = picker.getByRole("option", { name: /Reasoning model/ });
+    await search.press("ArrowDown");
+    await expect(reasoningModel).toBeFocused();
+    await reasoningModel.press("Enter");
+    await expect(picker).toBeHidden();
+    await expect(modelControl.locator(":scope > span").first()).toHaveText("Reasoning model");
+    await expect(modelControl.locator('[role="tooltip"]')).toHaveCount(0);
+    await expect(thinking).toBeEnabled();
+    await thinking.press("Enter");
+    const thinkingPicker = first.window.getByRole("dialog", { name: "Choose thinking level" });
+    await expect(thinkingPicker.getByRole("option").locator("strong")).toHaveText(["Off", "High", "Max"]);
+    const maxThinking = thinkingPicker.getByRole("option", { name: "Max" });
+    await maxThinking.focus();
+    await maxThinking.press("Enter");
+    await expect(thinkingPicker).toBeHidden();
+    await expect(thinking).toContainText("Thinking · Max");
 
     const prompt = composer.getByRole("textbox", { name: "Prompt" });
     await prompt.fill("model controls stats");
@@ -523,7 +572,7 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toMatchObject({ defaultModel: "basic-model", defaultThinkingLevel: "high" });
 
     await first.window.getByRole("button", { name: "New Task" }).click();
-    await expect(first.window.getByRole("form", { name: "Task composer" }).getByRole("combobox", { name: "Provider and model" })).toHaveValue("fixture/basic-model");
+    await expect(first.window.getByRole("form", { name: "Task composer" }).getByRole("button", { name: /Provider and model/ }).locator(":scope > span").first()).toHaveText("Basic model");
   } finally {
     await close(first);
   }
@@ -539,6 +588,7 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
       },
     },
   }));
+  await writeFile(path.join(environment.agentDir, "auth.json"), "{}");
   const second = await launch(environment.agentDir, true, { PILOT_USER_DATA_DIR: userData });
   try {
     await second.window.getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button", { name: "model controls stats" }).click();
@@ -548,7 +598,11 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     const choose = fallback.getByRole("button", { name: "Choose another model" });
     await choose.focus();
     await choose.press("Enter");
-    await expect(second.window.getByRole("combobox", { name: "Provider and model" })).toBeFocused();
+    const fallbackPicker = second.window.getByRole("dialog", { name: "Choose model" });
+    await expect(fallbackPicker.getByRole("tablist", { name: "Available providers" })).toHaveCount(0);
+    const fallbackSearch = fallbackPicker.getByRole("combobox", { name: "Search models" });
+    await expect(fallbackSearch).toBeFocused();
+    await fallbackSearch.press("Escape");
     await fallback.getByRole("button", { name: "Use fallback model" }).click();
     await expect(fallback).toHaveCount(0);
     const restored = (await readFile(taskFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));

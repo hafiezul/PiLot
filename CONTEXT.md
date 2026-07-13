@@ -12,6 +12,22 @@ _Avoid_: PiLot profile, app account
 The desktop interface through which a user works with Pi agents and their projects.
 _Avoid_: Pi wrapper, Pi TUI wrapper
 
+**Available provider**:
+A provider in the Pi environment that currently exposes at least one model Pi can use.
+_Avoid_: Configured provider, connected provider
+
+**Built-in provider**:
+A provider whose identity and model integration are supplied by PiLot's pinned Pi SDK.
+_Avoid_: First-party provider, official provider
+
+**Custom provider**:
+A provider defined by the user’s Pi environment rather than by PiLot's pinned Pi SDK.
+_Avoid_: Unknown provider
+
+**Available model**:
+A provider-scoped model Pi can currently use for a Task.
+_Avoid_: Configured model, set-up model
+
 **Project**:
 A codebase within which a user organizes and performs tasks.
 _Avoid_: Workspace, repository
@@ -43,3 +59,7 @@ _Avoid_: Completed task, closed task
 **Run**:
 A period of agent activity initiated by accepted input and ending when no retry, compaction retry, or queued continuation remains.
 _Avoid_: Turn, task, session
+
+**Thinking level**:
+The selected amount of model reasoning for a Task, limited to the levels supported by its current model.
+_Avoid_: Thinking mode, reasoning mode

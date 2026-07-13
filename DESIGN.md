@@ -17,7 +17,7 @@ The interface is focused, capable, and transparent. It must feel at home on macO
 
 **Key Characteristics:**
 
-- Near-monochrome surfaces with color reserved for meaning
+- Near-monochrome surfaces with color reserved for meaning and official provider marks
 - An adaptive three-pane shell that collapses the contextual inspector before task navigation
 - A run-centric timeline instead of conversation bubbles
 - Compact but breathable information density
@@ -29,7 +29,7 @@ The interface is focused, capable, and transparent. It must feel at home on macO
 
 The palette is near-monochrome in both light and dark appearance. Exact OKLCH values will be resolved during implementation and tested to WCAG 2.2 AA; body text should target 7:1 contrast where practical.
 
-**The Signal-Only Color Rule.** Color is reserved for selection, focus, links, warnings, errors, success, and active run state. It never decorates inactive surfaces or fills large areas merely to create identity.
+**The Signal-Only Color Rule.** Color is reserved for selection, focus, links, warnings, errors, success, active run state, and official provider marks. Provider marks may use their official brand colors for recognition; other inactive surfaces must not use color merely to create identity.
 
 **The True Neutral Rule.** Base backgrounds remain genuinely neutral rather than cream, blue-gray, or green-tinted. Brand character comes from composition, typography, and the rare accent—not a tinted canvas.
 
@@ -56,6 +56,7 @@ PiLot is flat by default. Depth comes from tonal surface changes, dividers, sele
 - **Do** organize transcript content into runs with compact evidence rows and expandable details.
 - **Do** use platform-standard menu placement, keyboard behavior, dialogs, focus treatment, and window lifecycle.
 - **Do** make running, queued, interrupted, failed, and externally changed states distinguishable without relying on color alone.
+- **Do** use legible, theme-adaptive official brand marks for built-in providers and one generic provider glyph for custom providers.
 - **Do** delegate editing and full terminal work to the user's chosen tools.
 - **Do** keep transitions between 150–200ms and remove nonessential motion under reduced-motion preferences.
 
