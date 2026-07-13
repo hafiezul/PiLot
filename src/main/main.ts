@@ -3,7 +3,7 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPreferences, saveAppearance } from "./preferences.js";
-import { addProject, getProjectsState, selectProject, setExecutionConsent, setResourceTrust } from "./projects.js";
+import { addProject, getProjectsState, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { getStartupState } from "./readiness.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
@@ -79,7 +79,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("providers:logout", (_event, provider: string) => logout(provider));
   ipcMain.handle("providers:oauth-reply", (_event, value?: string) => respondToOAuth(value));
 
-  const projectState = async () => getProjectsState(app.getPath("userData"), getAgentDir(), (await getStartupState()).projects);
+  const projectState = async () => getProjectsState(app.getPath("userData"), getAgentDir());
   const requireProjectPath = (value: unknown) => {
     if (typeof value !== "string" || !value) throw new Error("A Project path is required");
     return value;
@@ -94,17 +94,23 @@ app.whenReady().then(async () => {
       projectPath = result.canceled ? undefined : result.filePaths[0];
     }
     if (!projectPath) return projectState();
-    return addProject(app.getPath("userData"), getAgentDir(), projectPath, (await getStartupState()).projects);
+    return addProject(app.getPath("userData"), getAgentDir(), projectPath);
   });
   ipcMain.handle("projects:select", async (_event, projectPath: unknown) =>
-    selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), (await getStartupState()).projects));
+    selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
+  ipcMain.handle("projects:remove", async (_event, projectPath: unknown) =>
+    removeProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
+  ipcMain.handle("projects:set-task-archived", async (_event, projectPath: unknown, taskPath: unknown, archived: unknown) => {
+    if (typeof archived !== "boolean") throw new Error("A Task lifecycle is required");
+    return setTaskArchived(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), archived);
+  });
   ipcMain.handle("projects:set-resource-trust", async (_event, projectPath: unknown, trusted: unknown) => {
     if (typeof trusted !== "boolean") throw new Error("A trust decision is required");
-    return setResourceTrust(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), trusted, (await getStartupState()).projects);
+    return setResourceTrust(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), trusted);
   });
   ipcMain.handle("projects:set-execution-consent", async (_event, projectPath: unknown, consent: unknown) => {
     if (typeof consent !== "boolean") throw new Error("An execution consent decision is required");
-    return setExecutionConsent(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), consent, (await getStartupState()).projects);
+    return setExecutionConsent(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), consent);
   });
   createWindow();
   app.on("activate", () => {

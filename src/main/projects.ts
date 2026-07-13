@@ -1,7 +1,8 @@
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ProjectAccess, ProjectSummary, ProjectsState } from "../shared/projects.js";
+import type { ProjectAccess, ProjectsState } from "../shared/projects.js";
+import { discoverTasks, setTaskLifecycle } from "./tasks.js";
 
 type SavedProjects = {
   recentProjects: string[];
@@ -45,56 +46,90 @@ function remember(saved: SavedProjects, projectPath: string) {
   saved.selectedProject = projectPath;
 }
 
+async function projectAccess(
+  saved: SavedProjects,
+  agentDir: string,
+  projectPath: string,
+  admitted: boolean,
+): Promise<ProjectAccess> {
+  const trust = new ProjectTrustStore(agentDir).getEntry(projectPath);
+  const discovery = admitted ? await discoverTasks(agentDir, projectPath) : { tasks: [], diagnostics: [] };
+  return {
+    path: projectPath,
+    name: path.basename(projectPath) || projectPath,
+    admitted,
+    tasks: discovery.tasks,
+    diagnostics: discovery.diagnostics,
+    taskCount: discovery.tasks.length,
+    executionConsent: saved.executionConsent[projectPath] === true,
+    resourceTrust: {
+      required: hasTrustRequiringProjectResources(projectPath),
+      decision: trust?.decision ?? null,
+      sourcePath: trust?.path,
+    },
+  };
+}
+
 export async function getProjectsState(
   directory: string,
   agentDir: string,
-  discovered: ProjectSummary[],
+  candidatePath?: string,
 ): Promise<ProjectsState> {
   const saved = await load(directory);
-  const normalizedDiscovered = await Promise.all(discovered.map(async (project) => ({ ...project, path: await normalize(project.path) })));
-  const discoveredByPath = new Map(normalizedDiscovered.map((project) => [project.path, project]));
-  const paths = [...saved.recentProjects, ...normalizedDiscovered.map(({ path: projectPath }) => projectPath).filter((projectPath) => !saved.recentProjects.includes(projectPath))];
-  const trust = new ProjectTrustStore(agentDir);
-  const projects = paths.map<ProjectAccess>((projectPath) => {
-    const decision = trust.getEntry(projectPath);
-    const found = discoveredByPath.get(projectPath);
-    return {
-      path: projectPath,
-      name: found?.name ?? (path.basename(projectPath) || projectPath),
-      taskCount: found?.taskCount ?? 0,
-      executionConsent: saved.executionConsent[projectPath] === true,
-      resourceTrust: {
-        required: hasTrustRequiringProjectResources(projectPath),
-        decision: decision?.decision ?? null,
-        sourcePath: decision?.path,
-      },
-    };
-  });
-  return { projects, selected: projects.find(({ path: projectPath }) => projectPath === saved.selectedProject) };
+  const paths = await Promise.all(saved.recentProjects.map(normalize));
+  saved.recentProjects = [...new Set(paths)];
+  const projects = [];
+  for (const projectPath of saved.recentProjects) projects.push(await projectAccess(saved, agentDir, projectPath, true));
+  const selectedPath = candidatePath ? await normalize(candidatePath) : saved.selectedProject;
+  const selected = projects.find(({ path: projectPath }) => projectPath === selectedPath)
+    ?? (selectedPath ? await projectAccess(saved, agentDir, selectedPath, false) : undefined);
+  return { projects, selected };
 }
 
-export async function addProject(
+export async function addProject(directory: string, agentDir: string, projectPath: string) {
+  const canonical = await canonicalize(projectPath);
+  const saved = await load(directory);
+  if (saved.recentProjects.includes(canonical)) {
+    remember(saved, canonical);
+    await save(directory, saved);
+    return getProjectsState(directory, agentDir);
+  }
+  return getProjectsState(directory, agentDir, canonical);
+}
+
+export async function selectProject(directory: string, agentDir: string, projectPath: string) {
+  const saved = await load(directory);
+  const canonical = await canonicalize(projectPath);
+  if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this folder before selecting it as a Project");
+  remember(saved, canonical);
+  await save(directory, saved);
+  return getProjectsState(directory, agentDir);
+}
+
+export async function removeProject(directory: string, agentDir: string, projectPath: string) {
+  const saved = await load(directory);
+  const canonical = await normalize(projectPath);
+  saved.recentProjects = saved.recentProjects.filter((item) => item !== canonical);
+  delete saved.executionConsent[canonical];
+  if (saved.selectedProject === canonical) saved.selectedProject = saved.recentProjects[0];
+  await save(directory, saved);
+  return getProjectsState(directory, agentDir);
+}
+
+export async function setTaskArchived(
   directory: string,
   agentDir: string,
   projectPath: string,
-  discovered: ProjectSummary[],
+  taskPath: string,
+  archived: boolean,
 ) {
   const saved = await load(directory);
-  remember(saved, await canonicalize(projectPath));
+  const canonical = await canonicalize(projectPath);
+  if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this Project before changing its Tasks");
+  await setTaskLifecycle(agentDir, canonical, taskPath, archived ? "archived" : "active");
+  remember(saved, canonical);
   await save(directory, saved);
-  return getProjectsState(directory, agentDir, discovered);
-}
-
-export async function selectProject(
-  directory: string,
-  agentDir: string,
-  projectPath: string,
-  discovered: ProjectSummary[],
-) {
-  const saved = await load(directory);
-  remember(saved, await canonicalize(projectPath));
-  await save(directory, saved);
-  return getProjectsState(directory, agentDir, discovered);
+  return getProjectsState(directory, agentDir);
 }
 
 export async function setResourceTrust(
@@ -102,11 +137,12 @@ export async function setResourceTrust(
   agentDir: string,
   projectPath: string,
   trusted: boolean,
-  discovered: ProjectSummary[],
 ) {
   const canonical = await canonicalize(projectPath);
   new ProjectTrustStore(agentDir).set(canonical, trusted);
-  return selectProject(directory, agentDir, canonical, discovered);
+  const saved = await load(directory);
+  if (saved.recentProjects.includes(canonical)) return selectProject(directory, agentDir, canonical);
+  return getProjectsState(directory, agentDir, canonical);
 }
 
 export async function setExecutionConsent(
@@ -114,14 +150,22 @@ export async function setExecutionConsent(
   agentDir: string,
   projectPath: string,
   consent: boolean,
-  discovered: ProjectSummary[],
 ) {
   const saved = await load(directory);
   const canonical = await canonicalize(projectPath);
+  const admitted = saved.recentProjects.includes(canonical);
+  if (!admitted && consent) {
+    const trust = new ProjectTrustStore(agentDir);
+    if (trust.getEntry(canonical)?.decision !== true) {
+      if (hasTrustRequiringProjectResources(canonical)) throw new Error("Trust Project resources before allowing agent execution");
+      trust.set(canonical, true);
+    }
+  }
+  if (!admitted && !consent) return getProjectsState(directory, agentDir, canonical);
   remember(saved, canonical);
   saved.executionConsent[canonical] = consent;
   await save(directory, saved);
-  return getProjectsState(directory, agentDir, discovered);
+  return getProjectsState(directory, agentDir);
 }
 
 export async function assertExecutionAllowed(directory: string, projectPath: string) {

@@ -151,6 +151,10 @@ function ProjectAccessPanel({ project, onChange }: { project: ProjectAccess; onC
           : <button className="primary-action" onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, true))}>Allow agent execution</button>}
       </div>
     </section>
+    {project.admitted && <section aria-labelledby="project-removal-title">
+      <div className="access-heading"><div><h3 id="project-removal-title">Project removal</h3><p>Hides this Project and its Tasks without changing Pi resource trust or task history.</p></div></div>
+      <div className="access-actions"><button onClick={() => void attempt(() => window.pilot.removeProject(project.path))}>Remove Project</button></div>
+    </section>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>;
 }
@@ -174,16 +178,30 @@ function ProjectAccessDialog({ project, dismissible, onChange, onClose }: { proj
   </dialog>;
 }
 
-function ProjectPage({ project, needsAccess, onOpenAccess }: { project: ProjectAccess; needsAccess: boolean; onOpenAccess(): void }) {
+function ProjectPage({ project, needsAccess, onOpenAccess, onChange }: { project: ProjectAccess; needsAccess: boolean; onOpenAccess(): void; onChange(state: ProjectsState): void }) {
+  const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
+  const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
       <div className="project-top-actions"><button onClick={onOpenAccess}>Project access</button><span className="privacy"><i /> Local only</span></div>
     </header>
-    <section className="project-empty" aria-live="polite">
-      <h2>{needsAccess ? "Access required" : "Project ready"}</h2>
-      <p>{needsAccess ? "Complete the access decision to continue." : "Tasks for this Project will appear here."}</p>
-    </section>
+    {needsAccess ? <section className="project-empty" aria-live="polite">
+      <h2>Access required</h2>
+      <p>Complete the access decision to admit this Project.</p>
+    </section> : <div className="task-overview">
+      {project.diagnostics.length > 0 && <section className="task-diagnostics" aria-label="Task diagnostics">
+        {project.diagnostics.map((diagnostic) => <div key={diagnostic.title}><strong>{diagnostic.title}</strong><p>{diagnostic.detail}</p></div>)}
+      </section>}
+      <section className="task-section" aria-label="Active tasks">
+        <div className="task-section-heading"><h2>Active Tasks</h2><span>{active.length}</span></div>
+        {active.length ? <ul>{active.map((task) => <li key={task.path}><strong>{task.title}</strong><span>Active</span><button onClick={() => void window.pilot.setTaskArchived(project.path, task.path, true).then(onChange)}>Archive</button></li>)}</ul> : <p className="muted">No active Tasks</p>}
+      </section>
+      <section className="task-section" aria-label="Archived tasks">
+        <div className="task-section-heading"><h2>Archived Tasks</h2><span>{archived.length}</span></div>
+        {archived.length ? <ul>{archived.map((task) => <li key={task.path}><strong>{task.title}</strong><span>Archived</span><button onClick={() => void window.pilot.setTaskArchived(project.path, task.path, false).then(onChange)}>Restore</button></li>)}</ul> : <p className="muted">No archived Tasks</p>}
+      </section>
+    </div>}
   </>;
 }
 
@@ -292,6 +310,9 @@ function App() {
                     <span>{project.name}</span>
                     <small>{project.taskCount}</small>
                   </button>
+                  {projects.selected?.path === project.path && <ul className="task-nav-list" aria-label={`Active Tasks in ${project.name}`}>
+                    {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => <li key={task.path}>{task.title}</li>)}
+                  </ul>}
                 </li>
               ))}
             </ul>
@@ -305,7 +326,7 @@ function App() {
         </nav>
 
         <main id="content" className="workspace-main">
-          {selectedProject ? <ProjectPage project={selectedProject} needsAccess={needsProjectAccess} onOpenAccess={() => setShowProjectAccess(true)} /> : <>
+          {selectedProject ? <ProjectPage project={selectedProject} needsAccess={needsProjectAccess} onOpenAccess={() => setShowProjectAccess(true)} onChange={setProjects} /> : <>
             <header className="topbar">
               <div>
                 <span className="eyebrow">Command center</span>
@@ -321,7 +342,7 @@ function App() {
                 <span className="ready-mark" aria-hidden="true">✓</span>
                 <p className="eyebrow">Environment ready</p>
                 <h2>Ready to work</h2>
-                <p className="muted">Your provider, shell, Pi environment, and task history are compatible.</p>
+                <p className="muted">Your provider, shell, and Pi environment are ready.</p>
               </section>
             ) : (
               <section className="readiness" aria-labelledby="readiness-title" tabIndex={0}>
@@ -356,8 +377,7 @@ function App() {
               <p className="eyebrow">Startup</p>
               <h2>Readiness</h2>
               <dl>
-                <div><dt>Checks passed</dt><dd>{state?.passed ?? "—"} / 4</dd></div>
-                <div><dt>Tasks found</dt><dd>{state?.projects.reduce((sum, project) => sum + project.taskCount, 0) ?? "—"}</dd></div>
+                <div><dt>Checks passed</dt><dd>{state?.passed ?? "—"} / 3</dd></div>
                 <div><dt>Network reporting</dt><dd>Off</dd></div>
               </dl>
             </>}

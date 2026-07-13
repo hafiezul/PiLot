@@ -1,63 +1,13 @@
 import {
   AuthStorage,
-  CURRENT_SESSION_VERSION,
   getAgentDir,
   getShellConfig,
   ModelRegistry,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { open, readdir, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
-import type { ProjectSummary, ReadinessGap, StartupState } from "../shared/readiness.js";
-
-type Header = { type?: string; version?: number; cwd?: string };
-
-async function readHeader(file: string): Promise<Header | undefined> {
-  const handle = await open(file, "r");
-  try {
-    const buffer = Buffer.alloc(4096);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split("\n", 1)[0];
-    return JSON.parse(firstLine) as Header;
-  } catch {
-    return undefined;
-  } finally {
-    await handle.close();
-  }
-}
-
-async function inspectSessions(agentDir: string) {
-  const sessionRoot = path.join(agentDir, "sessions");
-  const projects = new Map<string, number>();
-  let incompatible = 0;
-  let malformed = 0;
-
-  try {
-    const entries = await readdir(sessionRoot, { recursive: true, withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-      const header = await readHeader(path.join(entry.parentPath, entry.name));
-      if (!header || header.type !== "session") {
-        malformed++;
-        continue;
-      }
-      if ((header.version ?? 1) > CURRENT_SESSION_VERSION) incompatible++;
-      if (header.cwd) projects.set(header.cwd, (projects.get(header.cwd) ?? 0) + 1);
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") malformed++;
-  }
-
-  return {
-    incompatible,
-    malformed,
-    projects: [...projects].map<ProjectSummary>(([cwd, taskCount]) => ({
-      path: cwd,
-      name: path.basename(cwd) || cwd,
-      taskCount,
-    })),
-  };
-}
+import type { ReadinessGap, StartupState } from "../shared/readiness.js";
 
 export async function getStartupState(): Promise<StartupState> {
   const gaps: ReadinessGap[] = [];
@@ -93,20 +43,5 @@ export async function getStartupState(): Promise<StartupState> {
     });
   }
 
-  const sessions = await inspectSessions(agentDir);
-  if (sessions.incompatible > 0) {
-    gaps.push({
-      area: "sessions",
-      title: "Update PiLot to open newer tasks",
-      detail: `${sessions.incompatible} task${sessions.incompatible === 1 ? " uses" : "s use"} a newer Pi session format and will remain untouched.`,
-    });
-  } else if (sessions.malformed > 0) {
-    gaps.push({
-      area: "sessions",
-      title: "Review unreadable task history",
-      detail: `${sessions.malformed} Pi session file${sessions.malformed === 1 ? " could" : "s could"} not be read and will remain untouched.`,
-    });
-  }
-
-  return { gaps, projects: sessions.projects, passed: 4 - gaps.length };
+  return { gaps, passed: 3 - gaps.length };
 }

@@ -20,6 +20,8 @@ const api: PiLotApi = {
   getProjects: () => ipcRenderer.invoke("projects:get"),
   addProject: () => ipcRenderer.invoke("projects:add"),
   selectProject: (path) => ipcRenderer.invoke("projects:select", path),
+  removeProject: (path) => ipcRenderer.invoke("projects:remove", path),
+  setTaskArchived: (projectPath, taskPath, archived) => ipcRenderer.invoke("projects:set-task-archived", projectPath, taskPath, archived),
   setResourceTrust: (path, trusted) => ipcRenderer.invoke("projects:set-resource-trust", path, trusted),
   setExecutionConsent: (path, consent) => ipcRenderer.invoke("projects:set-execution-consent", path, consent),
 };

@@ -1,16 +1,11 @@
 export type ReadinessGap = {
-  area: "provider" | "shell" | "environment" | "sessions";
+  area: "provider" | "shell" | "environment";
   title: string;
   detail: string;
 };
 
-import type { ProjectSummary } from "./projects.js";
-
-export type { ProjectSummary } from "./projects.js";
-
 export type StartupState = {
   gaps: ReadinessGap[];
-  projects: ProjectSummary[];
   passed: number;
 };
 

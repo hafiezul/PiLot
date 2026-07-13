@@ -23,7 +23,20 @@ async function fixture(version = 3) {
     path.join(sessionDir, "task.jsonl"),
     `${JSON.stringify({ type: "session", version, id: "fixture", timestamp: new Date().toISOString(), cwd: project })}\n`,
   );
-  return { agentDir, root };
+  return { agentDir, project, root };
+}
+
+function sessionDirectory(agentDir: string, project: string) {
+  const encoded = path.resolve(project).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
+  return path.join(agentDir, "sessions", `--${encoded}--`);
+}
+
+async function writeSession(agentDir: string, project: string, name: string, entries: object[]) {
+  const directory = sessionDirectory(agentDir, project);
+  await mkdir(directory, { recursive: true });
+  const file = path.join(directory, `${name}.jsonl`);
+  await writeFile(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+  return file;
 }
 
 async function availablePort(): Promise<number> {
@@ -75,13 +88,13 @@ async function close(app: { browser: Browser; process: ChildProcess }) {
   await exit;
 }
 
-test("launches a sandboxed command center from the canonical Pi environment", async () => {
+test("does not admit Projects from global Pi session discovery", async () => {
   const environment = await fixture();
   const app = await launch(environment.agentDir);
 
   try {
     await expect(app.window).toHaveTitle("PiLot");
-    await expect(app.window.getByRole("navigation", { name: "Projects and tasks" })).toContainText("fixture-project");
+    await expect(app.window.getByRole("navigation", { name: "Projects and tasks" })).not.toContainText("fixture-project");
     await expect(app.window.getByRole("main")).toContainText("Ready to work");
     await expect(app.window.getByText("fixture-secret")).toHaveCount(0);
     await expect(app.window.getByRole("complementary", { name: "Inspector" })).toBeVisible();
@@ -258,6 +271,103 @@ test("applies and persists PiLot appearance preferences", async () => {
   }
 });
 
+test("admits a Project before presenting its existing Pi sessions as Tasks", async () => {
+  const environment = await fixture();
+  const canonicalProject = await realpath(environment.project);
+  const timestamp = "2026-07-13T00:00:00.000Z";
+  const header = (id: string) => ({ type: "session", version: 3, id, timestamp, cwd: environment.project });
+  const message = (id: string, content: string) => ({
+    type: "message", id, parentId: null, timestamp,
+    message: { role: "user", content, timestamp: Date.parse(timestamp) },
+  });
+  const named = await writeSession(environment.agentDir, environment.project, "named", [
+    header("named"),
+    message("message-1", "Original prompt"),
+    { type: "session_info", id: "name-1", parentId: "message-1", timestamp, name: "Repair release build" },
+  ]);
+  const inferred = await writeSession(environment.agentDir, environment.project, "inferred", [
+    header("inferred"),
+    message("message-2", "  Explain the flaky checkout test\nwithout changing production.  "),
+  ]);
+  const newer = await writeSession(environment.agentDir, environment.project, "newer", [
+    { ...header("newer"), version: 99 },
+    message("message-3", "Future work"),
+  ]);
+  const newerBytes = await readFile(newer);
+  await writeFile(path.join(sessionDirectory(environment.agentDir, environment.project), "malformed.jsonl"), "not json\n");
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    await expect(navigation).not.toContainText("fixture-project");
+    await navigation.getByRole("button", { name: "Add project" }).click();
+
+    const access = app.window.getByRole("dialog", { name: "Project access" });
+    await expect(access).toBeVisible();
+    await expect(navigation).not.toContainText("fixture-project");
+    await access.getByRole("button", { name: "Allow agent execution" }).click();
+
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "trust.json"), "utf8"))[canonicalProject]).toBe(true);
+    await expect(navigation).toContainText("fixture-project");
+    await expect(navigation).toContainText("Repair release build");
+    const active = app.window.getByRole("region", { name: "Active tasks" });
+    await expect(active).toContainText("Repair release build");
+    await expect(active).toContainText("Explain the flaky checkout test without changing production.");
+    await expect(app.window.getByRole("region", { name: "Archived tasks" })).toContainText("No archived Tasks");
+    const diagnostics = app.window.getByRole("region", { name: "Task diagnostics" });
+    await expect(diagnostics).toContainText("Update PiLot to open newer Tasks");
+    await expect(diagnostics).toContainText("Review unreadable Task history");
+    expect(await readFile(newer)).toEqual(newerBytes);
+
+    await expect.poll(async () => (await readFile(named, "utf8")).includes('"customType":"pilot.task"')).toBe(true);
+    expect(await readFile(inferred, "utf8")).toContain('"customType":"pilot.task"');
+
+    const namedTask = active.getByRole("listitem").filter({ hasText: "Repair release build" });
+    await namedTask.getByRole("button", { name: "Archive" }).click();
+    await expect(active).not.toContainText("Repair release build");
+    await expect(app.window.getByRole("region", { name: "Archived tasks" })).toContainText("Repair release build");
+    expect(await readFile(named, "utf8")).toContain('"lifecycle":"archived"');
+
+    const beforeRemoval = await readFile(named);
+    const projectAccess = app.window.getByRole("complementary", { name: "Inspector" }).getByRole("region", { name: "Project access" });
+    await projectAccess.getByRole("button", { name: "Remove Project" }).click();
+    await expect(navigation).not.toContainText("fixture-project");
+    expect(await readFile(named)).toEqual(beforeRemoval);
+    expect(await readFile(newer)).toEqual(newerBytes);
+    const saved = JSON.parse(await readFile(path.join(environment.agentDir, "pilot-user-data", "projects.json"), "utf8"));
+    expect(saved.recentProjects).toEqual([]);
+    expect(saved.executionConsent).toEqual({});
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("bounds large admitted Task lists with an actionable diagnostic", async () => {
+  const environment = await fixture();
+  const directory = sessionDirectory(environment.agentDir, environment.project);
+  await mkdir(directory, { recursive: true });
+  await Promise.all(Array.from({ length: 501 }, (_, index) => writeFile(
+    path.join(directory, `${String(index).padStart(3, "0")}.jsonl`),
+    `${JSON.stringify({ type: "session", version: 3, id: `large-${index}`, timestamp: new Date().toISOString(), cwd: environment.project })}\n`,
+  )));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    const access = app.window.getByRole("dialog", { name: "Project access" });
+    await access.getByRole("button", { name: "Allow agent execution" }).click();
+    await expect(access).toHaveCount(0, { timeout: 20_000 });
+    const diagnostics = app.window.getByRole("region", { name: "Task diagnostics" });
+    await expect(diagnostics).toContainText("This Project has 502 Pi task files");
+    await expect(diagnostics).toContainText("loaded the newest 500");
+    await expect(app.window.getByRole("region", { name: "Active tasks" }).getByRole("listitem")).toHaveCount(500);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("adds a Project and keeps Pi resource trust separate from execution consent", async () => {
   const environment = await fixture();
   const project = path.join(environment.root, "picked-project");
@@ -332,7 +442,7 @@ test("adds a Project and keeps Pi resource trust separate from execution consent
   }
 });
 
-test("shows only actionable readiness gaps", async () => {
+test("keeps unadmitted Task diagnostics out of readiness", async () => {
   const environment = await fixture(99);
   await rm(path.join(environment.agentDir, "auth.json"));
   await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({ shellPath: path.join(environment.root, "missing-bash") }));
@@ -342,7 +452,7 @@ test("shows only actionable readiness gaps", async () => {
     const readiness = app.window.getByRole("region", { name: "Readiness" });
     await expect(readiness).toContainText("Connect a provider");
     await expect(readiness).toContainText("Install a compatible Bash shell");
-    await expect(readiness).toContainText("Update PiLot to open newer tasks");
+    await expect(readiness).not.toContainText("Update PiLot to open newer Tasks");
     await expect(readiness).not.toContainText("Pi environment");
     await readiness.focus();
     await expect(readiness).toBeFocused();
