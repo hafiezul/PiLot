@@ -11,11 +11,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { LiveInputMode, RunEvidence, RunEvidenceItem, RunStatus, TaskRunState } from "../shared/projects.js";
+import type { CompactionEvidence, LiveInputMode, RetryEvidence, RunEvidence, RunEvidenceItem, RunStatus, TaskRunState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
 import { assertRunnableTask, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
 
 const runMetadataType = "pilot.run";
+const retryMetadataType = "pilot.retry";
+const compactionMetadataType = "pilot.compaction";
 const maximumOutputCharacters = 12_000;
 
 type ActiveRun = {
@@ -25,8 +27,14 @@ type ActiveRun = {
   session?: AgentSession;
   abortRequested: boolean;
   accepted: boolean;
+  settled: boolean;
   lastError?: string;
   assistantSequence: number;
+  retrySequence?: number;
+  activeRetryId?: string;
+  compactionSequence: number;
+  activeCompactionId?: string;
+  manager?: SessionManager;
 };
 
 type ResultView = {
@@ -103,6 +111,50 @@ function addNotice(active: ActiveRun, id: string, tone: "attention" | "error", t
   const existing = currentRun(active).items.some((item) => item.id === id);
   if (existing) replaceItem(active, id, () => ({ id, kind: "notice", tone, title, detail }));
   else appendItem(active, { id, kind: "notice", tone, title, detail });
+}
+
+function persistRetry(active: ActiveRun, retry: RetryEvidence) {
+  active.manager?.appendCustomEntry(retryMetadataType, {
+    version: 1,
+    attempt: retry.attempt,
+    maxAttempts: retry.maxAttempts,
+    delayMs: retry.delayMs,
+    error: retry.error,
+    status: retry.status,
+    finalError: retry.finalError,
+  });
+}
+
+function retryEvidence(id: string, data: Record<string, unknown>): RunEvidenceItem | undefined {
+  if (typeof data.attempt !== "number" || typeof data.maxAttempts !== "number" || typeof data.delayMs !== "number"
+    || typeof data.error !== "string" || (data.status !== "succeeded" && data.status !== "failed")) return;
+  return {
+    id,
+    kind: "retry",
+    attempt: data.attempt,
+    maxAttempts: data.maxAttempts,
+    delayMs: data.delayMs,
+    error: data.error,
+    status: data.status,
+    ...(typeof data.finalError === "string" ? { finalError: data.finalError } : {}),
+  };
+}
+
+function compactionEvidence(id: string, data: Record<string, unknown>): CompactionEvidence | undefined {
+  const reason = data.reason;
+  const status = data.status;
+  if ((reason !== "manual" && reason !== "threshold" && reason !== "overflow")
+    || (status !== "running" && status !== "succeeded" && status !== "failed" && status !== "aborted")) return;
+  return {
+    id,
+    kind: "compaction",
+    reason,
+    status,
+    ...(typeof data.summary === "string" ? { summary: data.summary } : {}),
+    ...(typeof data.tokensBefore === "number" ? { tokensBefore: data.tokensBefore } : {}),
+    ...(typeof data.estimatedTokensAfter === "number" ? { estimatedTokensAfter: data.estimatedTokensAfter } : {}),
+    ...(typeof data.error === "string" ? { error: data.error } : {}),
+  };
 }
 
 function savedState(taskPath: string, manager: SessionManager): TaskRunState {
@@ -195,9 +247,29 @@ function savedState(taskPath: string, manager: SessionManager): TaskRunState {
       continue;
     }
 
-    if (entry.type === "custom" && entry.customType === runMetadataType && current && entry.data && typeof entry.data === "object") {
-      const outcome = String((entry.data as { outcome?: unknown }).outcome);
-      if (["settled", "failed", "aborted", "interrupted"].includes(outcome)) current.status = outcome as RunStatus;
+    if (entry.type !== "custom" || !entry.data || typeof entry.data !== "object") continue;
+    const data = entry.data as Record<string, unknown>;
+    if (entry.customType === runMetadataType) {
+      if (data.inputKind === "compaction" && typeof data.runId === "string" && !runs.some(({ id }) => id === data.runId)) {
+        current = {
+          id: data.runId,
+          status: "compacting",
+          startedAt: typeof data.startedAt === "string" ? data.startedAt : entry.timestamp,
+          input: { kind: "compaction", text: "Compact context" },
+          items: [],
+        };
+        runs.push(current);
+      }
+      const outcome = String(data.outcome);
+      if (current && ["settled", "failed", "aborted", "interrupted"].includes(outcome)) current.status = outcome as RunStatus;
+      continue;
+    }
+    if (entry.customType === retryMetadataType && current) {
+      const item = retryEvidence(entry.id, data);
+      if (item) current.items.push(item);
+    } else if (entry.customType === compactionMetadataType && current) {
+      const item = compactionEvidence(entry.id, data);
+      if (item) current.items.push(item);
     }
   }
 
@@ -251,7 +323,9 @@ export class LocalRunCoordinator {
       runId: run.id,
       abortRequested: false,
       accepted: false,
+      settled: false,
       assistantSequence: 0,
+      compactionSequence: 0,
     };
     this.activeProjects.add(project);
     this.activeTasks.set(file, active);
@@ -261,13 +335,14 @@ export class LocalRunCoordinator {
       await withTaskWrite(file, async () => {
         const { session, manager } = await this.createSession(project, file, auth, models);
         active.session = session;
+        active.manager = manager;
         const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
         try {
           if (active.abortRequested) {
             updateRun(active, (value) => ({ ...value, status: "aborted" }));
           } else {
             await session.prompt(text, { preflightResult: (accepted) => { active.accepted = accepted; } });
-            updateRun(active, (value) => ({
+            if (!active.settled) updateRun(active, (value) => ({
               ...value,
               status: active.abortRequested ? "aborted" : active.lastError ? "failed" : "settled",
             }));
@@ -324,7 +399,9 @@ export class LocalRunCoordinator {
       runId: run.id,
       abortRequested: false,
       accepted: true,
+      settled: false,
       assistantSequence: 0,
+      compactionSequence: 0,
     };
     this.activeProjects.add(project);
     this.activeTasks.set(file, active);
@@ -388,6 +465,87 @@ export class LocalRunCoordinator {
     }
   }
 
+  async compactTask(projectPath: string, taskPath: string) {
+    await assertExecutionAllowed(this.userData, projectPath);
+    const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
+
+    const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
+    const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
+    if (models.getError()) throw new Error(`Fix models.json before compacting this Task: ${models.getError()}`);
+    if (!models.getAvailable().length) throw new Error("Connect a provider in Settings before compacting this Task");
+
+    const run: RunEvidence = {
+      id: randomUUID(),
+      status: "compacting",
+      startedAt: new Date().toISOString(),
+      input: { kind: "compaction", text: "Compact context" },
+      items: [],
+    };
+    const saved = savedState(file, SessionManager.open(file));
+    const active: ActiveRun = {
+      project,
+      state: { ...saved, activeRunId: run.id, runs: [...saved.runs, run] },
+      runId: run.id,
+      abortRequested: false,
+      accepted: true,
+      settled: false,
+      assistantSequence: 0,
+      compactionSequence: 0,
+    };
+    this.activeProjects.add(project);
+    this.activeTasks.set(file, active);
+    this.emit(active.state);
+
+    try {
+      await withTaskWrite(file, async () => {
+        const { session, manager } = await this.createSession(project, file, auth, models);
+        active.session = session;
+        active.manager = manager;
+        const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
+        manager.appendCustomEntry(runMetadataType, {
+          version: 1,
+          runId: run.id,
+          inputKind: "compaction",
+          startedAt: run.startedAt,
+          outcome: "compacting",
+        });
+        try {
+          const branch = manager.getBranch();
+          const lastCompaction = branch.map(({ type }) => type).lastIndexOf("compaction");
+          if (lastCompaction >= 0 && !branch.slice(lastCompaction + 1).some(({ type }) =>
+            type === "message" || type === "custom_message" || type === "branch_summary")) {
+            throw new Error("Already compacted; add more Task history before compacting again");
+          }
+          await session.compact();
+          updateRun(active, (value) => ({ ...value, status: "settled" }));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
+          if (!currentRun(active).items.some((item) => item.kind === "compaction" && item.status === "failed")) {
+            addNotice(active, `${run.id}-failure`, "error", "Compaction failed", detail);
+          }
+        } finally {
+          manager.appendCustomEntry(runMetadataType, { version: 1, outcome: currentRun(active).status });
+          unsubscribe();
+          session.dispose();
+        }
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
+      if (!active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Compaction failed", detail);
+    } finally {
+      this.activeTasks.delete(file);
+      this.activeProjects.delete(project);
+      this.emit({ ...active.state, activeRunId: undefined });
+    }
+  }
+
+  async abortRetry(taskPath: string) {
+    this.activeTasks.get(path.resolve(taskPath))?.session?.abortRetry();
+  }
+
   async abortTask(taskPath: string) {
     const active = this.activeTasks.get(path.resolve(taskPath));
     if (!active) return;
@@ -400,6 +558,7 @@ export class LocalRunCoordinator {
       active.state = { ...active.state, recoveredInput: undefined };
     }
     active.session?.abortBash();
+    active.session?.abortCompaction();
     await active.session?.abort();
     updateRun(active, (run) => ({ ...run, status: "aborted" }));
   }
@@ -466,12 +625,23 @@ export class LocalRunCoordinator {
       }
       case "message_end":
         if (event.message.role !== "assistant") return;
-        if (event.message.stopReason === "error") {
-          active.lastError = event.message.errorMessage ?? "The provider failed";
+        if (event.message.stopReason === "error") active.lastError = event.message.errorMessage ?? "The provider failed";
+        else if (event.message.stopReason === "aborted") active.abortRequested = true;
+        else active.lastError = undefined;
+        break;
+      case "agent_settled": {
+        active.settled = true;
+        const hasLifecycleFailure = currentRun(active).items.some((item) =>
+          (item.kind === "retry" || item.kind === "compaction") && item.status === "failed");
+        if (active.lastError && !hasLifecycleFailure) {
           addNotice(active, `${active.runId}-provider`, "error", "Provider failed", active.lastError);
         }
-        if (event.message.stopReason === "aborted") active.abortRequested = true;
+        updateRun(active, (run) => ({
+          ...run,
+          status: active.abortRequested ? "aborted" : active.lastError ? "failed" : "settled",
+        }));
         break;
+      }
       case "tool_execution_start":
         appendItem(active, {
           id: event.toolCallId,
@@ -497,21 +667,89 @@ export class LocalRunCoordinator {
         } : item);
         break;
       }
-      case "auto_retry_start":
-        addNotice(active, `retry-${event.attempt}`, "attention", `Retrying provider request ${event.attempt} of ${event.maxAttempts}`, event.errorMessage);
+      case "auto_retry_start": {
+        const previous = active.activeRetryId
+          ? currentRun(active).items.find((item) => item.id === active.activeRetryId)
+          : undefined;
+        if (previous?.kind === "retry") {
+          const failed: RetryEvidence = { ...previous, status: "failed", finalError: event.errorMessage };
+          replaceItem(active, previous.id, () => failed);
+          persistRetry(active, failed);
+        }
+        const id = `retry-${active.retrySequence ?? 0}`;
+        active.retrySequence = (active.retrySequence ?? 0) + 1;
+        active.activeRetryId = id;
+        appendItem(active, {
+          id,
+          kind: "retry",
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+          delayMs: event.delayMs,
+          error: event.errorMessage,
+          status: "waiting",
+        });
+        updateRun(active, (run) => ({ ...run, status: "retrying" }));
         break;
-      case "auto_retry_end":
-        if (!event.success && event.finalError) addNotice(active, `retry-${event.attempt}`, "error", "Provider retry failed", event.finalError);
+      }
+      case "auto_retry_end": {
+        const id = active.activeRetryId;
+        if (id) replaceItem(active, id, (item) => item.kind === "retry" ? {
+          ...item,
+          status: event.success ? "succeeded" : "failed",
+          ...(event.finalError ? { finalError: event.finalError } : {}),
+        } : item);
+        if (event.success) active.lastError = undefined;
+        else active.lastError = event.finalError ?? active.lastError ?? "Provider retry failed";
+        const retry = id ? currentRun(active).items.find((item) => item.kind === "retry" && item.id === id) : undefined;
+        if (retry?.kind === "retry") persistRetry(active, retry);
+        active.activeRetryId = undefined;
         break;
+      }
       case "queue_update":
         active.state = { ...active.state, queues: { steering: [...event.steering], followUp: [...event.followUp] } };
         break;
-      case "compaction_start":
-        addNotice(active, `compaction-${event.reason}`, "attention", "Compacting context", `Reason: ${event.reason}`);
+      case "compaction_start": {
+        const id = `compaction-${event.reason}-${active.compactionSequence++}`;
+        active.activeCompactionId = id;
+        appendItem(active, { id, kind: "compaction", reason: event.reason, status: "running" });
+        updateRun(active, (run) => ({ ...run, status: "compacting" }));
         break;
-      case "compaction_end":
-        if (event.errorMessage) addNotice(active, `compaction-${event.reason}`, "error", "Compaction failed", event.errorMessage);
+      }
+      case "compaction_end": {
+        const id = active.activeCompactionId
+          ?? [...currentRun(active).items].reverse().find((item) => item.kind === "compaction" && item.reason === event.reason)?.id;
+        const status = event.aborted ? "aborted" : event.result ? "succeeded" : "failed";
+        const item: CompactionEvidence = {
+          id: id ?? `compaction-${event.reason}-${active.compactionSequence++}`,
+          kind: "compaction",
+          reason: event.reason,
+          status,
+          ...(event.result ? {
+            summary: event.result.summary,
+            tokensBefore: event.result.tokensBefore,
+            ...(event.result.estimatedTokensAfter === undefined ? {} : { estimatedTokensAfter: event.result.estimatedTokensAfter }),
+          } : {}),
+          ...(event.errorMessage ? { error: event.errorMessage } : {}),
+        };
+        if (id) replaceItem(active, id, () => item);
+        else appendItem(active, item);
+        active.activeCompactionId = undefined;
+        if (status === "failed") active.lastError = event.errorMessage ?? "Compaction failed";
+        if (event.reason !== "manual") updateRun(active, (run) => ({
+          ...run,
+          status: status === "failed" ? "failed" : event.willRetry ? "running" : run.status,
+        }));
+        active.manager?.appendCustomEntry(compactionMetadataType, {
+          version: 1,
+          reason: item.reason,
+          status: item.status,
+          summary: item.summary,
+          tokensBefore: item.tokensBefore,
+          estimatedTokensAfter: item.estimatedTokensAfter,
+          error: item.error,
+        });
         break;
+      }
       default:
         return;
     }

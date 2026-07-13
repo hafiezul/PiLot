@@ -106,11 +106,65 @@ async function deterministicProvider(root: string) {
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
       requests.push(body);
+      const latestUser = latestUserText(body);
+      const matchingRequests = requests.filter((value) => latestUserText(value) === latestUser).length;
+      if ((latestUser === "retry then succeed" && matchingRequests <= 2)
+        || (latestUser === "two retry episodes" && (matchingRequests === 1 || matchingRequests === 3))
+        || latestUser === "abort pending retry") {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "503 service unavailable" } }));
+        return;
+      }
+      if (latestUser === "recover overflow" && matchingRequests === 1) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "maximum context length exceeded" } }));
+        return;
+      }
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       const chunk = (choice: object) => response.write(`data: ${JSON.stringify({
         id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [choice],
       })}\n\n`);
-      const latestUser = latestUserText(body);
+      if (latestUser.startsWith("<conversation>")) {
+        chunk({ index: 0, delta: { role: "assistant", content: "Compaction summary." }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (latestUser === "two retry episodes") {
+        if (matchingRequests === 2) {
+          chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
+            index: 0, id: "retry-episode-tool", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "printf retry-episode" }) },
+          }] }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+        } else {
+          chunk({ index: 0, delta: { role: "assistant", content: "Both retry episodes recovered." }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        }
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (latestUser === "retry then succeed") {
+        chunk({ index: 0, delta: { role: "assistant", content: "Retry recovered." }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (latestUser === "recover overflow") {
+        chunk({ index: 0, delta: { role: "assistant", content: "Overflow recovered." }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (latestUser === "cross compaction threshold") {
+        chunk({ index: 0, delta: { role: "assistant", content: "Threshold reached." }, finish_reason: null });
+        response.write(`data: ${JSON.stringify({
+          id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [],
+          usage: { prompt_tokens: 195, completion_tokens: 1, total_tokens: 196 },
+        })}\n\n`);
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       if (latestUser === "start live queue check" || latestUser === "start abort queue check") {
         chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
           index: 0, id: `queue-tool-${requests.length}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "sleep 2" }) },
@@ -294,6 +348,112 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
       (await readFile(path.join(directory, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
         .find((entry) => entry.customType === "pilot.run")?.data.outcome));
     expect(outcomes.sort()).toEqual(["aborted", "aborted", "settled"]);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("surfaces retry and compaction lifecycles through the Electron boundary", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const provider = await deterministicProvider(environment.root);
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 200, maxTokens: 50 }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+    defaultProvider: "fixture",
+    defaultModel: "fixture-model",
+    retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
+    compaction: { enabled: true, reserveTokens: 10, keepRecentTokens: 1 },
+  }));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    const timeline = app.window.getByRole("region", { name: "Run timeline" });
+
+    await prompt.fill("retry then succeed");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(timeline).toContainText("Retrying");
+    await expect(timeline).toContainText("Attempt 1 of 2 · retrying in 500 ms");
+    await expect(timeline).toContainText("Retry succeeded");
+    await expect(timeline).toContainText("Attempt 2 of 2");
+    await expect(timeline).toContainText("Retry recovered.");
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+    await expect(timeline.getByRole("article").last().getByRole("button", { name: "Abort retry" })).toHaveCount(0);
+
+    await prompt.fill("two retry episodes");
+    await composer.getByRole("button", { name: "Run" }).click();
+    const repeatedRetries = timeline.getByRole("article").last();
+    await expect(repeatedRetries).toContainText("Both retry episodes recovered.");
+    await expect(repeatedRetries.getByRole("region", { name: "Provider retry succeeded" })).toHaveCount(2);
+    await expect(repeatedRetries.getByRole("button", { name: "Abort retry" })).toHaveCount(0);
+
+    await prompt.fill("abort pending retry");
+    await composer.getByRole("button", { name: "Run" }).click();
+    const retryingRun = timeline.getByRole("article").last();
+    await expect(retryingRun.getByRole("button", { name: "Abort retry" })).toBeVisible();
+    await retryingRun.getByRole("button", { name: "Abort retry" }).click();
+    await expect(retryingRun).toContainText("Retry cancelled");
+    await expect(retryingRun).toContainText("Failed");
+
+    await prompt.fill("Task remains usable");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+
+    await app.window.getByRole("button", { name: "Compact context" }).click();
+    const manual = timeline.getByRole("article").last();
+    await expect(manual).toContainText("Manual compaction");
+    await expect(manual).toContainText("Succeeded");
+    await expect(manual).toContainText("Full Task history remains in the Pi session");
+
+    await app.window.getByRole("button", { name: "Compact context" }).click();
+    const failedCompaction = timeline.getByRole("article").last();
+    await expect(failedCompaction).toContainText("Compaction failed");
+    await expect(failedCompaction).toContainText(/Nothing to compact|Already compacted/);
+    await expect(composer.getByRole("textbox", { name: "Prompt" })).toBeEnabled();
+
+    await prompt.fill("cross compaction threshold");
+    await composer.getByRole("button", { name: "Run" }).click();
+    const threshold = timeline.getByRole("article").last();
+    await expect(threshold).toContainText("Threshold compaction");
+    await expect(threshold).toContainText("Succeeded");
+    await expect(threshold).toContainText("Settled");
+
+    await prompt.fill("recover overflow");
+    await composer.getByRole("button", { name: "Run" }).click();
+    const overflow = timeline.getByRole("article").last();
+    await expect(overflow).toContainText("Overflow recovery");
+    await expect(overflow).toContainText("Succeeded");
+    await expect(overflow).toContainText("Overflow recovered.");
+    await expect(overflow).toContainText("Settled");
+
+    const directory = sessionDirectory(environment.agentDir, project);
+    const file = path.join(directory, (await readdir(directory)).find((value) => value.endsWith(".jsonl"))!);
+    const saved = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(saved.filter((entry) => entry.type === "message" && entry.message.role === "user").map((entry) => latestUserText(JSON.stringify({ messages: [entry.message] })))).toEqual([
+      "retry then succeed",
+      "two retry episodes",
+      "abort pending retry",
+      "Task remains usable",
+      "cross compaction threshold",
+      "recover overflow",
+    ]);
+    expect(saved.filter((entry) => entry.type === "compaction")).toHaveLength(3);
   } finally {
     await close(app);
     await provider.close();

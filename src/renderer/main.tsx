@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useId, useRef, useState } from "rea
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import type { CommandEvidence, LiveInputMode, ProjectAccess, ProjectsState, RunEvidence, TaskModelState, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
+import type { CommandEvidence, CompactionEvidence, LiveInputMode, ProjectAccess, ProjectsState, RetryEvidence, RunEvidence, TaskModelState, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
@@ -239,11 +239,37 @@ function ToolBlock({ item }: { item: ToolEvidence }) {
   </details>;
 }
 
-function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: number; expandThinking: boolean }) {
+function RetryBlock({ item, onAbort }: { item: RetryEvidence; onAbort(): void }) {
+  const waiting = item.status === "waiting";
+  return <section className={`lifecycle-evidence retry-evidence ${item.status}`} aria-label={`Provider retry ${item.status}`}>
+    <header><strong>{waiting ? "Retrying" : item.status === "succeeded" ? "Retry succeeded" : "Retry failed"}</strong><span>{waiting ? "Waiting" : item.status === "succeeded" ? "Succeeded" : "Failed"}</span></header>
+    <p>Attempt {item.attempt} of {item.maxAttempts} · retrying in {item.delayMs < 1000 ? `${item.delayMs} ms` : `${item.delayMs / 1000} s`}</p>
+    <p>{item.finalError ?? item.error}</p>
+    {waiting && <button type="button" onClick={onAbort}>Abort retry</button>}
+  </section>;
+}
+
+function CompactionBlock({ item }: { item: CompactionEvidence }) {
+  const title = item.reason === "manual" ? "Manual compaction" : item.reason === "threshold" ? "Threshold compaction" : "Overflow recovery";
+  const status = item.status[0].toUpperCase() + item.status.slice(1);
+  return <details className={`lifecycle-evidence compaction-evidence ${item.status}`} open={item.status !== "succeeded" || undefined}>
+    <summary><strong>{item.status === "failed" ? "Compaction failed" : title}</strong><span>{status}</span></summary>
+    <div>
+      <p>{title}</p>
+      {item.tokensBefore !== undefined && <p>{item.tokensBefore.toLocaleString()} tokens before{item.estimatedTokensAfter === undefined ? "" : ` · about ${item.estimatedTokensAfter.toLocaleString()} after`}.</p>}
+      {item.summary && <pre tabIndex={0}>{item.summary}</pre>}
+      {item.error && <p className="error">{item.error}</p>}
+      {item.status === "succeeded" && <p>Full Task history remains in the Pi session.</p>}
+    </div>
+  </details>;
+}
+
+function RunBlock({ run, index, expandThinking, onAbortRetry }: { run: RunEvidence; index: number; expandThinking: boolean; onAbortRetry(): void }) {
   const status = run.status[0].toUpperCase() + run.status.slice(1);
+  const title = run.input.kind === "command" ? "Inline command" : run.input.kind === "compaction" ? "Context compaction" : "Agent run";
   return <article className={`run-evidence ${run.status}`} aria-labelledby={`run-${run.id}`}>
     <header className="run-heading">
-      <div><span className="run-number">Run {index + 1}</span><h3 id={`run-${run.id}`}>{run.input.kind === "command" ? "Inline command" : "Agent run"}</h3></div>
+      <div><span className="run-number">Run {index + 1}</span><h3 id={`run-${run.id}`}>{title}</h3></div>
       <span className={`run-status ${run.status}`} aria-label={`Run status: ${status}`}>{status}</span>
     </header>
     {run.input.kind === "prompt" && <section className="accepted-input" aria-label="Accepted input"><span>You</span><p>{run.input.text}</p></section>}
@@ -257,6 +283,8 @@ function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: num
         </div>;
         if (item.kind === "tool") return <ToolBlock key={item.id} item={item} />;
         if (item.kind === "command") return <CommandBlock key={item.id} item={item} />;
+        if (item.kind === "retry") return <RetryBlock key={item.id} item={item} onAbort={onAbortRetry} />;
+        if (item.kind === "compaction") return <CompactionBlock key={item.id} item={item} />;
         return <details key={item.id} className={`run-notice ${item.tone}`} open>
           <summary>{item.title}</summary>{item.detail && <p>{item.detail}</p>}
         </details>;
@@ -561,8 +589,11 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       <button className="new-task-button" onClick={onCreate}>New Task</button>
     </header>
     <section className="run-timeline" aria-label="Run timeline">
-      <div className="timeline-heading"><h2>Run timeline</h2><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span></div>
-      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
+      <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active} onClick={() => {
+        setError("");
+        void window.pilot.compactTask(project.path, task.path).then(refreshDetails).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      }}>Compact context</button></div></div>
+      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} onAbortRetry={() => void window.pilot.abortRetry(task.path)} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
       {active && <button className="abort-button" onClick={() => void window.pilot.abortTask(task.path)}>Abort</button>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>

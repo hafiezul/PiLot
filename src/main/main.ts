@@ -138,6 +138,9 @@ app.whenReady().then(async () => {
     if (typeof command !== "string" || typeof includeInContext !== "boolean") throw new Error("A command is required");
     return runs.executeCommand(requireProjectPath(projectPath), requireProjectPath(taskPath), command, includeInContext);
   });
+  ipcMain.handle("tasks:compact", async (_event, projectPath: unknown, taskPath: unknown) =>
+    runs.compactTask(requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:abort-retry", async (_event, taskPath: unknown) => runs.abortRetry(requireProjectPath(taskPath)));
   ipcMain.handle("tasks:abort", async (_event, taskPath: unknown) => runs.abortTask(requireProjectPath(taskPath)));
   ipcMain.handle("outputs:open", async (_event, outputPath: unknown) => {
     if (typeof outputPath !== "string" || !path.isAbsolute(outputPath)) throw new Error("A complete output path is required");

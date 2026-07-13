@@ -34,7 +34,7 @@ export type ProjectsState = {
   selected?: ProjectAccess;
 };
 
-export type RunStatus = "preparing" | "running" | "settled" | "failed" | "aborted" | "interrupted";
+export type RunStatus = "preparing" | "running" | "retrying" | "compacting" | "settled" | "failed" | "aborted" | "interrupted";
 export type LiveInputMode = "steer" | "followUp";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -104,14 +104,36 @@ export type NoticeEvidence = {
   detail?: string;
 };
 
-export type RunEvidenceItem = AssistantEvidence | ToolEvidence | CommandEvidence | NoticeEvidence;
+export type RetryEvidence = {
+  id: string;
+  kind: "retry";
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  error: string;
+  status: "waiting" | "succeeded" | "failed";
+  finalError?: string;
+};
+
+export type CompactionEvidence = {
+  id: string;
+  kind: "compaction";
+  reason: "manual" | "threshold" | "overflow";
+  status: "running" | "succeeded" | "failed" | "aborted";
+  summary?: string;
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+  error?: string;
+};
+
+export type RunEvidenceItem = AssistantEvidence | ToolEvidence | CommandEvidence | NoticeEvidence | RetryEvidence | CompactionEvidence;
 
 export type RunEvidence = {
   id: string;
   status: RunStatus;
   startedAt: string;
   input: {
-    kind: "prompt" | "command";
+    kind: "prompt" | "command" | "compaction";
     text: string;
     includeInContext?: boolean;
   };
@@ -142,6 +164,8 @@ export type ProjectsApi = {
   submitPrompt(projectPath: string, taskPath: string, prompt: string): Promise<void>;
   queuePrompt(taskPath: string, prompt: string, mode: LiveInputMode): Promise<void>;
   executeCommand(projectPath: string, taskPath: string, command: string, includeInContext: boolean): Promise<void>;
+  compactTask(projectPath: string, taskPath: string): Promise<void>;
+  abortRetry(taskPath: string): Promise<void>;
   abortTask(taskPath: string): Promise<void>;
   openOutput(path: string): Promise<void>;
   onTaskRunEvent(listener: (state: TaskRunState) => void): () => void;
