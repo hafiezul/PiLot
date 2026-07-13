@@ -47,7 +47,7 @@ async function launch(
     ? Object.fromEntries(Object.entries(process.env).filter(([name]) => !/(_API_KEY|_TOKEN|_CREDENTIALS?)$/.test(name)))
     : process.env;
   const child = spawn(electronPath, [appPath, `--pilot-debug-port=${port}`], {
-    env: { ...env, ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
+    env: { ...env, PILOT_USER_DATA_DIR: path.join(agentDir, "pilot-user-data"), ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
     stdio: "ignore",
   });
   const endpoint = `http://127.0.0.1:${port}`;
@@ -276,8 +276,12 @@ test("adds a Project and keeps Pi resource trust separate from execution consent
     await addProject.focus();
     await addProject.press("Enter");
 
-    const projectAccess = first.window.getByRole("region", { name: "Project access" });
+    const projectAccess = first.window.getByRole("dialog", { name: "Project access" });
+    await expect(projectAccess).toBeVisible();
+    await first.window.keyboard.press("Escape");
+    await expect(projectAccess).toBeVisible();
     await expect(projectAccess).toContainText(project);
+    await expect(first.window.getByRole("main")).not.toContainText("Pi resource trust");
     await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Not decided");
     await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Not granted");
     await expect(projectAccess).toContainText("Prompts and setup commands are blocked");
@@ -289,12 +293,22 @@ test("adds a Project and keeps Pi resource trust separate from execution consent
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "trust.json"), "utf8"))[canonicalProject]).toBe(true);
 
     await projectAccess.getByRole("button", { name: "Allow agent execution" }).click();
-    await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Granted");
+    await expect(projectAccess).toHaveCount(0);
+    const inspectorAccess = first.window.getByRole("complementary", { name: "Inspector" }).getByRole("region", { name: "Project access" });
+    await expect(inspectorAccess.getByRole("status", { name: "Agent execution" })).toContainText("Granted");
     expect(JSON.parse(await readFile(path.join(userData, "projects.json"), "utf8")).executionConsent[canonicalProject]).toBe(true);
 
-    await projectAccess.getByRole("button", { name: "Revoke agent execution" }).click();
-    await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Not granted");
-    await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Trusted");
+    await first.window.setViewportSize({ width: 800, height: 700 });
+    await expect(inspectorAccess).not.toBeVisible();
+    await first.window.getByRole("button", { name: "Project access" }).click();
+    const reopenedAccess = first.window.getByRole("dialog", { name: "Project access" });
+    await reopenedAccess.getByRole("button", { name: "Revoke agent execution" }).click();
+    const revokedAccess = first.window.getByRole("dialog", { name: "Project access" });
+    await expect(revokedAccess.getByRole("button", { name: "Close project access" })).toHaveCount(0);
+    await first.window.keyboard.press("Escape");
+    await expect(revokedAccess).toBeVisible();
+    await expect(revokedAccess.getByRole("status", { name: "Agent execution" })).toContainText("Not granted");
+    await expect(revokedAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Trusted");
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "trust.json"), "utf8"))[canonicalProject]).toBe(true);
   } finally {
     await close(first);
@@ -303,7 +317,7 @@ test("adds a Project and keeps Pi resource trust separate from execution consent
   const second = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
   try {
     await expect(second.window.getByRole("navigation", { name: "Projects and tasks" })).toContainText("picked-project");
-    const projectAccess = second.window.getByRole("region", { name: "Project access" });
+    const projectAccess = second.window.getByRole("dialog", { name: "Project access" });
     await expect(projectAccess).toContainText(project);
     await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Trusted");
     await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Not granted");

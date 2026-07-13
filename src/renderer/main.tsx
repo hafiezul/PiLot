@@ -110,7 +110,7 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
   );
 }
 
-function ProjectPage({ project, onChange }: { project: ProjectAccess; onChange(state: ProjectsState): void }) {
+function ProjectAccessPanel({ project, onChange }: { project: ProjectAccess; onChange(state: ProjectsState): void }) {
   const [error, setError] = useState("");
   const attempt = async (action: () => Promise<ProjectsState>) => {
     setError("");
@@ -120,43 +120,69 @@ function ProjectPage({ project, onChange }: { project: ProjectAccess; onChange(s
     ? project.resourceTrust.required ? "Not decided" : "No decision needed"
     : project.resourceTrust.decision ? "Trusted" : "Not trusted";
 
+  return <section className="project-access" aria-label="Project access">
+    <header>
+      <h2 id="project-access-title">Project access</h2>
+      <p>Pi resource trust and agent execution are independent decisions for <code>{project.path}</code>.</p>
+    </header>
+
+    <section aria-labelledby="resource-trust-title">
+      <div className="access-heading">
+        <div><h3 id="resource-trust-title">Pi resource trust</h3><p>Controls whether Pi loads project settings, prompts, skills, and context files.</p></div>
+        <span className="access-status" role="status" aria-label="Pi resource trust">{trustLabel}</span>
+      </div>
+      {project.resourceTrust.sourcePath && <p className="decision-source">Saved in Pi for <code>{project.resourceTrust.sourcePath}</code>{project.resourceTrust.sourcePath !== project.path ? " and inherited here" : ""}.</p>}
+      {!project.resourceTrust.required && <p className="decision-source">This Project has no local Pi resources that currently require trust.</p>}
+      <div className="access-actions">
+        <button onClick={() => void attempt(() => window.pilot.setResourceTrust(project.path, true))}>Trust project resources</button>
+        <button onClick={() => void attempt(() => window.pilot.setResourceTrust(project.path, false))}>Do not trust project resources</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="execution-title">
+      <div className="access-heading">
+        <div><h3 id="execution-title">Agent execution</h3><p>Allows agents started by PiLot to run unsandboxed shell commands and read, create, edit, or delete files on this computer, starting from this Project.</p></div>
+        <span className="access-status" role="status" aria-label="Agent execution">{project.executionConsent ? "Granted" : "Not granted"}</span>
+      </div>
+      <p className="decision-source">{project.executionConsent ? "Prompts and setup commands may run without per-command approval." : "Prompts and setup commands are blocked until you grant access."}</p>
+      <div className="access-actions">
+        {project.executionConsent
+          ? <button onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, false))}>Revoke agent execution</button>
+          : <button className="primary-action" onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, true))}>Allow agent execution</button>}
+      </div>
+    </section>
+    {error && <p className="error" role="alert">{error}</p>}
+  </section>;
+}
+
+function ProjectAccessDialog({ project, dismissible, onChange, onClose }: { project: ProjectAccess; dismissible: boolean; onChange(state: ProjectsState): void; onClose(): void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    const handleCancel = (event: Event) => dismissible ? onClose() : event.preventDefault();
+    element.addEventListener("cancel", handleCancel);
+    element.showModal();
+    return () => {
+      element.removeEventListener("cancel", handleCancel);
+      if (element.open) element.close();
+    };
+  }, [dismissible, onClose]);
+  return <dialog ref={dialog} className="project-access-dialog" aria-labelledby="project-access-title">
+    {dismissible && <button className="dialog-close" aria-label="Close project access" onClick={onClose}>×</button>}
+    <ProjectAccessPanel project={project} onChange={onChange} />
+  </dialog>;
+}
+
+function ProjectPage({ project, needsAccess, onOpenAccess }: { project: ProjectAccess; needsAccess: boolean; onOpenAccess(): void }) {
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
-      <span className="privacy"><i /> Local only</span>
+      <div className="project-top-actions"><button onClick={onOpenAccess}>Project access</button><span className="privacy"><i /> Local only</span></div>
     </header>
-    <section className="project-access" aria-label="Project access">
-      <header>
-        <h2>Project access</h2>
-        <p>Pi resource trust and agent execution are independent decisions for <code>{project.path}</code>.</p>
-      </header>
-
-      <section aria-labelledby="resource-trust-title">
-        <div className="access-heading">
-          <div><h3 id="resource-trust-title">Pi resource trust</h3><p>Controls whether Pi loads project settings, prompts, skills, and context files.</p></div>
-          <span className="access-status" role="status" aria-label="Pi resource trust">{trustLabel}</span>
-        </div>
-        {project.resourceTrust.sourcePath && <p className="decision-source">Saved in Pi for <code>{project.resourceTrust.sourcePath}</code>{project.resourceTrust.sourcePath !== project.path ? " and inherited here" : ""}.</p>}
-        {!project.resourceTrust.required && <p className="decision-source">This Project has no local Pi resources that currently require trust.</p>}
-        <div className="access-actions">
-          <button onClick={() => void attempt(() => window.pilot.setResourceTrust(project.path, true))}>Trust project resources</button>
-          <button onClick={() => void attempt(() => window.pilot.setResourceTrust(project.path, false))}>Do not trust project resources</button>
-        </div>
-      </section>
-
-      <section aria-labelledby="execution-title">
-        <div className="access-heading">
-          <div><h3 id="execution-title">Agent execution</h3><p>Allows agents started by PiLot to run unsandboxed shell commands and read, create, edit, or delete files on this computer, starting from this Project.</p></div>
-          <span className="access-status" role="status" aria-label="Agent execution">{project.executionConsent ? "Granted" : "Not granted"}</span>
-        </div>
-        <p className="decision-source">{project.executionConsent ? "Prompts and setup commands may run without per-command approval." : "Prompts and setup commands are blocked until you grant access."}</p>
-        <div className="access-actions">
-          {project.executionConsent
-            ? <button onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, false))}>Revoke agent execution</button>
-            : <button className="primary-action" onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, true))}>Allow agent execution</button>}
-        </div>
-      </section>
-      {error && <p className="error" role="alert">{error}</p>}
+    <section className="project-empty" aria-live="polite">
+      <h2>{needsAccess ? "Access required" : "Project ready"}</h2>
+      <p>{needsAccess ? "Complete the access decision to continue." : "Tasks for this Project will appear here."}</p>
     </section>
   </>;
 }
@@ -216,6 +242,7 @@ function App() {
   const [state, setState] = useState<StartupState>();
   const [projects, setProjects] = useState<ProjectsState>();
   const [showSettings, setShowSettings] = useState(false);
+  const [showProjectAccess, setShowProjectAccess] = useState(false);
   const settingsButton = useRef<HTMLButtonElement>(null);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
     setState(startup);
@@ -225,11 +252,20 @@ function App() {
     setShowSettings(false);
     requestAnimationFrame(() => settingsButton.current?.focus());
   }, []);
+  const closeProjectAccess = useCallback(() => setShowProjectAccess(false), []);
+  const updateProjectAccess = useCallback((next: ProjectsState) => {
+    setProjects(next);
+    const selected = next.selected;
+    if (selected?.executionConsent && (!selected.resourceTrust.required || selected.resourceTrust.decision !== null)) setShowProjectAccess(false);
+  }, []);
 
   useEffect(() => {
     refresh();
     void window.pilot.getPreferences().then((value) => applyAppearance(value.appearance));
   }, []);
+
+  const selectedProject = projects?.selected;
+  const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
 
   if (showSettings) return <><div className="window-bar" aria-hidden="true" /><SettingsPage onChange={refresh} onClose={closeSettings} /></>;
 
@@ -269,7 +305,7 @@ function App() {
         </nav>
 
         <main id="content" className="workspace-main">
-          {projects?.selected ? <ProjectPage project={projects.selected} onChange={setProjects} /> : <>
+          {selectedProject ? <ProjectPage project={selectedProject} needsAccess={needsProjectAccess} onOpenAccess={() => setShowProjectAccess(true)} /> : <>
             <header className="topbar">
               <div>
                 <span className="eyebrow">Command center</span>
@@ -312,16 +348,23 @@ function App() {
             <button role="tab" aria-selected="false" disabled>History</button>
           </div>
           <div className="inspector-body">
-            <p className="eyebrow">Startup</p>
-            <h2>Readiness</h2>
-            <dl>
-              <div><dt>Checks passed</dt><dd>{state?.passed ?? "—"} / 4</dd></div>
-              <div><dt>Tasks found</dt><dd>{state?.projects.reduce((sum, project) => sum + project.taskCount, 0) ?? "—"}</dd></div>
-              <div><dt>Network reporting</dt><dd>Off</dd></div>
-            </dl>
+            {selectedProject ? needsProjectAccess ? <>
+              <p className="eyebrow">Project</p>
+              <h2>{selectedProject.name}</h2>
+              <p className="muted inspector-note">Complete the open access decision to continue.</p>
+            </> : <ProjectAccessPanel project={selectedProject} onChange={updateProjectAccess} /> : <>
+              <p className="eyebrow">Startup</p>
+              <h2>Readiness</h2>
+              <dl>
+                <div><dt>Checks passed</dt><dd>{state?.passed ?? "—"} / 4</dd></div>
+                <div><dt>Tasks found</dt><dd>{state?.projects.reduce((sum, project) => sum + project.taskCount, 0) ?? "—"}</dd></div>
+                <div><dt>Network reporting</dt><dd>Off</dd></div>
+              </dl>
+            </>}
           </div>
         </aside>
       </div>
+      {selectedProject && (needsProjectAccess || showProjectAccess) && <ProjectAccessDialog project={selectedProject} dismissible={!needsProjectAccess} onChange={updateProjectAccess} onClose={closeProjectAccess} />}
     </>
   );
 }
