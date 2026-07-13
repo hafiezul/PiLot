@@ -51,13 +51,28 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .readiness li p { margin: 0; color: #62625e; font-size: 12px; line-height: 1.5; }
 .gap-mark { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid #9b702c; border-radius: 50%; color: #805814; font-size: 11px; font-weight: 800; }
 .loading { color: #686864; text-align: center; }
-.settings-dialog { width: min(680px, calc(100% - 48px)); max-height: calc(100% - 72px); padding: 0; border: 1px solid #c8c8c4; border-radius: 8px; color: inherit; background: #fdfdfc; box-shadow: 0 8px 8px rgb(0 0 0 / 14%); }
-.settings-dialog::backdrop { background: rgb(20 20 19 / 32%); }
-.settings-dialog > header { display: flex; justify-content: space-between; align-items: center; height: 48px; padding: 0 14px 0 24px; border-bottom: 1px solid #d8d8d4; }
-.settings-dialog > header h1 { margin: 0; font-size: 16px; }
-.settings-dialog > header button { width: 30px; height: 30px; border: 0; border-radius: 4px; color: #686864; background: transparent; font-size: 20px; cursor: pointer; }
-.settings-dialog > header button:hover { background: #ededeb; }
-.provider-setup { padding: 24px; background: #fdfdfc; }
+.settings-shell { display: grid; grid-template-columns: 210px minmax(470px, 1fr); height: 100%; padding-top: 38px; background: #ebebea; }
+.settings-navigation { padding: 18px 12px; border-right: 1px solid #d7d7d4; background: #ebebea; }
+.settings-navigation h1 { margin: 25px 8px 14px; font-size: 18px; }
+.settings-navigation nav { display: grid; gap: 2px; }
+.settings-navigation nav button, .back-button { border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; text-align: left; }
+.settings-navigation nav button { padding: 8px; font-size: 13px; }
+.settings-navigation nav button:hover, .back-button:hover { background: #dededb; }
+.settings-navigation nav button[aria-current="page"] { background: #d8d8d5; font-weight: 650; }
+.back-button { display: flex; align-items: center; gap: 5px; padding: 5px 8px; color: #5f605b; font-size: 12px; }
+.back-button:first-letter { font-size: 18px; }
+.settings-main { padding: 54px max(42px, calc((100% - 720px) / 2)); }
+.general-settings, .provider-setup { max-width: 720px; }
+.general-settings > .muted { margin: 0 0 32px; font-size: 13px; }
+.general-settings fieldset { margin: 0; padding: 0; border: 0; }
+.general-settings legend { margin-bottom: 10px; font-size: 12px; font-weight: 650; }
+.general-settings label { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 9px 10px; border-top: 1px solid #dededb; cursor: pointer; }
+.general-settings label:last-child { border-bottom: 1px solid #dededb; }
+.general-settings input { width: 16px; height: 16px; margin: 0; accent-color: #1668d4; }
+.general-settings label span { display: grid; gap: 3px; }
+.general-settings label strong { font-size: 13px; }
+.general-settings label small { color: #686864; font-size: 12px; }
+.provider-setup { background: #fdfdfc; }
 .setup-heading { display: flex; justify-content: space-between; gap: 24px; align-items: start; margin-bottom: 20px; }
 .setup-heading > span { max-width: 220px; font-size: 12px; text-align: right; }
 .provider-setup label { display: grid; gap: 6px; color: #686864; font-size: 12px; font-weight: 650; }
@@ -92,22 +107,34 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   .inspector { display: none; }
 }
 
+:root[data-appearance="dark"] { color: #e8e8e5; background: #1d1e1c; }
+:root[data-appearance="dark"] .window-bar, :root[data-appearance="dark"] .shell, :root[data-appearance="dark"] .navigation, :root[data-appearance="dark"] .inspector, :root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-navigation { background: #242523; }
+:root[data-appearance="dark"] main { background: #1d1e1c; }
+:root[data-appearance="dark"] .navigation, :root[data-appearance="dark"] .inspector, :root[data-appearance="dark"] .tabs, :root[data-appearance="dark"] dl div, :root[data-appearance="dark"] .nav-footer, :root[data-appearance="dark"] .settings-navigation { border-color: #393a37; }
+:root[data-appearance="dark"] .project-list li:first-child, :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover { background: #343532; }
+:root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
+:root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-main, :root[data-appearance="dark"] .provider-setup { color: #e8e8e5; }
+:root[data-appearance="dark"] .general-settings label, :root[data-appearance="dark"] .provider-detail, :root[data-appearance="dark"] .credential-summary li { border-color: #40413d; }
+:root[data-appearance="dark"] .general-settings label small, :root[data-appearance="dark"] .muted, :root[data-appearance="dark"] .readiness li p, :root[data-appearance="dark"] .eyebrow, :root[data-appearance="dark"] .privacy, :root[data-appearance="dark"] .nav-heading, :root[data-appearance="dark"] .tabs button, :root[data-appearance="dark"] dt { color: #aaa9a4; }
+:root[data-appearance="dark"] .account-button, :root[data-appearance="dark"] .provider-setup button, :root[data-appearance="dark"] .provider-setup select, :root[data-appearance="dark"] .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] .key-form, :root[data-appearance="dark"] .oauth-flow { background: #2c2d2a; }
+:root[data-appearance="dark"] .readiness ol, :root[data-appearance="dark"] .readiness li { border-color: #3b3c39; }
+:root[data-appearance="dark"] .tabs button[aria-selected="true"] { border-bottom-color: #ddd; color: #eee; }
+
 @media (prefers-color-scheme: dark) {
-  :root { color: #e8e8e5; background: #1d1e1c; }
-  .window-bar, .shell, .navigation, .inspector { background: #242523; }
-  main { background: #1d1e1c; }
-  .navigation, .inspector, .tabs, dl div, .nav-footer { border-color: #393a37; }
-  .project-list li:first-child { background: #343532; }
-  .readiness { border-color: #40413d; background: #242523; }
-  .settings-dialog, .provider-setup { color: #e8e8e5; background: #242523; }
-  .settings-dialog, .settings-dialog > header { border-color: #40413d; }
-  .settings-dialog > header button:hover { background: #343532; }
-  .account-button, .provider-setup button, .provider-setup select, .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
-  .provider-detail, .credential-summary li { border-color: #40413d; }
-  .key-form, .oauth-flow { background: #2c2d2a; }
-  .readiness ol, .readiness li { border-color: #3b3c39; }
-  .muted, .readiness li p, .eyebrow, .privacy, .nav-heading, .tabs button, dt { color: #aaa9a4; }
-  .tabs button[aria-selected="true"] { border-bottom-color: #ddd; color: #eee; }
+  :root:not([data-appearance]), :root[data-appearance="system"] { color: #e8e8e5; background: #1d1e1c; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .window-bar, :root:is(:not([data-appearance]), [data-appearance="system"]) .shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .navigation, :root:is(:not([data-appearance]), [data-appearance="system"]) .inspector, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation { background: #242523; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) main { background: #1d1e1c; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .navigation, :root:is(:not([data-appearance]), [data-appearance="system"]) .inspector, :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs, :root:is(:not([data-appearance]), [data-appearance="system"]) dl div, :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-footer, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation { border-color: #393a37; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list li:first-child, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover { background: #343532; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-main, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup { color: #e8e8e5; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-detail, :root:is(:not([data-appearance]), [data-appearance="system"]) .credential-summary li { border-color: #40413d; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label small, :root:is(:not([data-appearance]), [data-appearance="system"]) .muted, :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness li p, :root:is(:not([data-appearance]), [data-appearance="system"]) .eyebrow, :root:is(:not([data-appearance]), [data-appearance="system"]) .privacy, :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-heading, :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs button, :root:is(:not([data-appearance]), [data-appearance="system"]) dt { color: #aaa9a4; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .account-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup button, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup select, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .key-form, :root:is(:not([data-appearance]), [data-appearance="system"]) .oauth-flow { background: #2c2d2a; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness ol, :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness li { border-color: #3b3c39; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs button[aria-selected="true"] { border-bottom-color: #ddd; color: #eee; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

@@ -15,8 +15,9 @@ export type StartupState = {
   passed: number;
 };
 
+import type { PreferencesApi } from "./preferences.js";
 import type { PiLotApi as ProviderApi } from "./providers.js";
 
-export type PiLotApi = ProviderApi & {
+export type PiLotApi = ProviderApi & PreferencesApi & {
   getStartupState(): Promise<StartupState>;
 };

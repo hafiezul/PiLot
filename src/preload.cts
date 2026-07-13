@@ -4,6 +4,8 @@ import type { PiLotApi } from "./shared/readiness.js";
 
 const api: PiLotApi = {
   getStartupState: () => ipcRenderer.invoke("startup:get"),
+  getPreferences: () => ipcRenderer.invoke("preferences:get"),
+  setAppearance: (appearance) => ipcRenderer.invoke("preferences:set-appearance", appearance),
   getProviderState: () => ipcRenderer.invoke("providers:get"),
   setApiKey: (provider, key) => ipcRenderer.invoke("providers:set-key", provider, key),
   removeApiKey: (provider) => ipcRenderer.invoke("providers:remove-key", provider),

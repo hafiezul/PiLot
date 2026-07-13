@@ -107,7 +107,7 @@ test("launches a sandboxed command center from the canonical Pi environment", as
   }
 });
 
-test("configures providers in dismissible settings without exposing secrets", async () => {
+test("configures providers on a dedicated settings page without exposing secrets", async () => {
   const environment = await fixture();
   await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
     providers: {
@@ -122,9 +122,12 @@ test("configures providers in dismissible settings without exposing secrets", as
   const app = await launch(environment.agentDir, false, { OPENAI_API_KEY: "fixture-env-secret" });
 
   try {
-    await app.window.getByRole("button", { name: "Settings" }).click();
-    const dialog = app.window.getByRole("dialog", { name: "Settings" });
-    const setup = dialog.getByRole("region", { name: "Provider authentication" });
+    const settingsButton = app.window.getByRole("button", { name: "Settings" });
+    await settingsButton.click();
+    const settings = app.window.getByRole("main", { name: "Settings" });
+    await expect(app.window.getByRole("dialog")).toHaveCount(0);
+    await app.window.getByRole("button", { name: "Providers" }).click();
+    const setup = settings.getByRole("region", { name: "Provider authentication" });
     await expect(setup).toContainText("Anthropic");
     await expect(setup).toContainText("Stored API key");
     await expect(setup).toContainText("Environment");
@@ -148,13 +151,42 @@ test("configures providers in dismissible settings without exposing secrets", as
     await expect(setup).toContainText("Environment");
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "auth.json"), "utf8")).anthropic).toBeUndefined();
 
-    await dialog.getByRole("button", { name: "Close settings" }).click();
-    await expect(dialog).not.toBeVisible();
-    await app.window.getByRole("button", { name: "Settings" }).click();
+    await app.window.getByRole("button", { name: "Back to command center" }).click();
+    await expect(app.window.getByRole("main")).toContainText("Ready to work");
+    await expect(settingsButton).toBeFocused();
+    await settingsButton.press("Enter");
     await app.window.keyboard.press("Escape");
-    await expect(app.window.getByRole("dialog", { name: "Settings" })).not.toBeVisible();
+    await expect(settingsButton).toBeFocused();
   } finally {
     await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("applies and persists PiLot appearance preferences", async () => {
+  const environment = await fixture();
+  const userData = path.join(environment.root, "pilot-user-data");
+  const first = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+
+  try {
+    await first.window.getByRole("button", { name: "Settings" }).click();
+    const settings = first.window.getByRole("main", { name: "Settings" });
+    await expect(settings.getByRole("radio", { name: "System" })).toBeChecked();
+    await settings.getByRole("radio", { name: "Dark" }).check();
+    await expect.poll(() => first.window.evaluate(() => getComputedStyle(document.documentElement).color)).toBe("rgb(232, 232, 229)");
+    await expect(first.window.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page");
+  } finally {
+    await close(first);
+  }
+
+  const second = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+  try {
+    await second.window.getByRole("button", { name: "Settings" }).click();
+    await expect(second.window.getByRole("radio", { name: "Dark" })).toBeChecked();
+    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark" });
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8").catch(() => "{}"))).toEqual({});
+  } finally {
+    await close(second);
     await rm(environment.root, { recursive: true, force: true });
   }
 });

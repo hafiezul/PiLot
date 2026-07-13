@@ -1,5 +1,6 @@
-import { StrictMode, useEffect, useRef, useState } from "react";
+import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import type { StartupState } from "../shared/readiness";
 import "./styles.css";
@@ -98,21 +99,73 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
   );
 }
 
-function SettingsDialog({ onChange, onClose }: { onChange(): void; onClose(): void }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => dialog.current?.showModal(), []);
-  return <dialog className="settings-dialog" ref={dialog} onClose={onClose} aria-labelledby="settings-title">
-    <header><h1 id="settings-title">Settings</h1><button aria-label="Close settings" onClick={() => dialog.current?.close()}>×</button></header>
-    <ProviderSettings onChange={onChange} />
-  </dialog>;
+function applyAppearance(appearance: Appearance) {
+  document.documentElement.dataset.appearance = appearance;
+}
+
+function GeneralSettings() {
+  const [appearance, setAppearance] = useState<Appearance>();
+  useEffect(() => { void window.pilot.getPreferences().then((value) => { setAppearance(value.appearance); applyAppearance(value.appearance); }); }, []);
+
+  return <section className="general-settings" aria-labelledby="general-title">
+    <p className="eyebrow">Application</p>
+    <h2 id="general-title">General</h2>
+    <p className="muted">Choose how PiLot looks on this device.</p>
+    <fieldset disabled={!appearance}>
+      <legend>Appearance</legend>
+      {(["system", "light", "dark"] as const).map((value) => <label key={value}>
+        <input type="radio" name="appearance" value={value} checked={appearance === value} onChange={() => {
+          setAppearance(value);
+          applyAppearance(value);
+          void window.pilot.setAppearance(value).then((next) => { setAppearance(next.appearance); applyAppearance(next.appearance); });
+        }} />
+        <span><strong>{value[0].toUpperCase() + value.slice(1)}</strong><small>{value === "system" ? "Follow your operating system" : `Always use ${value} appearance`}</small></span>
+      </label>)}
+    </fieldset>
+  </section>;
+}
+
+function SettingsPage({ onChange, onClose }: { onChange(): void; onClose(): void }) {
+  const [destination, setDestination] = useState<"general" | "providers">("general");
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    heading.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return <div className="settings-shell">
+    <aside className="settings-navigation">
+      <button className="back-button" aria-label="Back to command center" onClick={onClose}>‹ <span>Command center</span></button>
+      <h1 id="settings-title" ref={heading} tabIndex={-1}>Settings</h1>
+      <nav aria-label="Settings">
+        <button aria-current={destination === "general" ? "page" : undefined} onClick={() => setDestination("general")}>General</button>
+        <button aria-current={destination === "providers" ? "page" : undefined} onClick={() => setDestination("providers")}>Providers</button>
+      </nav>
+    </aside>
+    <main className="settings-main" aria-label="Settings">
+      {destination === "general" ? <GeneralSettings /> : <ProviderSettings onChange={onChange} />}
+    </main>
+  </div>;
 }
 
 function App() {
   const [state, setState] = useState<StartupState>();
   const [showSettings, setShowSettings] = useState(false);
-  const refresh = () => void window.pilot.getStartupState().then(setState);
+  const settingsButton = useRef<HTMLButtonElement>(null);
+  const refresh = useCallback(() => void window.pilot.getStartupState().then(setState), []);
+  const closeSettings = useCallback(() => {
+    setShowSettings(false);
+    requestAnimationFrame(() => settingsButton.current?.focus());
+  }, []);
 
-  useEffect(refresh, []);
+  useEffect(() => {
+    refresh();
+    void window.pilot.getPreferences().then((value) => applyAppearance(value.appearance));
+  }, []);
+
+  if (showSettings) return <><div className="window-bar" aria-hidden="true" /><SettingsPage onChange={refresh} onClose={closeSettings} /></>;
 
   return (
     <>
@@ -144,13 +197,13 @@ function App() {
           <div className="nav-footer"><span aria-hidden="true">⌘</span> Command center</div>
         </nav>
 
-        <main id="content">
+        <main id="content" className="workspace-main">
           <header className="topbar">
             <div>
               <span className="eyebrow">Command center</span>
               <h1>Good to have you here.</h1>
             </div>
-            <div className="top-actions"><span className="privacy"><i /> Local only</span><button className="account-button" onClick={() => setShowSettings(true)}>Settings</button></div>
+            <div className="top-actions"><span className="privacy"><i /> Local only</span><button ref={settingsButton} className="account-button" onClick={() => setShowSettings(true)}>Settings</button></div>
           </header>
 
           {!state ? (
@@ -196,7 +249,6 @@ function App() {
           </div>
         </aside>
       </div>
-      {showSettings && <SettingsDialog onChange={refresh} onClose={() => setShowSettings(false)} />}
     </>
   );
 }
