@@ -9,9 +9,27 @@ import type { ProjectDiagnostic, TaskSummary } from "../shared/projects.js";
 const metadataType = "pilot.task";
 const maximumTasks = 500;
 
-type Header = { type?: string; version?: number; id?: string; cwd?: string };
+type Header = { type?: string; version?: number; id?: string; cwd?: string; timestamp?: unknown };
 type TaskMetadata = { title?: string; lifecycle?: "active" | "archived" };
 type Inspection = { task?: TaskSummary; incompatible?: boolean; malformed?: boolean; enrichmentFailed?: boolean };
+type TaskRead = Inspection & { header?: Header; parentId?: string | null; hasMetadata?: boolean };
+
+const taskWrites = new Map<string, Promise<void>>();
+
+async function withTaskWrite<T>(file: string, operation: () => Promise<T>): Promise<T> {
+  const previous = taskWrites.get(file) ?? Promise.resolve();
+  let release!: () => void;
+  const turn = new Promise<void>((resolve) => { release = resolve; });
+  const queued = previous.then(() => turn);
+  taskWrites.set(file, queued);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (taskWrites.get(file) === queued) taskWrites.delete(file);
+  }
+}
 
 export function getProjectSessionDirectory(agentDir: string, projectPath: string) {
   const encoded = path.resolve(projectPath).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
@@ -72,16 +90,17 @@ async function readHeader(file: string): Promise<Header | undefined> {
   }
 }
 
-async function inspect(file: string, projectPath: string): Promise<Inspection> {
+async function readTask(file: string, projectPath: string): Promise<TaskRead> {
   let header: Header | undefined;
   let malformed = false;
   let firstMessage = "";
   let sessionName = "";
   let metadata: TaskMetadata | undefined;
   let lastId: string | null = null;
+  let lastActivity: number | undefined;
 
   try {
-    const modified = await stat(file);
+    const fileStat = await stat(file);
     const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
     for await (const line of lines) {
       if (!line.trim()) continue;
@@ -108,30 +127,50 @@ async function inspect(file: string, projectPath: string): Promise<Inspection> {
           lifecycle: data.lifecycle === "archived" ? "archived" : "active",
         };
       }
-      if (!firstMessage && entry.type === "message" && entry.message && typeof entry.message === "object") {
-        const message = entry.message as { role?: unknown; content?: unknown };
-        if (message.role === "user") firstMessage = text(message.content);
+      if (entry.type === "message" && entry.message && typeof entry.message === "object") {
+        const message = entry.message as { role?: unknown; content?: unknown; timestamp?: unknown };
+        if (!firstMessage && message.role === "user") firstMessage = text(message.content);
+        if ((message.role === "user" || message.role === "assistant") && "content" in message) {
+          const timestamp = typeof message.timestamp === "number"
+            ? message.timestamp
+            : typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+          if (Number.isFinite(timestamp)) lastActivity = Math.max(lastActivity ?? 0, timestamp);
+        }
       }
     }
     if (!header) return { malformed: true };
 
+    const headerActivity = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : NaN;
+    const modified = lastActivity ?? (Number.isFinite(headerActivity) ? headerActivity : fileStat.mtimeMs);
     const title = safeTitle(sessionName || metadata?.title || firstMessage);
     const lifecycle = metadata?.lifecycle ?? "active";
-    let enrichmentFailed = false;
-    if (!metadata && !malformed && (header.version ?? 1) === CURRENT_SESSION_VERSION) {
-      try {
-        await appendMetadata(file, lastId, { title, lifecycle });
-      } catch {
-        enrichmentFailed = true;
-      }
-    }
     return {
-      task: { id: header.id!, path: file, title, lifecycle, modified: modified.mtime.toISOString() },
+      task: { id: header.id!, path: file, title, lifecycle, modified: new Date(modified).toISOString() },
       malformed,
-      enrichmentFailed,
+      header,
+      parentId: lastId,
+      hasMetadata: metadata !== undefined,
     };
   } catch {
     return { malformed: true };
+  }
+}
+
+async function inspect(file: string, projectPath: string): Promise<Inspection> {
+  const inspection = await readTask(file, projectPath);
+  if (!inspection.task || inspection.hasMetadata || inspection.malformed
+    || (inspection.header?.version ?? 1) !== CURRENT_SESSION_VERSION) return inspection;
+
+  try {
+    return await withTaskWrite(file, async () => {
+      const live = await readTask(file, projectPath);
+      if (!live.task || live.hasMetadata || live.malformed
+        || (live.header?.version ?? 1) !== CURRENT_SESSION_VERSION) return live;
+      await appendMetadata(file, live.parentId ?? null, { title: live.task.title, lifecycle: live.task.lifecycle });
+      return live;
+    });
+  } catch {
+    return { ...inspection, enrichmentFailed: true };
   }
 }
 
@@ -211,22 +250,20 @@ export async function discoverTasks(agentDir: string, projectPath: string) {
   };
 }
 
-export async function setTaskLifecycle(agentDir: string, projectPath: string, taskPath: string, lifecycle: "active" | "archived") {
-  const canonicalProject = await normalize(projectPath);
-  const { tasks } = await discoverTasks(agentDir, canonicalProject);
-  const task = tasks.find(({ path: file }) => file === path.resolve(taskPath));
-  if (!task) throw new Error("This Task does not belong to the admitted Project");
-  const header = await readHeader(task.path);
-  if (!header || (header.version ?? 1) < 2 || (header.version ?? 1) > CURRENT_SESSION_VERSION) {
-    throw new Error("Update this Task's Pi format before changing its lifecycle");
-  }
-  let parentId: string | null = null;
-  const lines = createInterface({ input: createReadStream(task.path, { encoding: "utf8" }), crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (!line.trim()) continue;
-    let entry: { id?: unknown };
-    try { entry = JSON.parse(line) as { id?: unknown }; } catch { throw new Error("Repair this Task's unreadable history before changing its lifecycle"); }
-    if (typeof entry.id === "string") parentId = entry.id;
-  }
-  await appendMetadata(task.path, parentId, { title: task.title, lifecycle });
+export function setTaskLifecycle(agentDir: string, projectPath: string, taskPath: string, lifecycle: "active" | "archived") {
+  const file = path.resolve(taskPath);
+  return withTaskWrite(file, async () => {
+    const relative = path.relative(path.resolve(agentDir, "sessions"), file);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("This Task does not belong to the admitted Project");
+    }
+    const task = await readTask(file, await normalize(projectPath));
+    if (!task.task) throw new Error("This Task does not belong to the admitted Project");
+    if (task.malformed) throw new Error("Repair this Task's unreadable history before changing its lifecycle");
+    const version = task.header?.version ?? 1;
+    if (version < 2 || version > CURRENT_SESSION_VERSION) {
+      throw new Error("Update this Task's Pi format before changing its lifecycle");
+    }
+    await appendMetadata(file, task.parentId ?? null, { title: task.task.title, lifecycle });
+  });
 }
