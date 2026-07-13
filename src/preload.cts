@@ -7,6 +7,7 @@ const api: PiLotApi = {
   getStartupState: () => ipcRenderer.invoke("startup:get"),
   getPreferences: () => ipcRenderer.invoke("preferences:get"),
   setAppearance: (appearance) => ipcRenderer.invoke("preferences:set-appearance", appearance),
+  setExpandThinking: (expand) => ipcRenderer.invoke("preferences:set-expand-thinking", expand),
   getProviderState: () => ipcRenderer.invoke("providers:get"),
   setApiKey: (provider, key) => ipcRenderer.invoke("providers:set-key", provider, key),
   removeApiKey: (provider) => ipcRenderer.invoke("providers:remove-key", provider),
@@ -25,7 +26,9 @@ const api: PiLotApi = {
   createTask: (projectPath) => ipcRenderer.invoke("tasks:create", projectPath),
   getTaskRun: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-run", projectPath, taskPath),
   submitPrompt: (projectPath, taskPath, prompt) => ipcRenderer.invoke("tasks:submit", projectPath, taskPath, prompt),
+  executeCommand: (projectPath, taskPath, command, includeInContext) => ipcRenderer.invoke("tasks:command", projectPath, taskPath, command, includeInContext),
   abortTask: (taskPath) => ipcRenderer.invoke("tasks:abort", taskPath),
+  openOutput: (path) => ipcRenderer.invoke("outputs:open", path),
   onTaskRunEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, value: TaskRunState) => listener(value);
     ipcRenderer.on("tasks:run-event", handler);

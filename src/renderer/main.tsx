@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import type { ProjectAccess, ProjectsState, TaskRunState, TaskSummary } from "../shared/projects";
+import type { CommandEvidence, ProjectAccess, ProjectsState, RunEvidence, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import "./styles.css";
 
@@ -204,43 +204,110 @@ function ProjectActions({ project, onOpenAccess, onChange }: { project: ProjectA
   </details>;
 }
 
+function CompleteOutput({ path }: { path?: string }) {
+  const [error, setError] = useState("");
+  if (!path) return null;
+  return <><button className="output-link" onClick={() => {
+    setError("");
+    void window.pilot.openOutput(path).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }}>Open complete output</button>{error && <p className="error" role="alert">{error}</p>}</>;
+}
+
+function CommandBlock({ item }: { item: CommandEvidence }) {
+  const status = item.status[0].toUpperCase() + item.status.slice(1);
+  return <section className={`command-block ${item.status}`} role="region" aria-label={`Command: ${item.command}`}>
+    <header><code>$ {item.command}</code><span>{status}</span></header>
+    <p className="context-semantics">{item.includeInContext ? "Included in next Pi context" : "Local only — not sent to Pi"}</p>
+    {item.output && <pre tabIndex={0} aria-label="Command output">{item.output}</pre>}
+    {item.outputTruncated && <p className="output-bound">Output is bounded in the timeline.</p>}
+    <CompleteOutput path={item.fullOutputPath} />
+  </section>;
+}
+
+function ToolBlock({ item }: { item: ToolEvidence }) {
+  const status = item.status === "succeeded" ? "Succeeded" : item.status === "failed" ? "Failed" : "Running";
+  return <details key={`${item.id}-${item.status}`} className={`tool-evidence ${item.status}`} aria-label={`${item.name} tool, ${item.status}`} open={item.status !== "succeeded" || undefined}>
+    <summary><span>{item.summary}</span><span>{status}</span></summary>
+    <div className="evidence-detail">
+      <h4>Input</h4><pre tabIndex={0}>{item.input}</pre>
+      <h4>Output</h4>{item.output ? <pre tabIndex={0}>{item.output}</pre> : <p className="muted">No output yet.</p>}
+      {item.details && <><h4>Details</h4><pre tabIndex={0}>{item.details}</pre></>}
+      {item.outputTruncated && <p className="output-bound">Output is bounded in the timeline.</p>}
+      <CompleteOutput path={item.fullOutputPath} />
+    </div>
+  </details>;
+}
+
+function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: number; expandThinking: boolean }) {
+  const status = run.status[0].toUpperCase() + run.status.slice(1);
+  return <article className={`run-evidence ${run.status}`} aria-labelledby={`run-${run.id}`}>
+    <header className="run-heading">
+      <div><span className="run-number">Run {index + 1}</span><h3 id={`run-${run.id}`}>{run.input.kind === "command" ? "Inline command" : "Agent run"}</h3></div>
+      <span className={`run-status ${run.status}`} aria-label={`Run status: ${status}`}>{status}</span>
+    </header>
+    {run.input.kind === "prompt" && <section className="accepted-input" aria-label="Accepted input"><span>You</span><p>{run.input.text}</p></section>}
+    <div className="run-items">
+      {run.items.map((item) => {
+        if (item.kind === "assistant") return <div className="assistant-evidence" key={item.id}>
+          {item.thinking && <details key={`${item.id}-${expandThinking}`} className="thinking-evidence" aria-label="Thinking" open={expandThinking || undefined}>
+            <summary>Thinking</summary><p>{item.thinking}</p>
+          </details>}
+          {item.text && <div className="assistant-text"><span>Pi</span><p>{item.text}</p></div>}
+        </div>;
+        if (item.kind === "tool") return <ToolBlock key={item.id} item={item} />;
+        if (item.kind === "command") return <CommandBlock key={item.id} item={item} />;
+        return <details key={item.id} className={`run-notice ${item.tone}`} open>
+          <summary>{item.title}</summary>{item.detail && <p>{item.detail}</p>}
+        </details>;
+      })}
+    </div>
+  </article>;
+}
+
 function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: TaskSummary; onCreate(): void }) {
-  const [run, setRun] = useState<TaskRunState>();
+  const [timeline, setTimeline] = useState<TaskRunState>();
+  const [expandThinking, setExpandThinking] = useState(false);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setRun(undefined);
+    setTimeline(undefined);
     setError("");
-    void window.pilot.getTaskRun(project.path, task.path).then(setRun).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-    return window.pilot.onTaskRunEvent((next) => { if (next.taskPath === task.path) setRun(next); });
+    void Promise.all([
+      window.pilot.getTaskRun(project.path, task.path),
+      window.pilot.getPreferences(),
+    ]).then(([next, preferences]) => { setTimeline(next); setExpandThinking(preferences.expandThinking); })
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    return window.pilot.onTaskRunEvent((next) => { if (next.taskPath === task.path) setTimeline(next); });
   }, [project.path, task.path]);
 
-  const active = run?.status === "preparing" || run?.status === "running";
-  const status = run?.status ? run.status[0].toUpperCase() + run.status.slice(1) : "Loading";
+  const active = Boolean(timeline?.activeRunId);
   return <div className="task-page">
     <header className="topbar task-topbar">
       <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">Local execution location</span></div>
       <button className="new-task-button" onClick={onCreate}>New Task</button>
     </header>
-    <section className="run-timeline" aria-label="Current Run" aria-live="polite">
-      <div className="run-heading"><h2>Current Run</h2><span className={`run-status ${run?.status ?? "idle"}`}>{status}</span></div>
-      {run?.prompt ? <div className="run-input"><p className="eyebrow">You</p><p>{run.prompt}</p></div> : <p className="muted">Submit a prompt to start this Task.</p>}
-      {(run?.assistantText || active) && <div className="run-output"><p className="eyebrow">Pi</p><p>{run.assistantText || "Waiting for Pi…"}</p></div>}
-      {run?.activity && <p className="run-activity">{run.activity}</p>}
+    <section className="run-timeline" aria-label="Run timeline">
+      <div className="timeline-heading"><h2>Run timeline</h2><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span></div>
+      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
       {active && <button className="abort-button" onClick={() => void window.pilot.abortTask(task.path)}>Abort</button>}
-      {(run?.error || error) && <p className="error" role="alert">{run?.error || error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
     </section>
     <form className="task-composer" aria-label="Task composer" onSubmit={(event) => {
       event.preventDefault();
-      const prompt = draft.trim();
-      if (!prompt || active) return;
+      const input = draft.trim();
+      if (!input || active) return;
       setError("");
       setDraft("");
-      void window.pilot.submitPrompt(project.path, task.path, prompt).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      const hiddenCommand = input.startsWith("!!");
+      const command = hiddenCommand ? input.slice(2) : input.startsWith("!") ? input.slice(1) : undefined;
+      const operation = command !== undefined
+        ? window.pilot.executeCommand(project.path, task.path, command, !hiddenCommand)
+        : window.pilot.submitPrompt(project.path, task.path, input);
+      void operation.catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
     }}>
-      <label htmlFor="task-prompt">Prompt</label>
-      <textarea id="task-prompt" aria-label="Prompt" value={draft} disabled={active} onChange={(event) => setDraft(event.target.value)} placeholder="Ask Pi to work in this Project…" rows={3} />
+      <label htmlFor="task-prompt">Prompt or inline command</label>
+      <textarea id="task-prompt" aria-label="Prompt" value={draft} disabled={active} onChange={(event) => setDraft(event.target.value)} placeholder="Ask Pi to work, or run !command…" rows={3} />
       <div className="composer-controls">
         <button type="button" className="model-control-slot" aria-label="Provider and model" aria-disabled="true">Model</button>
         <button type="submit" className="run-button" disabled={active || !draft.trim()}>Run</button>
@@ -292,12 +359,17 @@ function applyAppearance(appearance: Appearance) {
 
 function GeneralSettings() {
   const [appearance, setAppearance] = useState<Appearance>();
-  useEffect(() => { void window.pilot.getPreferences().then((value) => { setAppearance(value.appearance); applyAppearance(value.appearance); }); }, []);
+  const [expandThinking, setExpandThinking] = useState(false);
+  useEffect(() => { void window.pilot.getPreferences().then((value) => {
+    setAppearance(value.appearance);
+    setExpandThinking(value.expandThinking);
+    applyAppearance(value.appearance);
+  }); }, []);
 
   return <section className="general-settings" aria-labelledby="general-title">
     <p className="eyebrow">Application</p>
     <h2 id="general-title">General</h2>
-    <p className="muted">Choose how PiLot looks on this device.</p>
+    <p className="muted">Choose how PiLot looks and presents Run evidence on this device.</p>
     <fieldset disabled={!appearance}>
       <legend>Appearance</legend>
       {(["system", "light", "dark"] as const).map((value) => <label key={value}>
@@ -308,6 +380,17 @@ function GeneralSettings() {
         }} />
         <span><strong>{value[0].toUpperCase() + value.slice(1)}</strong><small>{value === "system" ? "Follow your operating system" : `Always use ${value} appearance`}</small></span>
       </label>)}
+    </fieldset>
+    <fieldset className="thinking-setting">
+      <legend>Run evidence</legend>
+      <label>
+        <input type="checkbox" checked={expandThinking} onChange={(event) => {
+          const checked = event.target.checked;
+          setExpandThinking(checked);
+          void window.pilot.setExpandThinking(checked).then((next) => setExpandThinking(next.expandThinking));
+        }} />
+        <span><strong>Expand thinking by default</strong><small>Thinking remains available as a keyboard-accessible disclosure in every Run.</small></span>
+      </label>
     </fieldset>
   </section>;
 }

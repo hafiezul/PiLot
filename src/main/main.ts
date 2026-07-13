@@ -1,8 +1,10 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from "electron";
+import { realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPreferences, saveAppearance } from "./preferences.js";
+import { loadPreferences, saveAppearance, saveExpandThinking } from "./preferences.js";
 import { addProject, createTask, getProjectsState, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { LocalRunCoordinator } from "./runs.js";
@@ -17,7 +19,7 @@ const debuggingPort = process.argv.find((argument) => argument.startsWith("--pil
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
 
-let preferences: Preferences = { appearance: "system" };
+let preferences: Preferences = { appearance: "system", expandThinking: false };
 
 function chromeColors() {
   return nativeTheme.shouldUseDarkColors
@@ -73,6 +75,10 @@ app.whenReady().then(async () => {
     updateWindowChrome();
     return preferences;
   });
+  ipcMain.handle("preferences:set-expand-thinking", async (_event, expand: unknown) => {
+    preferences = await saveExpandThinking(app.getPath("userData"), expand);
+    return preferences;
+  });
   ipcMain.handle("providers:get", getProviderState);
   ipcMain.handle("providers:set-key", (_event, provider: string, key: string) => setApiKey(provider, key));
   ipcMain.handle("providers:remove-key", (_event, provider: string) => removeApiKey(provider));
@@ -112,7 +118,19 @@ app.whenReady().then(async () => {
     if (typeof prompt !== "string") throw new Error("A prompt is required");
     return runs.submitPrompt(requireProjectPath(projectPath), requireProjectPath(taskPath), prompt);
   });
+  ipcMain.handle("tasks:command", async (_event, projectPath: unknown, taskPath: unknown, command: unknown, includeInContext: unknown) => {
+    if (typeof command !== "string" || typeof includeInContext !== "boolean") throw new Error("A command is required");
+    return runs.executeCommand(requireProjectPath(projectPath), requireProjectPath(taskPath), command, includeInContext);
+  });
   ipcMain.handle("tasks:abort", async (_event, taskPath: unknown) => runs.abortTask(requireProjectPath(taskPath)));
+  ipcMain.handle("outputs:open", async (_event, outputPath: unknown) => {
+    if (typeof outputPath !== "string" || !path.isAbsolute(outputPath)) throw new Error("A complete output path is required");
+    const [temporaryDirectory, target] = await Promise.all([realpath(tmpdir()), realpath(outputPath)]);
+    const relative = path.relative(temporaryDirectory, target);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("That output is outside Pi's temporary output directory");
+    const error = await shell.openPath(target);
+    if (error) throw new Error(error);
+  });
   ipcMain.handle("projects:set-task-archived", async (_event, projectPath: unknown, taskPath: unknown, archived: unknown) => {
     if (typeof archived !== "boolean") throw new Error("A Task lifecycle is required");
     return setTaskArchived(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), archived);

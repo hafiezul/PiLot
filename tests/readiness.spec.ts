@@ -94,14 +94,43 @@ async function deterministicProvider(root: string) {
   const started = path.join(root, "tool-started");
   const finished = path.join(root, "tool-finished");
   const modelStopped = path.join(root, "model-stopped");
+  const requests: string[] = [];
   const server = createHttpServer((request, response) => {
     let body = "";
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
+      requests.push(body);
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       const chunk = (choice: object) => response.write(`data: ${JSON.stringify({
         id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [choice],
       })}\n\n`);
+      if (body.includes("show failure")) {
+        if (body.includes("failure-tool")) {
+          chunk({ index: 0, delta: { role: "assistant", content: "Failure recorded." }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        } else {
+          chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
+            index: 0, id: "failure-tool", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "printf failed-output; exit 7" }) },
+          }] }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+        }
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (body.includes("show evidence")) {
+        if (body.includes("evidence-tool")) {
+          chunk({ index: 0, delta: { role: "assistant", content: "Evidence complete." }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        } else {
+          chunk({ index: 0, delta: { role: "assistant", reasoning_content: "Inspect the command evidence carefully." }, finish_reason: null });
+          chunk({ index: 0, delta: { tool_calls: [{
+            index: 0, id: "evidence-tool", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "seq 1 5000" }) },
+          }] }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+        }
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       if (body.includes("abort model")) {
         chunk({ index: 0, delta: { role: "assistant", content: "Still streaming" }, finish_reason: null });
         const timer = setTimeout(() => response.end("data: [DONE]\n\n"), 5_000);
@@ -139,6 +168,7 @@ async function deterministicProvider(root: string) {
     started,
     finished,
     modelStopped,
+    requests,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -178,7 +208,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await expect(modelControl).toBeFocused();
     await composer.getByRole("textbox", { name: "Prompt" }).fill("Reply with a deterministic greeting");
     await composer.getByRole("button", { name: "Run" }).click();
-    const run = app.window.getByRole("region", { name: "Current Run" });
+    const run = app.window.getByRole("region", { name: "Run timeline" });
     await expect(run).toContainText("Streaming ");
     await expect(run).toContainText("Running");
     await expect(run).toContainText("Streaming from PiLot.");
@@ -200,8 +230,8 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     const abortComposer = app.window.getByRole("form", { name: "Task composer" });
     await abortComposer.getByRole("textbox", { name: "Prompt" }).fill("run abort tool");
     await abortComposer.getByRole("button", { name: "Run" }).click();
-    const abortRun = app.window.getByRole("region", { name: "Current Run" });
-    await expect(abortRun).toContainText("Running bash");
+    const abortRun = app.window.getByRole("region", { name: "Run timeline" });
+    await expect(abortRun.locator('details[aria-label="bash tool, running"]')).toBeVisible();
     await abortRun.getByRole("button", { name: "Abort" }).click();
     await expect(abortRun).toContainText("Aborted");
     await expect.poll(() => readFile(provider.started, "utf8").catch(() => "")).toBe("started");
@@ -212,7 +242,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     const modelComposer = app.window.getByRole("form", { name: "Task composer" });
     await modelComposer.getByRole("textbox", { name: "Prompt" }).fill("abort model");
     await modelComposer.getByRole("button", { name: "Run" }).click();
-    const modelRun = app.window.getByRole("region", { name: "Current Run" });
+    const modelRun = app.window.getByRole("region", { name: "Run timeline" });
     await expect(modelRun).toContainText("Still streaming");
     await modelRun.getByRole("button", { name: "Abort" }).click();
     await expect(modelRun).toContainText("Aborted");
@@ -224,6 +254,85 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
       (await readFile(path.join(directory, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
         .find((entry) => entry.customType === "pilot.run")?.data.outcome));
     expect(outcomes.sort()).toEqual(["aborted", "aborted", "settled"]);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("renders Run evidence, disclosures, and inline commands through the Electron boundary", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+    defaultProvider: "fixture",
+    defaultModel: "fixture-model",
+  }));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    const timeline = app.window.getByRole("region", { name: "Run timeline" });
+
+    await prompt.fill("!!printf hidden-command-output");
+    await composer.getByRole("button", { name: "Run" }).click();
+    const hiddenCommand = timeline.getByRole("region", { name: "Command: printf hidden-command-output" });
+    await expect(hiddenCommand).toContainText("hidden-command-output");
+    await expect(hiddenCommand).toContainText("Local only");
+
+    await prompt.fill("!printf visible-command-output");
+    await composer.getByRole("button", { name: "Run" }).click();
+    const visibleCommand = timeline.getByRole("region", { name: "Command: printf visible-command-output" });
+    await expect(visibleCommand).toContainText("visible-command-output");
+    await expect(visibleCommand).toContainText("Included in next Pi context");
+
+    await prompt.fill("show evidence");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(timeline).toContainText("Evidence complete.");
+    await expect(timeline.getByRole("article")).toHaveCount(3);
+    const thinking = timeline.locator('details[aria-label="Thinking"]');
+    await expect(thinking).not.toHaveAttribute("open", "");
+    await thinking.locator("summary").focus();
+    await thinking.locator("summary").press("Enter");
+    await expect(thinking).toHaveAttribute("open", "");
+    await expect(thinking).toContainText("Inspect the command evidence carefully.");
+
+    const successfulTool = timeline.locator('details[aria-label="bash tool, succeeded"]');
+    await expect(successfulTool).toHaveCount(1);
+    await expect(successfulTool).not.toHaveAttribute("open", "");
+    await successfulTool.locator("summary").press("Enter");
+    await expect(successfulTool).toContainText("5000");
+    await expect(successfulTool.getByRole("button", { name: "Open complete output" })).toBeVisible();
+
+    const modelRequest = provider.requests.find((body) => body.includes("show evidence") && !body.includes('"role":"tool"'))!;
+    expect(modelRequest).toContain("visible-command-output");
+    expect(modelRequest).not.toContain("hidden-command-output");
+
+    await prompt.fill("show failure");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(timeline).toContainText("Failure recorded.");
+    const failedTool = timeline.locator('details[aria-label="bash tool, failed"]');
+    await expect(failedTool).toHaveAttribute("open", "");
+    await expect(failedTool).toContainText("Command exited with code 7");
+
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    await app.window.getByRole("checkbox", { name: "Expand thinking by default" }).check();
+    await app.window.getByRole("button", { name: "Back to command center" }).click();
+    await expect(timeline.locator('details[aria-label="Thinking"]')).toHaveAttribute("open", "");
   } finally {
     await close(app);
     await provider.close();
@@ -406,7 +515,7 @@ test("applies and persists PiLot appearance preferences", async () => {
   try {
     await second.window.getByRole("button", { name: "Settings" }).click();
     await expect(second.window.getByRole("radio", { name: "Dark" })).toBeChecked();
-    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark" });
+    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark", expandThinking: false });
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8").catch(() => "{}"))).toEqual({});
   } finally {
     await close(second);
