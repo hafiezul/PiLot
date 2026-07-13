@@ -9,7 +9,7 @@ PiLot collects no analytics and uploads no crash reports. Diagnostics remain loc
 ## Product model
 
 - A **Project** organizes durable **Tasks**.
-- Existing compatible Pi sessions appear automatically as tasks.
+- Existing compatible Pi sessions appear as Tasks only within Projects the user has admitted.
 - Tasks are active or archived; agent inactivity does not mark a task complete.
 - A **Run** captures one accepted input through the fully settled agent lifecycle.
 - Each task uses either the project's local checkout or a dedicated managed worktree.
@@ -30,8 +30,10 @@ PiLot collects no analytics and uploads no crash reports. Diagnostics remain loc
 ## Authentication and trust
 
 - A complete desktop provider UI supports existing credentials, OAuth/device flows, API-key setup, status, reauthentication, and logout against canonical Pi auth storage.
-- Canonical Pi resource-trust decisions are reused and updated.
-- Separate remembered project-level consent is required before granting an agent command and file access.
+- Choosing a folder starts Project admission; the Project is persisted only after resource trust and execution consent are approved together.
+- Existing canonical Pi resource trust is reused; otherwise admission saves trust even when no trust-requiring resources exist yet.
+- Separate remembered Project-level consent is required before granting an agent command and file access.
+- Project removal revokes execution consent and hides its Tasks without changing canonical Pi trust or deleting session history.
 - After consent, Pi runs without per-command approval prompts.
 - User extensions do not execute in v1.
 

@@ -1,3 +1,3 @@
-# Present existing Pi sessions as tasks
+# Present existing Pi sessions only within admitted Projects
 
-PiLot will automatically present compatible sessions from the shared Pi environment as tasks under their working-directory projects. Missing task metadata will be inferred and enriched lazily, preserving existing history without creating a separate legacy browser or requiring import.
+PiLot will not create Projects by globally discovering Pi sessions. After a folder completes Project admission, compatible sessions for that Project are presented as Tasks and enriched lazily; this preserves CLI continuity without putting unapproved folders in PiLot navigation.

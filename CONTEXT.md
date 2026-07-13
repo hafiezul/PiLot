@@ -16,8 +16,16 @@ _Avoid_: Pi wrapper, Pi TUI wrapper
 A codebase within which a user organizes and performs tasks.
 _Avoid_: Workspace, repository
 
+**Project admission**:
+The deliberate addition of a manually selected folder to PiLot after the user approves both Pi resource trust and agent execution. A selected folder is not yet a Project until admission completes.
+_Avoid_: Mounting a Project, pending Project
+
+**Project removal**:
+The deliberate exclusion of an admitted Project from PiLot. Removal revokes PiLot agent execution consent and hides its Tasks while preserving canonical Pi resource trust and Pi session history. Re-admission is required to show it again.
+_Avoid_: Deleting a Project, deleting Tasks
+
 **Task**:
-A durable, goal-oriented body of agent work belonging to a project. Tasks are the primary work items users start, monitor, and revisit. Existing compatible Pi sessions are presented as tasks even when richer task metadata is absent.
+A durable, goal-oriented body of agent work belonging to a project. Tasks are the primary work items users start, monitor, and revisit. Existing compatible Pi sessions within admitted Projects are presented as tasks even when richer task metadata is absent.
 _Avoid_: Pi session, thread, chat
 
 **Execution location**:
