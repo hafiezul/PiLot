@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import type { ProjectAccess, ProjectsState } from "../shared/projects";
+import type { ProjectAccess, ProjectsState, TaskRunState, TaskSummary } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import "./styles.css";
 
@@ -204,9 +204,64 @@ function ProjectActions({ project, onOpenAccess, onChange }: { project: ProjectA
   </details>;
 }
 
-function ProjectPage({ project, needsAccess, onOpenAccess, onChange }: { project: ProjectAccess; needsAccess: boolean; onOpenAccess(): void; onChange(state: ProjectsState): void }) {
+function TaskPage({ project, task, onCreate }: { project: ProjectAccess; task: TaskSummary; onCreate(): void }) {
+  const [run, setRun] = useState<TaskRunState>();
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setRun(undefined);
+    setError("");
+    void window.pilot.getTaskRun(project.path, task.path).then(setRun).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    return window.pilot.onTaskRunEvent((next) => { if (next.taskPath === task.path) setRun(next); });
+  }, [project.path, task.path]);
+
+  const active = run?.status === "preparing" || run?.status === "running";
+  const status = run?.status ? run.status[0].toUpperCase() + run.status.slice(1) : "Loading";
+  return <div className="task-page">
+    <header className="topbar task-topbar">
+      <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">Local execution location</span></div>
+      <button className="new-task-button" onClick={onCreate}>New Task</button>
+    </header>
+    <section className="run-timeline" aria-label="Current Run" aria-live="polite">
+      <div className="run-heading"><h2>Current Run</h2><span className={`run-status ${run?.status ?? "idle"}`}>{status}</span></div>
+      {run?.prompt ? <div className="run-input"><p className="eyebrow">You</p><p>{run.prompt}</p></div> : <p className="muted">Submit a prompt to start this Task.</p>}
+      {(run?.assistantText || active) && <div className="run-output"><p className="eyebrow">Pi</p><p>{run.assistantText || "Waiting for Pi…"}</p></div>}
+      {run?.activity && <p className="run-activity">{run.activity}</p>}
+      {active && <button className="abort-button" onClick={() => void window.pilot.abortTask(task.path)}>Abort</button>}
+      {(run?.error || error) && <p className="error" role="alert">{run?.error || error}</p>}
+    </section>
+    <form className="task-composer" aria-label="Task composer" onSubmit={(event) => {
+      event.preventDefault();
+      const prompt = draft.trim();
+      if (!prompt || active) return;
+      setError("");
+      setDraft("");
+      void window.pilot.submitPrompt(project.path, task.path, prompt).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    }}>
+      <label htmlFor="task-prompt">Prompt</label>
+      <textarea id="task-prompt" aria-label="Prompt" value={draft} disabled={active} onChange={(event) => setDraft(event.target.value)} placeholder="Ask Pi to work in this Project…" rows={3} />
+      <div className="composer-controls">
+        <button type="button" className="model-control-slot" aria-label="Provider and model" aria-disabled="true">Model</button>
+        <button type="submit" className="run-button" disabled={active || !draft.trim()}>Run</button>
+      </div>
+    </form>
+  </div>;
+}
+
+function ProjectPage({ project, needsAccess, selectedTaskPath, onSelectTask, onCreateTask, onOpenAccess, onChange }: {
+  project: ProjectAccess;
+  needsAccess: boolean;
+  selectedTaskPath?: string;
+  onSelectTask(path: string): void;
+  onCreateTask(): void;
+  onOpenAccess(): void;
+  onChange(state: ProjectsState): void;
+}) {
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
+  const selectedTask = active.find(({ path }) => path === selectedTaskPath);
+  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} onCreate={onCreateTask} />;
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
@@ -220,8 +275,8 @@ function ProjectPage({ project, needsAccess, onOpenAccess, onChange }: { project
         {project.diagnostics.map((diagnostic) => <div key={diagnostic.title}><strong>{diagnostic.title}</strong><p>{diagnostic.detail}</p></div>)}
       </section>}
       <section className="task-section" aria-label="Active tasks">
-        <div className="task-section-heading"><h2>Active Tasks</h2><span>{active.length}</span></div>
-        {active.length ? <ul>{active.map((task) => <li key={task.path}><strong>{task.title}</strong><span>Active</span><button onClick={() => void window.pilot.setTaskArchived(project.path, task.path, true).then(onChange)}>Archive</button></li>)}</ul> : <p className="muted">No active Tasks</p>}
+        <div className="task-section-heading"><h2>Active Tasks</h2><div><span>{active.length}</span><button className="new-task-button" onClick={onCreateTask}>New Task</button></div></div>
+        {active.length ? <ul>{active.map((task) => <li key={task.path}><button className="task-title-button" onClick={() => onSelectTask(task.path)}>{task.title}</button><span>Active</span><button onClick={() => void window.pilot.setTaskArchived(project.path, task.path, true).then(onChange)}>Archive</button></li>)}</ul> : <p className="muted">No active Tasks</p>}
       </section>
       <section className="task-section" aria-label="Archived tasks">
         <div className="task-section-heading"><h2>Archived Tasks</h2><span>{archived.length}</span></div>
@@ -285,6 +340,7 @@ function SettingsPage({ onChange, onClose }: { onChange(): void; onClose(): void
 function App() {
   const [state, setState] = useState<StartupState>();
   const [projects, setProjects] = useState<ProjectsState>();
+  const [selectedTaskPath, setSelectedTaskPath] = useState<string>();
   const [showSettings, setShowSettings] = useState(false);
   const [showProjectAccess, setShowProjectAccess] = useState(false);
   const settingsButton = useRef<HTMLButtonElement>(null);
@@ -302,6 +358,13 @@ function App() {
     const selected = next.selected;
     if (selected?.executionConsent && (!selected.resourceTrust.required || selected.resourceTrust.decision !== null)) setShowProjectAccess(false);
   }, []);
+  const createSelectedTask = useCallback(async () => {
+    const project = projects?.selected;
+    if (!project) return;
+    const task = await window.pilot.createTask(project.path);
+    setProjects(await window.pilot.getProjects());
+    setSelectedTaskPath(task.path);
+  }, [projects?.selected?.path]);
 
   useEffect(() => {
     refresh();
@@ -331,13 +394,16 @@ function App() {
             <ul className="project-list">
               {projects.projects.map((project) => (
                 <li key={project.path}>
-                  <button aria-current={projects.selected?.path === project.path ? "page" : undefined} onClick={() => void window.pilot.selectProject(project.path).then(setProjects)}>
+                  <button aria-current={projects.selected?.path === project.path ? "page" : undefined} onClick={() => {
+                    setSelectedTaskPath(undefined);
+                    void window.pilot.selectProject(project.path).then(setProjects);
+                  }}>
                     <span className="project-icon" aria-hidden="true">◇</span>
                     <span>{project.name}</span>
                     <small>{project.taskCount}</small>
                   </button>
                   {projects.selected?.path === project.path && <ul className="task-nav-list" aria-label={`Active Tasks in ${project.name}`}>
-                    {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => <li key={task.path}>{task.title}</li>)}
+                    {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => <li key={task.path}><button aria-current={selectedTaskPath === task.path ? "page" : undefined} onClick={() => setSelectedTaskPath(task.path)}>{task.title}</button></li>)}
                   </ul>}
                 </li>
               ))}
@@ -352,7 +418,15 @@ function App() {
         </nav>
 
         <main id="content" className="workspace-main">
-          {selectedProject ? <ProjectPage project={selectedProject} needsAccess={needsProjectAccess} onOpenAccess={() => setShowProjectAccess(true)} onChange={setProjects} /> : <>
+          {selectedProject ? <ProjectPage
+            project={selectedProject}
+            needsAccess={needsProjectAccess}
+            selectedTaskPath={selectedTaskPath}
+            onSelectTask={setSelectedTaskPath}
+            onCreateTask={() => void createSelectedTask()}
+            onOpenAccess={() => setShowProjectAccess(true)}
+            onChange={setProjects}
+          /> : <>
             <header className="topbar">
               <div>
                 <span className="eyebrow">Command center</span>

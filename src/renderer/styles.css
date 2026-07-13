@@ -29,7 +29,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px s
 .project-list button[aria-current="page"] { background: #dededb; font-weight: 650; }
 .project-list small { color: #6b6b67; }
 .task-nav-list { display: grid; gap: 2px; list-style: none; margin: 2px 0 7px; padding: 0 8px 0 32px; }
-.task-nav-list li { overflow: hidden; padding: 4px 0; color: #5f605b; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.task-nav-list li { overflow: hidden; color: #5f605b; font-size: 12px; }
+.project-list .task-nav-list button { display: block; overflow: hidden; padding: 5px 6px; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .project-icon { color: #555651; }
 .nav-empty { padding: 0 8px; font-size: 12px; line-height: 1.5; }
 .nav-footer { display: flex; align-items: center; gap: 4px; margin-top: auto; padding: 8px 5px 0 8px; border-top: 1px solid #d7d7d4; color: #64645f; font-size: 12px; }
@@ -69,15 +70,40 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .task-diagnostics strong { font-size: 12px; }
 .task-diagnostics p { margin: 4px 0 0; color: #686864; font-size: 12px; line-height: 1.5; }
 .task-section + .task-section { margin-top: 32px; }
-.task-section-heading { display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid #d8d8d4; }
+.task-section-heading { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #d8d8d4; }
 .task-section-heading h2 { font-size: 15px; }
+.task-section-heading > div { display: flex; align-items: center; gap: 12px; }
 .task-section-heading span { color: #686864; font-size: 12px; }
+.new-task-button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #fdfdfc; cursor: pointer; font-size: 12px; }
+.new-task-button:hover { background: #ededeb; }
 .task-section ul { list-style: none; margin: 0; padding: 0; }
 .task-section li { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 13px 0; border-bottom: 1px solid #e3e3df; }
 .task-section li strong { flex: 1; font-size: 13px; font-weight: 600; }
 .task-section li span, .task-section > .muted { color: #686864; font-size: 11px; }
 .task-section li button { border: 0; padding: 4px 6px; color: #555651; background: transparent; cursor: pointer; font-size: 11px; }
 .task-section li button:hover { color: #20211f; text-decoration: underline; }
+.task-section li .task-title-button { flex: 1; padding-left: 0; color: inherit; font-size: 13px; font-weight: 600; text-align: left; }
+.task-page { display: flex; flex-direction: column; width: min(760px, 100%); min-height: 100%; margin: 0 auto; }
+.task-topbar { align-items: center; padding-bottom: 38px; }
+.execution-location { display: block; margin-top: 6px; color: #686864; font-size: 11px; }
+.run-timeline { flex: 1; padding: 20px 0 36px; border-top: 1px solid #d8d8d4; }
+.run-heading { display: flex; align-items: center; justify-content: space-between; }
+.run-heading h2 { font-size: 15px; }
+.run-status { padding: 3px 7px; border: 1px solid #c8c8c4; border-radius: 4px; color: #5f605b; font-size: 11px; font-weight: 650; }
+.run-status.running, .run-status.preparing { border-color: #7d91aa; color: #315d91; }
+.run-status.failed, .run-status.aborted { border-color: #b98c8c; color: #912f2f; }
+.run-input, .run-output { margin-top: 20px; padding: 0 0 18px; border-bottom: 1px solid #e3e3df; }
+.run-input p:last-child, .run-output p:last-child { margin: 7px 0 0; font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
+.run-activity { color: #5f605b; font-size: 12px; }
+.abort-button { border: 1px solid #b98c8c; border-radius: 5px; padding: 6px 10px; color: #912f2f; background: transparent; cursor: pointer; font-size: 12px; }
+.task-composer { position: sticky; bottom: 0; display: grid; gap: 7px; padding: 14px; border: 1px solid #c8c8c4; border-radius: 7px; background: #fdfdfc; }
+.task-composer label { color: #686864; font-size: 11px; font-weight: 650; }
+.task-composer textarea { width: 100%; resize: vertical; border: 0; color: inherit; background: transparent; font: inherit; line-height: 1.5; outline: 0; }
+.composer-controls { display: flex; justify-content: space-between; gap: 8px; }
+.composer-controls button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #f7f7f6; font-size: 12px; }
+.composer-controls .model-control-slot { min-width: 84px; text-align: left; }
+.composer-controls .run-button { border-color: #1668d4; color: #fff; background: #1668d4; cursor: pointer; }
+.composer-controls button:disabled, .composer-controls button[aria-disabled="true"] { cursor: default; opacity: .58; }
 .project-access-dialog { width: min(680px, calc(100% - 32px)); max-height: calc(100% - 48px); margin: auto; padding: 24px; border: 1px solid #c8c8c4; border-radius: 8px; color: inherit; background: #f7f7f6; overflow: auto; }
 .project-access-dialog::backdrop { background: rgb(20 20 19 / 52%); }
 .dialog-close { position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; font-size: 18px; }
@@ -187,7 +213,7 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] .project-list button:hover, :root[data-appearance="dark"] .project-list button[aria-current="page"], :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover, :root[data-appearance="dark"] .settings-button:hover { background: #343532; }
 :root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
 :root[data-appearance="dark"] .project-access-dialog { border-color: #50514d; background: #242523; }
-:root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu { border-color: #50514d; background: #30312e; }
+:root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu, :root[data-appearance="dark"] .new-task-button, :root[data-appearance="dark"] .task-composer, :root[data-appearance="dark"] .composer-controls button { border-color: #50514d; background: #30312e; }
 :root[data-appearance="dark"] .project-actions summary:hover, :root[data-appearance="dark"] .project-actions[open] summary, :root[data-appearance="dark"] .project-actions-menu button:hover, :root[data-appearance="dark"] .project-actions-menu button:focus-visible { background: #3a3b38; }
 :root[data-appearance="dark"] .dialog-close:hover { background: #343532; }
 :root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-main, :root[data-appearance="dark"] .provider-setup { color: #e8e8e5; }
@@ -209,7 +235,7 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-button:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access-dialog { border-color: #50514d; background: #242523; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu { border-color: #50514d; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu, :root:is(:not([data-appearance]), [data-appearance="system"]) .new-task-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-composer, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls button { border-color: #50514d; background: #30312e; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions[open] summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu button:focus-visible { background: #3a3b38; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .dialog-close:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-main, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup { color: #e8e8e5; }

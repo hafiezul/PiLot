@@ -3,8 +3,9 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPreferences, saveAppearance } from "./preferences.js";
-import { addProject, getProjectsState, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived } from "./projects.js";
+import { addProject, createTask, getProjectsState, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
+import { LocalRunCoordinator } from "./runs.js";
 import { getStartupState } from "./readiness.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
 
@@ -80,6 +81,9 @@ app.whenReady().then(async () => {
   ipcMain.handle("providers:oauth-reply", (_event, value?: string) => respondToOAuth(value));
 
   const projectState = async () => getProjectsState(app.getPath("userData"), getAgentDir());
+  const runs = new LocalRunCoordinator(app.getPath("userData"), getAgentDir(), (state) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:run-event", state);
+  });
   const requireProjectPath = (value: unknown) => {
     if (typeof value !== "string" || !value) throw new Error("A Project path is required");
     return value;
@@ -100,6 +104,15 @@ app.whenReady().then(async () => {
     selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
   ipcMain.handle("projects:remove", async (_event, projectPath: unknown) =>
     removeProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
+  ipcMain.handle("tasks:create", async (_event, projectPath: unknown) =>
+    createTask(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
+  ipcMain.handle("tasks:get-run", async (_event, projectPath: unknown, taskPath: unknown) =>
+    runs.getTaskRun(requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:submit", async (_event, projectPath: unknown, taskPath: unknown, prompt: unknown) => {
+    if (typeof prompt !== "string") throw new Error("A prompt is required");
+    return runs.submitPrompt(requireProjectPath(projectPath), requireProjectPath(taskPath), prompt);
+  });
+  ipcMain.handle("tasks:abort", async (_event, taskPath: unknown) => runs.abortTask(requireProjectPath(taskPath)));
   ipcMain.handle("projects:set-task-archived", async (_event, projectPath: unknown, taskPath: unknown, archived: unknown) => {
     if (typeof archived !== "boolean") throw new Error("A Task lifecycle is required");
     return setTaskArchived(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), archived);

@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer } = require("electron") as typeof import("electron");
+import type { TaskRunState } from "./shared/projects.js";
 import type { OAuthEvent } from "./shared/providers.js";
 import type { PiLotApi } from "./shared/readiness.js";
 
@@ -21,6 +22,15 @@ const api: PiLotApi = {
   addProject: () => ipcRenderer.invoke("projects:add"),
   selectProject: (path) => ipcRenderer.invoke("projects:select", path),
   removeProject: (path) => ipcRenderer.invoke("projects:remove", path),
+  createTask: (projectPath) => ipcRenderer.invoke("tasks:create", projectPath),
+  getTaskRun: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-run", projectPath, taskPath),
+  submitPrompt: (projectPath, taskPath, prompt) => ipcRenderer.invoke("tasks:submit", projectPath, taskPath, prompt),
+  abortTask: (taskPath) => ipcRenderer.invoke("tasks:abort", taskPath),
+  onTaskRunEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: TaskRunState) => listener(value);
+    ipcRenderer.on("tasks:run-event", handler);
+    return () => ipcRenderer.removeListener("tasks:run-event", handler);
+  },
   setTaskArchived: (projectPath, taskPath, archived) => ipcRenderer.invoke("projects:set-task-archived", projectPath, taskPath, archived),
   setResourceTrust: (path, trusted) => ipcRenderer.invoke("projects:set-resource-trust", path, trusted),
   setExecutionConsent: (path, consent) => ipcRenderer.invoke("projects:set-execution-consent", path, consent),

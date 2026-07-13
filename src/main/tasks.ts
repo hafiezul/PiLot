@@ -1,5 +1,5 @@
-import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
-import { appendFile, open, readdir, realpath, stat } from "node:fs/promises";
+import { CURRENT_SESSION_VERSION, SessionManager } from "@earendil-works/pi-coding-agent";
+import { appendFile, mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -16,7 +16,7 @@ type TaskRead = Inspection & { header?: Header; parentId?: string | null; hasMet
 
 const taskWrites = new Map<string, Promise<void>>();
 
-async function withTaskWrite<T>(file: string, operation: () => Promise<T>): Promise<T> {
+export async function withTaskWrite<T>(file: string, operation: () => Promise<T>): Promise<T> {
   const previous = taskWrites.get(file) ?? Promise.resolve();
   let release!: () => void;
   const turn = new Promise<void>((resolve) => { release = resolve; });
@@ -172,6 +172,34 @@ async function inspect(file: string, projectPath: string): Promise<Inspection> {
   } catch {
     return { ...inspection, enrichmentFailed: true };
   }
+}
+
+export async function createLocalTask(agentDir: string, projectPath: string) {
+  const project = await normalize(projectPath);
+  const directory = getProjectSessionDirectory(agentDir, project);
+  const manager = SessionManager.create(project, directory);
+  const file = manager.getSessionFile();
+  const header = manager.getHeader();
+  if (!file || !header) throw new Error("Pi could not create this Task");
+  await mkdir(directory, { recursive: true });
+  await writeFile(file, `${JSON.stringify(header)}\n`, { flag: "wx" });
+  const opened = SessionManager.open(file);
+  opened.appendCustomEntry(metadataType, { version: 1, title: "Untitled task", lifecycle: "active" });
+  return { id: header.id, path: file, title: "Untitled task", lifecycle: "active" as const, modified: header.timestamp };
+}
+
+export async function assertRunnableTask(agentDir: string, projectPath: string, taskPath: string) {
+  const file = path.resolve(taskPath);
+  const relative = path.relative(path.resolve(agentDir, "sessions"), file);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("This Task does not belong to the admitted Project");
+  }
+  const project = await normalize(projectPath);
+  const task = await readTask(file, project);
+  if (task.incompatible) throw new Error("Update PiLot before running this newer Task");
+  if (task.malformed) throw new Error("Repair this Task's unreadable history before running it");
+  if (!task.task) throw new Error("This Task does not belong to the admitted Project");
+  return { file, project };
 }
 
 export async function discoverTasks(agentDir: string, projectPath: string) {

@@ -1,7 +1,9 @@
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { createServer as createHttpServer } from "node:http";
 import { createRequire } from "node:module";
 import { createServer as createPortServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -87,6 +89,147 @@ async function close(app: { browser: Browser; process: ChildProcess }) {
   app.process.kill();
   await exit;
 }
+
+async function deterministicProvider(root: string) {
+  const started = path.join(root, "tool-started");
+  const finished = path.join(root, "tool-finished");
+  const modelStopped = path.join(root, "model-stopped");
+  const server = createHttpServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      const chunk = (choice: object) => response.write(`data: ${JSON.stringify({
+        id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [choice],
+      })}\n\n`);
+      if (body.includes("abort model")) {
+        chunk({ index: 0, delta: { role: "assistant", content: "Still streaming" }, finish_reason: null });
+        const timer = setTimeout(() => response.end("data: [DONE]\n\n"), 5_000);
+        response.once("close", () => {
+          clearTimeout(timer);
+          void writeFile(modelStopped, "stopped");
+        });
+        return;
+      }
+      if (body.includes("abort tool")) {
+        chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
+          index: 0, id: "fixture-tool", type: "function", function: {
+            name: "bash",
+            arguments: JSON.stringify({ command: `printf started > ${JSON.stringify(started)}; sleep 5; printf finished > ${JSON.stringify(finished)}` }),
+          },
+        }] }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      chunk({ index: 0, delta: { role: "assistant", content: "Streaming " }, finish_reason: null });
+      setTimeout(() => {
+        if (response.destroyed) return;
+        chunk({ index: 0, delta: { content: "from PiLot." }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        response.end("data: [DONE]\n\n");
+      }, 500);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Fixture provider did not start");
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    started,
+    finished,
+    modelStopped,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+test("runs and aborts a Local Task through the Electron boundary", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const provider = await deterministicProvider(environment.root);
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+    defaultProvider: "fixture",
+    defaultModel: "fixture-model",
+  }));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    const modelControl = composer.getByRole("button", { name: "Provider and model" });
+    await expect(modelControl).toBeVisible();
+    await modelControl.focus();
+    await expect(modelControl).toBeFocused();
+    await composer.getByRole("textbox", { name: "Prompt" }).fill("Reply with a deterministic greeting");
+    await composer.getByRole("button", { name: "Run" }).click();
+    const run = app.window.getByRole("region", { name: "Current Run" });
+    await expect(run).toContainText("Streaming ");
+    await expect(run).toContainText("Running");
+    await expect(run).toContainText("Streaming from PiLot.");
+    await expect(run).toContainText("Settled");
+
+    const directory = sessionDirectory(environment.agentDir, project);
+    const firstFile = path.join(directory, (await readdir(directory)).find((file) => file.endsWith(".jsonl"))!);
+    const firstEntries = (await readFile(firstFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(firstEntries[0]).toMatchObject({ type: "session", version: 3, cwd: project });
+    expect(firstEntries.filter((entry) => entry.type === "message").map((entry) => entry.message.role)).toEqual(["user", "assistant"]);
+    expect(firstEntries.find((entry) => entry.customType === "pilot.run")?.data.outcome).toBe("settled");
+    expect(firstEntries.filter((entry) => entry.type === "custom_message")).toHaveLength(0);
+    const context = SessionManager.open(firstFile).buildSessionContext();
+    expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(context)).not.toContain("pilot.run");
+    expect(JSON.stringify(context)).not.toContain("pilot.task");
+
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const abortComposer = app.window.getByRole("form", { name: "Task composer" });
+    await abortComposer.getByRole("textbox", { name: "Prompt" }).fill("run abort tool");
+    await abortComposer.getByRole("button", { name: "Run" }).click();
+    const abortRun = app.window.getByRole("region", { name: "Current Run" });
+    await expect(abortRun).toContainText("Running bash");
+    await abortRun.getByRole("button", { name: "Abort" }).click();
+    await expect(abortRun).toContainText("Aborted");
+    await expect.poll(() => readFile(provider.started, "utf8").catch(() => "")).toBe("started");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(await readFile(provider.finished, "utf8").catch(() => "")).toBe("");
+
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const modelComposer = app.window.getByRole("form", { name: "Task composer" });
+    await modelComposer.getByRole("textbox", { name: "Prompt" }).fill("abort model");
+    await modelComposer.getByRole("button", { name: "Run" }).click();
+    const modelRun = app.window.getByRole("region", { name: "Current Run" });
+    await expect(modelRun).toContainText("Still streaming");
+    await modelRun.getByRole("button", { name: "Abort" }).click();
+    await expect(modelRun).toContainText("Aborted");
+    await expect.poll(() => readFile(provider.modelStopped, "utf8").catch(() => "")).toBe("stopped");
+
+    const files = await readdir(directory);
+    expect(files.filter((file) => file.endsWith(".jsonl"))).toHaveLength(3);
+    const outcomes = await Promise.all(files.filter((file) => file.endsWith(".jsonl")).map(async (file) =>
+      (await readFile(path.join(directory, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+        .find((entry) => entry.customType === "pilot.run")?.data.outcome));
+    expect(outcomes.sort()).toEqual(["aborted", "aborted", "settled"]);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
 
 test("does not admit Projects from global Pi session discovery", async () => {
   const environment = await fixture();

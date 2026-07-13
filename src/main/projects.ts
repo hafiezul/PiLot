@@ -2,7 +2,7 @@ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "@earendil-
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ProjectAccess, ProjectsState } from "../shared/projects.js";
-import { discoverTasks, setTaskLifecycle } from "./tasks.js";
+import { createLocalTask, discoverTasks, setTaskLifecycle } from "./tasks.js";
 
 type SavedProjects = {
   recentProjects: string[];
@@ -114,6 +114,14 @@ export async function removeProject(directory: string, agentDir: string, project
   if (saved.selectedProject === canonical) saved.selectedProject = saved.recentProjects[0];
   await save(directory, saved);
   return getProjectsState(directory, agentDir);
+}
+
+export async function createTask(directory: string, agentDir: string, projectPath: string) {
+  const saved = await load(directory);
+  const canonical = await canonicalize(projectPath);
+  if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this Project before creating a Task");
+  if (saved.executionConsent[canonical] !== true) throw new Error("Agent execution consent is required for this Project");
+  return createLocalTask(agentDir, canonical);
 }
 
 export async function setTaskArchived(
