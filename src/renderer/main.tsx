@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useId, useRef, useState } from "rea
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import type { CommandEvidence, CompactionEvidence, LiveInputMode, ProjectAccess, ProjectsState, RetryEvidence, RunEvidence, TaskModelState, TaskRunState, TaskSummary, ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CommandEvidence, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
@@ -317,6 +317,25 @@ function fuzzyMatchScore(value: string, query: string) {
   return queryIndex === query.length ? 100 + first * 2 + gaps * 3 + candidate.length - query.length : null;
 }
 
+async function imageAttachment(file: File): Promise<ImageAttachment> {
+  if (!file.size || file.size > MAXIMUM_IMAGE_BYTES) throw new Error(`${file.name || "Image"} must be 20 MB or smaller`);
+  const mimeType = detectSupportedImageMimeType(new Uint8Array(await file.slice(0, 12).arrayBuffer()));
+  if (!mimeType) throw new Error(`${file.name || "Image"} is not a supported PNG, JPEG, GIF, or WebP image`);
+  const data = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`${file.name || "Image"} could not be read`));
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
+    reader.readAsDataURL(file);
+  });
+  return { name: file.name || "Pasted image", mimeType, size: file.size, data };
+}
+
+function resourceProvenance(resource: TaskResourceState["commands"][number]) {
+  const scope = resource.provenance.scope[0].toUpperCase() + resource.provenance.scope.slice(1);
+  const source = resource.provenance.source;
+  return source === "auto" || source === "local" ? scope : `${scope} · ${source}`;
+}
+
 function modelSearchScore(provider: TaskProvider, model: TaskModel, query: string) {
   let total = 0;
   for (const token of query.toLocaleLowerCase().trim().split(/\s+/)) {
@@ -527,10 +546,19 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
 }) {
   const [timeline, setTimeline] = useState<TaskRunState>();
   const [modelState, setModelState] = useState<TaskModelState>();
+  const [resources, setResources] = useState<TaskResourceState>();
   const [expandThinking, setExpandThinking] = useState(false);
   const [draft, setDraft] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const [completionIndex, setCompletionIndex] = useState(0);
+  const [dismissedCompletion, setDismissedCompletion] = useState("");
+  const [images, setImages] = useState<ImageAttachment[]>([]);
   const [liveMode, setLiveMode] = useState<LiveInputMode>("steer");
   const [error, setError] = useState("");
+  const [attachmentError, setAttachmentError] = useState("");
+  const promptInput = useRef<HTMLTextAreaElement>(null);
+  const imagePicker = useRef<HTMLInputElement>(null);
+  const completionListId = useId();
   const updateModelState = (next: TaskModelState) => { setModelState(next); onDetails(next); };
   const refreshDetails = () => window.pilot.getTaskModel(project.path, task.path).then(updateModelState);
 
@@ -538,6 +566,9 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
     let cancelled = false;
     let receivedRunEvent = false;
     setTimeline(undefined);
+    setResources(undefined);
+    setImages([]);
+    setAttachmentError("");
     setError("");
     const unsubscribe = window.pilot.onTaskRunEvent((next) => {
       if (next.taskPath !== task.path) return;
@@ -555,6 +586,16 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       setExpandThinking(preferences.expandThinking);
       updateModelState(model);
     }).catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
+    void window.pilot.getTaskResources(project.path, task.path).then((taskResources) => {
+      if (!cancelled) setResources(taskResources);
+    }).catch((reason) => {
+      if (!cancelled) setResources({
+        taskPath: task.path,
+        commands: [],
+        files: [],
+        diagnostics: [{ severity: "error", message: reason instanceof Error ? reason.message : String(reason) }],
+      });
+    });
     return () => { cancelled = true; unsubscribe(); };
   }, [project.path, task.path]);
 
@@ -564,6 +605,51 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   const active = Boolean(activeRun);
   const live = activeRun?.input.kind === "prompt";
   const liveReady = live && activeRun.status === "running";
+  const beforeCursor = draft.slice(0, cursor);
+  const slashMatch = beforeCursor.match(/^\/([^\s]*)$/);
+  const fileMatch = slashMatch ? null : beforeCursor.match(/(?:^|\s)@([^\s@]*)$/);
+  const completionKind = slashMatch ? "resource" : fileMatch ? "file" : undefined;
+  const completionQuery = (slashMatch?.[1] ?? fileMatch?.[1] ?? "").toLocaleLowerCase();
+  const completions: Array<{ value: string; score: number; resource?: TaskResourceState["commands"][number] }> = completionKind === "resource"
+    ? (resources?.commands ?? []).map((resource) => ({ resource, value: resource.name, score: fuzzyMatchScore(resource.name, completionQuery) }))
+      .filter((item): item is { resource: TaskResourceState["commands"][number]; value: string; score: number } => item.score !== null)
+      .sort((left, right) => left.score - right.score || left.value.localeCompare(right.value)).slice(0, 8)
+    : completionKind === "file"
+      ? (resources?.files ?? []).map((value) => ({ value, score: fuzzyMatchScore(value, completionQuery) }))
+        .filter((item): item is { value: string; score: number } => item.score !== null)
+        .sort((left, right) => left.score - right.score || left.value.localeCompare(right.value)).slice(0, 8)
+      : [];
+  const completionKey = `${completionKind ?? "none"}:${completionQuery}:${cursor}`;
+  const showCompletions = Boolean(completionKind && completions.length && dismissedCompletion !== completionKey);
+
+  useEffect(() => setCompletionIndex(0), [completionKey]);
+
+  const applyCompletion = (index: number) => {
+    const completion = completions[index];
+    if (!completion || !completionKind) return;
+    const start = completionKind === "resource" ? 0 : beforeCursor.lastIndexOf("@");
+    const inserted = `${completionKind === "resource" ? "/" : "@"}${completion.value} `;
+    const next = draft.slice(0, start) + inserted + draft.slice(cursor);
+    const nextCursor = start + inserted.length;
+    setDraft(next);
+    setCursor(nextCursor);
+    setDismissedCompletion("");
+    requestAnimationFrame(() => {
+      promptInput.current?.focus();
+      promptInput.current?.setSelectionRange(nextCursor, nextCursor);
+    });
+  };
+  const attachFiles = async (files: File[]) => {
+    if (!files.length) return;
+    setAttachmentError("");
+    try {
+      if (images.length + files.length > MAXIMUM_IMAGES) throw new Error(`Attach no more than ${MAXIMUM_IMAGES} images at once`);
+      const attached = await Promise.all(files.map(imageAttachment));
+      setImages((current) => [...current, ...attached]);
+    } catch (reason) {
+      setAttachmentError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
   const submit = (mode?: LiveInputMode) => {
     const input = draft.trim();
     if (!input || (active && (!liveReady || !mode))) return;
@@ -575,8 +661,11 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       ? window.pilot.queuePrompt(task.path, input, mode!)
       : command !== undefined
         ? window.pilot.executeCommand(project.path, task.path, command, !hiddenCommand)
-        : window.pilot.submitPrompt(project.path, task.path, input);
-    void operation.then(() => refreshDetails()).catch((reason) => {
+        : window.pilot.submitPrompt(project.path, task.path, input, images);
+    void operation.then(() => {
+      if (!active) setImages([]);
+      return refreshDetails();
+    }).catch((reason) => {
       setDraft((current) => [input, current].filter((value) => value.trim()).join("\n\n"));
       setError(reason instanceof Error ? reason.message : String(reason));
     });
@@ -597,20 +686,76 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       {active && <button className="abort-button" onClick={() => void window.pilot.abortTask(task.path)}>Abort</button>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
-    <form className="task-composer" aria-label="Task composer" onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
+    <form className="task-composer" aria-label="Task composer" onDragOver={(event) => {
+      if (event.dataTransfer.types.includes("Files") && !active) event.preventDefault();
+    }} onDrop={(event) => {
+      if (active || !event.dataTransfer.files.length) return;
+      event.preventDefault();
+      void attachFiles([...event.dataTransfer.files]);
+    }} onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
       <label htmlFor="task-prompt">{live ? "Guide the active Run" : "Prompt or inline command"}</label>
+      {resources?.diagnostics.length ? <section className="resource-diagnostics" aria-label="Pi resource diagnostics">
+        {resources.diagnostics.map((diagnostic, index) => <p key={`${diagnostic.path ?? "resource"}-${index}`} className={diagnostic.severity}><strong>Pi resource {diagnostic.severity}:</strong> {diagnostic.message}{diagnostic.path && <code>{diagnostic.path}</code>}</p>)}
+      </section> : null}
       {live && <fieldset className="live-input-mode" role="radiogroup" aria-label="Live input mode">
         <legend>Delivery</legend>
         <label><input type="radio" name="live-input-mode" checked={liveMode === "steer"} onChange={() => setLiveMode("steer")} />Steer <small>after the current tool batch</small></label>
         <label><input type="radio" name="live-input-mode" checked={liveMode === "followUp"} onChange={() => setLiveMode("followUp")} />Follow-up <small>after this Run settles</small></label>
       </fieldset>}
-      <textarea id="task-prompt" aria-label="Prompt" value={draft} disabled={active && !live} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
-        if (!liveReady || event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-        event.preventDefault();
-        const mode = event.altKey ? "followUp" : liveMode;
-        if (event.altKey) setLiveMode(mode);
-        submit(mode);
-      }} placeholder={live ? "Steer Pi now, or queue work for later…" : "Ask Pi to work, or run !command…"} rows={3} />
+      <div className="composer-editor">
+        <textarea ref={promptInput} id="task-prompt" role="combobox" aria-label="Prompt" aria-autocomplete="list" aria-expanded={showCompletions} aria-controls={completionListId} aria-activedescendant={showCompletions ? `${completionListId}-${completionIndex}` : undefined} value={draft} disabled={active && !live} onChange={(event) => {
+          setDraft(event.target.value);
+          setCursor(event.target.selectionStart);
+          setDismissedCompletion("");
+        }} onSelect={(event) => setCursor(event.currentTarget.selectionStart)} onPaste={(event) => {
+          const files = [...event.clipboardData.files];
+          if (!active && files.length) {
+            event.preventDefault();
+            void attachFiles(files);
+          }
+        }} onKeyDown={(event) => {
+          if (showCompletions && !event.nativeEvent.isComposing) {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              setCompletionIndex((current) => (current + (event.key === "ArrowDown" ? 1 : -1) + completions.length) % completions.length);
+              event.preventDefault();
+              return;
+            }
+            if (event.key === "Enter" || event.key === "Tab") {
+              event.preventDefault();
+              applyCompletion(completionIndex);
+              return;
+            }
+            if (event.key === "Escape") {
+              setDismissedCompletion(completionKey);
+              event.preventDefault();
+              return;
+            }
+          }
+          if (!liveReady || event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          const mode = event.altKey ? "followUp" : liveMode;
+          if (event.altKey) setLiveMode(mode);
+          submit(mode);
+        }} placeholder={live ? "Steer Pi now, or queue work for later…" : "Ask Pi to work, use / resources, reference @files, or run !command…"} rows={3} />
+        {showCompletions && <div id={completionListId} className="composer-completions" role="listbox" aria-label="Resource completion">
+          {completions.map((completion, index) => <button id={`${completionListId}-${index}`} key={`${completionKind}-${completion.value}`} type="button" role="option" tabIndex={-1} aria-selected={index === completionIndex} onMouseDown={(event) => event.preventDefault()} onClick={() => applyCompletion(index)}>
+            <span><strong>{completionKind === "resource" ? `/${completion.value}` : completion.value}</strong>{completion.resource && <small>{completion.resource.description}</small>}</span>
+            {completion.resource && <small>{resourceProvenance(completion.resource)}</small>}
+          </button>)}
+        </div>}
+      </div>
+      {!active && <div className="image-attachments">
+        <input ref={imagePicker} className="visually-hidden" type="file" aria-label="Choose images" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => {
+          void attachFiles([...event.currentTarget.files ?? []]);
+          event.currentTarget.value = "";
+        }} />
+        <button type="button" onClick={() => imagePicker.current?.click()}>Attach images</button>
+        <span>Paste, drop, or select · PNG, JPEG, GIF, or WebP · up to 20 MB each</span>
+      </div>}
+      {images.length > 0 && <ul className="attachment-list" aria-label="Image attachments">
+        {images.map((image, index) => <li key={`${image.name}-${index}`}><span><strong>{image.name}</strong><small>{IMAGE_MIME_LABELS[image.mimeType]} · {image.size < 1024 ? `${image.size} B` : `${(image.size / 1024).toFixed(1)} KB`}</small></span><button type="button" aria-label={`Remove ${image.name}`} disabled={active} onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></li>)}
+      </ul>}
+      {attachmentError && <p className="error attachment-error" role="alert">{attachmentError}</p>}
       {live && <div className="pending-queues" aria-label="Pending live input">
         <ul className="pending-queue" aria-label="Pending steering">{queues.steering.length ? queues.steering.map((text, index) => <li key={`${text}-${index}`}><strong>Steer</strong><span>{text}</span></li>) : <li className="queue-empty"><strong>Steer</strong><span>None pending</span></li>}</ul>
         <ul className="pending-queue" aria-label="Pending follow-ups">{queues.followUp.length ? queues.followUp.map((text, index) => <li key={`${text}-${index}`}><strong>Follow-up</strong><span>{text}</span></li>) : <li className="queue-empty"><strong>Follow-up</strong><span>None pending</span></li>}</ul>

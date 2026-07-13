@@ -1,6 +1,6 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { createServer as createHttpServer } from "node:http";
@@ -270,6 +270,127 @@ async function deterministicProvider(root: string) {
   };
 }
 
+test("attaches images and invokes trusted Pi resources through the Electron boundary", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  const projectPrompt = path.join(environment.project, ".pi", "prompts", "project-template.md");
+  const projectSkill = path.join(environment.project, ".pi", "skills", "project-skill", "SKILL.md");
+  const extensionMarker = path.join(environment.root, "extension-ran");
+  await Promise.all([
+    mkdir(path.dirname(projectPrompt), { recursive: true }),
+    mkdir(path.dirname(projectSkill), { recursive: true }),
+    mkdir(path.join(environment.project, ".pi", "extensions"), { recursive: true }),
+    mkdir(path.join(environment.project, "src", "nested"), { recursive: true }),
+    mkdir(path.join(environment.agentDir, "prompts"), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(projectPrompt, "---\ndescription: Expand a project request\n---\nProject template says $1."),
+    writeFile(projectSkill, "---\nname: project-skill\ndescription: Apply project guidance\n---\nProject skill instructions."),
+    writeFile(path.join(environment.project, ".pi", "skills", "malformed.md"), "---\nname: malformed\n---\nMissing description."),
+    writeFile(path.join(environment.agentDir, "prompts", "global-template.md"), "---\ndescription: Global helper\n---\nGlobal helper."),
+    writeFile(path.join(environment.project, "src", "nested", "context.txt"), "Project-only context"),
+    writeFile(path.join(environment.root, "outside-secret.txt"), "outside"),
+    writeFile(path.join(environment.project, ".pi", "extensions", "must-not-run.ts"), `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(extensionMarker)}, "ran");\nexport default function () {}`),
+    writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: provider.baseUrl,
+          api: "openai-completions",
+          apiKey: "fixture-key",
+          models: [{ id: "fixture-model", name: "Fixture model", input: ["text", "image"], contextWindow: 32_000, maxTokens: 1_000 }],
+        },
+      },
+    })),
+    writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+      enableSkillCommands: true,
+    })),
+  ]);
+  await symlink(path.join(environment.root, "outside-secret.txt"), path.join(environment.project, "linked-secret.txt"));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    const access = app.window.getByRole("dialog", { name: "Project access" });
+    await access.getByRole("button", { name: "Trust project resources", exact: true }).click();
+    await access.getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    const prompt = composer.getByRole("combobox", { name: "Prompt" });
+    const diagnostics = composer.getByRole("region", { name: "Pi resource diagnostics" });
+    await expect(diagnostics).toContainText(/description/i);
+    expect(await readFile(extensionMarker, "utf8").catch(() => "")).toBe("");
+
+    await prompt.fill("/project");
+    const slashCompletion = composer.getByRole("listbox", { name: "Resource completion" });
+    const projectTemplate = slashCompletion.getByRole("option", { name: /project-template/ });
+    await expect(prompt).toHaveAttribute("aria-expanded", "true");
+    await expect(prompt).toHaveAttribute("aria-activedescendant", await slashCompletion.locator('[aria-selected="true"]').getAttribute("id"));
+    await expect(projectTemplate).toContainText("Project");
+    await prompt.press("Enter");
+    await prompt.pressSequentially("widget");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
+    expect(provider.requests.at(-1)).toContain("Project template says widget.");
+
+    await prompt.fill("/skill:project");
+    const skillCompletion = composer.getByRole("listbox", { name: "Resource completion" });
+    await expect(skillCompletion.getByRole("option", { name: /skill:project-skill/ })).toContainText("Project");
+    await prompt.press("Enter");
+    await prompt.pressSequentially("audit now");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
+    expect(provider.requests.at(-1)).toContain("Project skill instructions.");
+    expect(provider.requests.at(-1)).toContain("audit now");
+    expect(await readFile(extensionMarker, "utf8").catch(() => "")).toBe("");
+
+    await prompt.fill("@nstd");
+    const fileCompletion = composer.getByRole("listbox", { name: "Resource completion" });
+    await expect(fileCompletion.getByRole("option", { name: "src/nested/context.txt" })).toBeVisible();
+    await expect(fileCompletion).not.toContainText("linked-secret.txt");
+    await prompt.press("Enter");
+    await expect(prompt).toHaveValue("@src/nested/context.txt ");
+
+    const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+    const picker = composer.getByLabel("Choose images");
+    await picker.setInputFiles({ name: "selected.png", mimeType: "", buffer: onePixelPng });
+    await app.window.evaluate((base64) => {
+      const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], "pasted.png", { type: "image/png" }));
+      document.querySelector<HTMLTextAreaElement>('[aria-label="Prompt"]')!.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: transfer }));
+    }, onePixelPng.toString("base64"));
+    await app.window.evaluate((base64) => {
+      const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], "dropped.png", { type: "image/png" }));
+      document.querySelector<HTMLFormElement>('[aria-label="Task composer"]')!.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: transfer }));
+    }, onePixelPng.toString("base64"));
+    const attachments = composer.getByRole("list", { name: "Image attachments" });
+    await expect(attachments.getByRole("listitem")).toHaveCount(3);
+    await expect(attachments).toContainText("selected.png");
+    await expect(composer).toContainText("PNG, JPEG, GIF, or WebP · up to 20 MB each");
+
+    await prompt.fill("Inspect the attached images");
+    await composer.getByRole("button", { name: "Run" }).click();
+    await expect.poll(() => provider.requests.length).toBe(3);
+    await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
+    expect(provider.requests.at(-1)).toContain("data:image/png;base64");
+    await expect(attachments).toHaveCount(0);
+
+    await picker.setInputFiles({ name: "task-a.png", mimeType: "image/png", buffer: onePixelPng });
+    await expect(attachments.getByRole("listitem")).toHaveCount(1);
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    await expect(attachments).toHaveCount(0);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("runs and aborts a Local Task through the Electron boundary", async () => {
   const environment = await fixture();
   const project = await realpath(environment.project);
@@ -300,7 +421,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await expect(modelControl).toBeVisible();
     await modelControl.focus();
     await expect(modelControl).toBeFocused();
-    await composer.getByRole("textbox", { name: "Prompt" }).fill("Reply with a deterministic greeting");
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("Reply with a deterministic greeting");
     await composer.getByRole("button", { name: "Run" }).click();
     const run = app.window.getByRole("region", { name: "Run timeline" });
     await expect(run).toContainText("Streaming ");
@@ -322,7 +443,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
 
     await app.window.getByRole("button", { name: "New Task" }).click();
     const abortComposer = app.window.getByRole("form", { name: "Task composer" });
-    await abortComposer.getByRole("textbox", { name: "Prompt" }).fill("run abort tool");
+    await abortComposer.getByRole("combobox", { name: "Prompt" }).fill("run abort tool");
     await abortComposer.getByRole("button", { name: "Run" }).click();
     const abortRun = app.window.getByRole("region", { name: "Run timeline" });
     await expect(abortRun.locator('details[aria-label="bash tool, running"]')).toBeVisible();
@@ -334,7 +455,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
 
     await app.window.getByRole("button", { name: "New Task" }).click();
     const modelComposer = app.window.getByRole("form", { name: "Task composer" });
-    await modelComposer.getByRole("textbox", { name: "Prompt" }).fill("abort model");
+    await modelComposer.getByRole("combobox", { name: "Prompt" }).fill("abort model");
     await modelComposer.getByRole("button", { name: "Run" }).click();
     const modelRun = app.window.getByRole("region", { name: "Run timeline" });
     await expect(modelRun).toContainText("Still streaming");
@@ -383,7 +504,7 @@ test("surfaces retry and compaction lifecycles through the Electron boundary", a
     await app.window.getByRole("button", { name: "New Task" }).click();
 
     const composer = app.window.getByRole("form", { name: "Task composer" });
-    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    const prompt = composer.getByRole("combobox", { name: "Prompt" });
     const timeline = app.window.getByRole("region", { name: "Run timeline" });
 
     await prompt.fill("retry then succeed");
@@ -425,7 +546,7 @@ test("surfaces retry and compaction lifecycles through the Electron boundary", a
     const failedCompaction = timeline.getByRole("article").last();
     await expect(failedCompaction).toContainText("Compaction failed");
     await expect(failedCompaction).toContainText(/Nothing to compact|Already compacted/);
-    await expect(composer.getByRole("textbox", { name: "Prompt" })).toBeEnabled();
+    await expect(composer.getByRole("combobox", { name: "Prompt" })).toBeEnabled();
 
     await prompt.fill("cross compaction threshold");
     await composer.getByRole("button", { name: "Run" }).click();
@@ -486,7 +607,7 @@ test("steers, follows up, shows live queues, and restores queued input on abort"
     await app.window.getByRole("button", { name: "New Task" }).click();
 
     const composer = app.window.getByRole("form", { name: "Task composer" });
-    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    const prompt = composer.getByRole("combobox", { name: "Prompt" });
     await prompt.fill("start live queue check");
     await composer.getByRole("button", { name: "Run" }).click();
     await expect(app.window.locator('details[aria-label="bash tool, running"]')).toBeVisible();
@@ -550,7 +671,7 @@ test("renders Run evidence, disclosures, and inline commands through the Electro
     await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
     await app.window.getByRole("button", { name: "New Task" }).click();
     const composer = app.window.getByRole("form", { name: "Task composer" });
-    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    const prompt = composer.getByRole("combobox", { name: "Prompt" });
     const timeline = app.window.getByRole("region", { name: "Run timeline" });
 
     await prompt.fill("!!printf hidden-command-output");
@@ -717,7 +838,7 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     await expect(thinkingPicker).toBeHidden();
     await expect(thinking).toContainText("Thinking · Max");
 
-    const prompt = composer.getByRole("textbox", { name: "Prompt" });
+    const prompt = composer.getByRole("combobox", { name: "Prompt" });
     await prompt.fill("model controls stats");
     await composer.getByRole("button", { name: "Run" }).click();
     await expect(first.window.getByRole("region", { name: "Run timeline" })).toContainText("Usage recorded.");

@@ -151,6 +151,50 @@ export type TaskRunState = {
   recoveredInput?: string;
 };
 
+export const IMAGE_MIME_LABELS = {
+  "image/png": "PNG",
+  "image/jpeg": "JPEG",
+  "image/gif": "GIF",
+  "image/webp": "WebP",
+} as const;
+export const MAXIMUM_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAXIMUM_IMAGES = 10;
+export type SupportedImageMimeType = keyof typeof IMAGE_MIME_LABELS;
+
+export function detectSupportedImageMimeType(bytes: Uint8Array): SupportedImageMimeType | undefined {
+  if (bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value)) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  const ascii = (start: number, end: number) => String.fromCharCode(...bytes.subarray(start, end));
+  const header = ascii(0, 6);
+  if (header === "GIF87a" || header === "GIF89a") return "image/gif";
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp";
+}
+
+export type ImageAttachment = {
+  name: string;
+  mimeType: SupportedImageMimeType;
+  size: number;
+  data: string;
+};
+
+export type TaskResourceState = {
+  taskPath: string;
+  commands: Array<{
+    name: string;
+    kind: "prompt" | "skill";
+    description: string;
+    argumentHint?: string;
+    provenance: {
+      scope: "user" | "project" | "temporary";
+      source: string;
+      origin: "package" | "top-level";
+      path: string;
+    };
+  }>;
+  files: string[];
+  diagnostics: Array<{ severity: "warning" | "error"; message: string; path?: string }>;
+};
+
 export type ProjectsApi = {
   getProjects(): Promise<ProjectsState>;
   addProject(): Promise<ProjectsState>;
@@ -159,9 +203,10 @@ export type ProjectsApi = {
   createTask(projectPath: string): Promise<TaskSummary>;
   getTaskRun(projectPath: string, taskPath: string): Promise<TaskRunState>;
   getTaskModel(projectPath: string, taskPath: string): Promise<TaskModelState>;
+  getTaskResources(projectPath: string, taskPath: string): Promise<TaskResourceState>;
   setTaskModel(projectPath: string, taskPath: string, provider: string, modelId: string): Promise<TaskModelState>;
   setTaskThinking(projectPath: string, taskPath: string, level: ThinkingLevel): Promise<TaskModelState>;
-  submitPrompt(projectPath: string, taskPath: string, prompt: string): Promise<void>;
+  submitPrompt(projectPath: string, taskPath: string, prompt: string, images?: ImageAttachment[]): Promise<void>;
   queuePrompt(taskPath: string, prompt: string, mode: LiveInputMode): Promise<void>;
   executeCommand(projectPath: string, taskPath: string, command: string, includeInContext: boolean): Promise<void>;
   compactTask(projectPath: string, taskPath: string): Promise<void>;

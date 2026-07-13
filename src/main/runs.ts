@@ -1,24 +1,25 @@
 import {
   AuthStorage,
   createAgentSession,
-  DefaultResourceLoader,
   ModelRegistry,
-  ProjectTrustStore,
+  resizeImage,
   SessionManager,
-  SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { CompactionEvidence, LiveInputMode, RetryEvidence, RunEvidence, RunEvidenceItem, RunStatus, TaskRunState } from "../shared/projects.js";
+import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type RetryEvidence, type RunEvidence, type RunEvidenceItem, type RunStatus, type TaskRunState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
+import { loadTaskResources } from "./resources.js";
 import { assertRunnableTask, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
 
 const runMetadataType = "pilot.run";
 const retryMetadataType = "pilot.retry";
 const compactionMetadataType = "pilot.compaction";
 const maximumOutputCharacters = 12_000;
+
+type PreparedImage = { type: "image"; data: string; mimeType: string };
 
 type ActiveRun = {
   project: string;
@@ -43,6 +44,26 @@ type ResultView = {
   outputTruncated: boolean;
   fullOutputPath?: string;
 };
+
+async function prepareImages(images: ImageAttachment[]): Promise<PreparedImage[]> {
+  if (images.length > MAXIMUM_IMAGES) throw new Error(`Attach no more than ${MAXIMUM_IMAGES} images at once`);
+  return Promise.all(images.map(async (image) => {
+    if (!image || typeof image.name !== "string" || typeof image.data !== "string" || typeof image.size !== "number") {
+      throw new Error("An image attachment is malformed");
+    }
+    if (image.size <= 0 || image.size > MAXIMUM_IMAGE_BYTES || image.data.length > Math.ceil(MAXIMUM_IMAGE_BYTES / 3) * 4 + 4) {
+      throw new Error(`${image.name || "Image"} must be 20 MB or smaller`);
+    }
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) throw new Error(`${image.name || "Image"} is malformed`);
+    const bytes = Buffer.from(image.data, "base64");
+    if (bytes.length !== image.size) throw new Error(`${image.name || "Image"} is malformed`);
+    const mimeType = detectSupportedImageMimeType(bytes);
+    if (!mimeType) throw new Error(`${image.name || "Image"} is not a supported PNG, JPEG, GIF, or WebP image`);
+    const resized = await resizeImage(bytes, mimeType);
+    if (!resized) throw new Error(`${image.name || "Image"} could not be prepared within Pi's image size limit`);
+    return { type: "image", data: resized.data, mimeType: resized.mimeType };
+  }));
+}
 
 function contentText(content: unknown, type = "text") {
   if (typeof content === "string") return content;
@@ -297,11 +318,12 @@ export class LocalRunCoordinator {
     return withTaskWrite(file, async () => savedState(file, SessionManager.open(file)));
   }
 
-  async submitPrompt(projectPath: string, taskPath: string, prompt: string) {
+  async submitPrompt(projectPath: string, taskPath: string, prompt: string, images: ImageAttachment[] = []) {
     const text = prompt.trim();
     if (!text) throw new Error("Enter a prompt");
     await assertExecutionAllowed(this.userData, projectPath);
     const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const preparedImages = await prepareImages(images);
     if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
 
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
@@ -337,11 +359,15 @@ export class LocalRunCoordinator {
         active.session = session;
         active.manager = manager;
         const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
+        await session.bindExtensions({ onError: (error) => {
+          addNotice(active, `resource-${randomUUID()}`, "attention", "Pi resource unavailable", error.error);
+          this.emit(active.state);
+        } });
         try {
           if (active.abortRequested) {
             updateRun(active, (value) => ({ ...value, status: "aborted" }));
           } else {
-            await session.prompt(text, { preflightResult: (accepted) => { active.accepted = accepted; } });
+            await session.prompt(text, { images: preparedImages, preflightResult: (accepted) => { active.accepted = accepted; } });
             if (!active.settled) updateRun(active, (value) => ({
               ...value,
               status: active.abortRequested ? "aborted" : active.lastError ? "failed" : "settled",
@@ -568,16 +594,7 @@ export class LocalRunCoordinator {
   }
 
   private async createSession(project: string, file: string, auth: AuthStorage, models: ModelRegistry) {
-    const trusted = new ProjectTrustStore(this.agentDir).getEntry(project)?.decision === true;
-    const settings = SettingsManager.create(project, this.agentDir, { projectTrusted: trusted });
-    const resources = new DefaultResourceLoader({
-      cwd: project,
-      agentDir: this.agentDir,
-      settingsManager: settings,
-      noExtensions: true,
-      noThemes: true,
-    });
-    await resources.reload();
+    const { loader: resources, settings } = await loadTaskResources(this.agentDir, project);
     const manager = SessionManager.open(file);
     const { session } = await createAgentSession({
       cwd: project,

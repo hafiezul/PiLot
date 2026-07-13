@@ -9,9 +9,10 @@ import { addProject, createTask, getProjectsState, removeProject, selectProject,
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { LocalRunCoordinator } from "./runs.js";
 import { getTaskModelState, setTaskModel, setTaskThinking } from "./tasks.js";
+import { getTaskResources } from "./resources.js";
 import { getStartupState } from "./readiness.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
-import type { ThinkingLevel } from "../shared/projects.js";
+import type { ImageAttachment, ThinkingLevel } from "../shared/projects.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
@@ -118,6 +119,8 @@ app.whenReady().then(async () => {
     runs.getTaskRun(requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-model", async (_event, projectPath: unknown, taskPath: unknown) =>
     getTaskModelState(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) =>
+    getTaskResources(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:set-model", async (_event, projectPath: unknown, taskPath: unknown, provider: unknown, modelId: unknown) => {
     if (typeof provider !== "string" || typeof modelId !== "string") throw new Error("A provider and model are required");
     return setTaskModel(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), provider, modelId);
@@ -126,9 +129,9 @@ app.whenReady().then(async () => {
     if (typeof level !== "string") throw new Error("A thinking level is required");
     return setTaskThinking(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), level as ThinkingLevel);
   });
-  ipcMain.handle("tasks:submit", async (_event, projectPath: unknown, taskPath: unknown, prompt: unknown) => {
-    if (typeof prompt !== "string") throw new Error("A prompt is required");
-    return runs.submitPrompt(requireProjectPath(projectPath), requireProjectPath(taskPath), prompt);
+  ipcMain.handle("tasks:submit", async (_event, projectPath: unknown, taskPath: unknown, prompt: unknown, images: unknown) => {
+    if (typeof prompt !== "string" || (images !== undefined && !Array.isArray(images))) throw new Error("A prompt is required");
+    return runs.submitPrompt(requireProjectPath(projectPath), requireProjectPath(taskPath), prompt, (images ?? []) as ImageAttachment[]);
   });
   ipcMain.handle("tasks:queue", async (_event, taskPath: unknown, prompt: unknown, mode: unknown) => {
     if (typeof prompt !== "string" || (mode !== "steer" && mode !== "followUp")) throw new Error("A live input mode is required");
