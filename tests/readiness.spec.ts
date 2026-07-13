@@ -1,5 +1,5 @@
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { createRequire } from "node:module";
@@ -229,6 +229,66 @@ test("applies and persists PiLot appearance preferences", async () => {
     await expect(second.window.getByRole("radio", { name: "Dark" })).toBeChecked();
     expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark" });
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8").catch(() => "{}"))).toEqual({});
+  } finally {
+    await close(second);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("adds a Project and keeps Pi resource trust separate from execution consent", async () => {
+  const environment = await fixture();
+  const project = path.join(environment.root, "picked-project");
+  const userData = path.join(environment.root, "pilot-user-data");
+  await mkdir(path.join(project, ".pi"), { recursive: true });
+  const canonicalProject = await realpath(project);
+  await writeFile(path.join(project, ".pi", "settings.json"), "{}");
+
+  const first = await launch(environment.agentDir, false, {
+    PILOT_USER_DATA_DIR: userData,
+    PILOT_TEST_PROJECT_DIR: project,
+  });
+
+  try {
+    const addProject = first.window.getByRole("button", { name: "Add project" });
+    await addProject.focus();
+    await addProject.press("Enter");
+
+    const projectAccess = first.window.getByRole("region", { name: "Project access" });
+    await expect(projectAccess).toContainText(project);
+    await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Not decided");
+    await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Not granted");
+    await expect(projectAccess).toContainText("Prompts and setup commands are blocked");
+
+    const trust = projectAccess.getByRole("button", { name: "Trust project resources", exact: true });
+    await trust.focus();
+    await trust.press("Enter");
+    await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Trusted");
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "trust.json"), "utf8"))[canonicalProject]).toBe(true);
+
+    await projectAccess.getByRole("button", { name: "Allow agent execution" }).click();
+    await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Granted");
+    expect(JSON.parse(await readFile(path.join(userData, "projects.json"), "utf8")).executionConsent[canonicalProject]).toBe(true);
+
+    await projectAccess.getByRole("button", { name: "Revoke agent execution" }).click();
+    await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Not granted");
+    await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Trusted");
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "trust.json"), "utf8"))[canonicalProject]).toBe(true);
+  } finally {
+    await close(first);
+  }
+
+  const second = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+  try {
+    await expect(second.window.getByRole("navigation", { name: "Projects and tasks" })).toContainText("picked-project");
+    const projectAccess = second.window.getByRole("region", { name: "Project access" });
+    await expect(projectAccess).toContainText(project);
+    await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Trusted");
+    await expect(projectAccess.getByRole("status", { name: "Agent execution" })).toContainText("Not granted");
+    const deny = projectAccess.getByRole("button", { name: "Do not trust project resources" });
+    await deny.focus();
+    await deny.press("Enter");
+    await expect(projectAccess.getByRole("status", { name: "Pi resource trust" })).toContainText("Not trusted");
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "trust.json"), "utf8"))[canonicalProject]).toBe(false);
   } finally {
     await close(second);
     await rm(environment.root, { recursive: true, force: true });

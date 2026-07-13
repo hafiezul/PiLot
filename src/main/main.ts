@@ -1,7 +1,9 @@
-import { app, BrowserWindow, ipcMain, nativeTheme } from "electron";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPreferences, saveAppearance } from "./preferences.js";
+import { addProject, getProjectsState, selectProject, setExecutionConsent, setResourceTrust } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { getStartupState } from "./readiness.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
@@ -71,6 +73,34 @@ app.whenReady().then(async () => {
   ipcMain.handle("providers:login", (event, provider: string) => login(provider, event.sender));
   ipcMain.handle("providers:logout", (_event, provider: string) => logout(provider));
   ipcMain.handle("providers:oauth-reply", (_event, value?: string) => respondToOAuth(value));
+
+  const projectState = async () => getProjectsState(app.getPath("userData"), getAgentDir(), (await getStartupState()).projects);
+  const requireProjectPath = (value: unknown) => {
+    if (typeof value !== "string" || !value) throw new Error("A Project path is required");
+    return value;
+  };
+  ipcMain.handle("projects:get", projectState);
+  ipcMain.handle("projects:add", async (event) => {
+    let projectPath = process.env.PILOT_TEST_PROJECT_DIR;
+    if (!projectPath) {
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = { title: "Add Project", properties: ["openDirectory"] };
+      const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+      projectPath = result.canceled ? undefined : result.filePaths[0];
+    }
+    if (!projectPath) return projectState();
+    return addProject(app.getPath("userData"), getAgentDir(), projectPath, (await getStartupState()).projects);
+  });
+  ipcMain.handle("projects:select", async (_event, projectPath: unknown) =>
+    selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), (await getStartupState()).projects));
+  ipcMain.handle("projects:set-resource-trust", async (_event, projectPath: unknown, trusted: unknown) => {
+    if (typeof trusted !== "boolean") throw new Error("A trust decision is required");
+    return setResourceTrust(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), trusted, (await getStartupState()).projects);
+  });
+  ipcMain.handle("projects:set-execution-consent", async (_event, projectPath: unknown, consent: unknown) => {
+    if (typeof consent !== "boolean") throw new Error("An execution consent decision is required");
+    return setExecutionConsent(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), consent, (await getStartupState()).projects);
+  });
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

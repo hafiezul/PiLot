@@ -4,10 +4,9 @@ export type ReadinessGap = {
   detail: string;
 };
 
-export type ProjectSummary = {
-  name: string;
-  taskCount: number;
-};
+import type { ProjectSummary } from "./projects.js";
+
+export type { ProjectSummary } from "./projects.js";
 
 export type StartupState = {
   gaps: ReadinessGap[];
@@ -16,8 +15,9 @@ export type StartupState = {
 };
 
 import type { PreferencesApi } from "./preferences.js";
+import type { ProjectsApi } from "./projects.js";
 import type { PiLotApi as ProviderApi } from "./providers.js";
 
-export type PiLotApi = ProviderApi & PreferencesApi & {
+export type PiLotApi = ProviderApi & PreferencesApi & ProjectsApi & {
   getStartupState(): Promise<StartupState>;
 };

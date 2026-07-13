@@ -52,6 +52,7 @@ async function inspectSessions(agentDir: string) {
     incompatible,
     malformed,
     projects: [...projects].map<ProjectSummary>(([cwd, taskCount]) => ({
+      path: cwd,
       name: path.basename(cwd) || cwd,
       taskCount,
     })),

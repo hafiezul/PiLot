@@ -17,6 +17,11 @@ const api: PiLotApi = {
     ipcRenderer.on("providers:oauth-event", handler);
     return () => ipcRenderer.removeListener("providers:oauth-event", handler);
   },
+  getProjects: () => ipcRenderer.invoke("projects:get"),
+  addProject: () => ipcRenderer.invoke("projects:add"),
+  selectProject: (path) => ipcRenderer.invoke("projects:select", path),
+  setResourceTrust: (path, trusted) => ipcRenderer.invoke("projects:set-resource-trust", path, trusted),
+  setExecutionConsent: (path, consent) => ipcRenderer.invoke("projects:set-execution-consent", path, consent),
 };
 
 contextBridge.exposeInMainWorld("pilot", api);

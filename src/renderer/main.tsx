@@ -2,6 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
+import type { ProjectAccess, ProjectsState } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import "./styles.css";
 
@@ -109,6 +110,57 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
   );
 }
 
+function ProjectPage({ project, onChange }: { project: ProjectAccess; onChange(state: ProjectsState): void }) {
+  const [error, setError] = useState("");
+  const attempt = async (action: () => Promise<ProjectsState>) => {
+    setError("");
+    try { onChange(await action()); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const trustLabel = project.resourceTrust.decision === null
+    ? project.resourceTrust.required ? "Not decided" : "No decision needed"
+    : project.resourceTrust.decision ? "Trusted" : "Not trusted";
+
+  return <>
+    <header className="topbar project-topbar">
+      <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
+      <span className="privacy"><i /> Local only</span>
+    </header>
+    <section className="project-access" aria-label="Project access">
+      <header>
+        <h2>Project access</h2>
+        <p>Pi resource trust and agent execution are independent decisions for <code>{project.path}</code>.</p>
+      </header>
+
+      <section aria-labelledby="resource-trust-title">
+        <div className="access-heading">
+          <div><h3 id="resource-trust-title">Pi resource trust</h3><p>Controls whether Pi loads project settings, prompts, skills, and context files.</p></div>
+          <span className="access-status" role="status" aria-label="Pi resource trust">{trustLabel}</span>
+        </div>
+        {project.resourceTrust.sourcePath && <p className="decision-source">Saved in Pi for <code>{project.resourceTrust.sourcePath}</code>{project.resourceTrust.sourcePath !== project.path ? " and inherited here" : ""}.</p>}
+        {!project.resourceTrust.required && <p className="decision-source">This Project has no local Pi resources that currently require trust.</p>}
+        <div className="access-actions">
+          <button onClick={() => void attempt(() => window.pilot.setResourceTrust(project.path, true))}>Trust project resources</button>
+          <button onClick={() => void attempt(() => window.pilot.setResourceTrust(project.path, false))}>Do not trust project resources</button>
+        </div>
+      </section>
+
+      <section aria-labelledby="execution-title">
+        <div className="access-heading">
+          <div><h3 id="execution-title">Agent execution</h3><p>Allows agents started by PiLot to run unsandboxed shell commands and read, create, edit, or delete files on this computer, starting from this Project.</p></div>
+          <span className="access-status" role="status" aria-label="Agent execution">{project.executionConsent ? "Granted" : "Not granted"}</span>
+        </div>
+        <p className="decision-source">{project.executionConsent ? "Prompts and setup commands may run without per-command approval." : "Prompts and setup commands are blocked until you grant access."}</p>
+        <div className="access-actions">
+          {project.executionConsent
+            ? <button onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, false))}>Revoke agent execution</button>
+            : <button className="primary-action" onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, true))}>Allow agent execution</button>}
+        </div>
+      </section>
+      {error && <p className="error" role="alert">{error}</p>}
+    </section>
+  </>;
+}
+
 function applyAppearance(appearance: Appearance) {
   document.documentElement.dataset.appearance = appearance;
 }
@@ -162,9 +214,13 @@ function SettingsPage({ onChange, onClose }: { onChange(): void; onClose(): void
 
 function App() {
   const [state, setState] = useState<StartupState>();
+  const [projects, setProjects] = useState<ProjectsState>();
   const [showSettings, setShowSettings] = useState(false);
   const settingsButton = useRef<HTMLButtonElement>(null);
-  const refresh = useCallback(() => void window.pilot.getStartupState().then(setState), []);
+  const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
+    setState(startup);
+    setProjects(projectState);
+  }), []);
   const closeSettings = useCallback(() => {
     setShowSettings(false);
     requestAnimationFrame(() => settingsButton.current?.focus());
@@ -179,7 +235,7 @@ function App() {
 
   return (
     <>
-      <a className="skip-link" href="#content">Skip to readiness</a>
+      <a className="skip-link" href="#content">Skip to content</a>
       <div className="window-bar" aria-hidden="true" />
       <div className="shell">
         <nav aria-label="Projects and tasks" className="navigation">
@@ -189,15 +245,17 @@ function App() {
           </header>
           <div className="nav-heading">
             <span>Projects</span>
-            <button aria-label="Add project" disabled title="Project creation is coming next">+</button>
+            <button aria-label="Add project" title="Add Project" onClick={() => void window.pilot.addProject().then(setProjects)}>+</button>
           </div>
-          {state?.projects.length ? (
+          {projects?.projects.length ? (
             <ul className="project-list">
-              {state.projects.map((project) => (
-                <li key={project.name}>
-                  <span className="project-icon" aria-hidden="true">◇</span>
-                  <span>{project.name}</span>
-                  <small>{project.taskCount}</small>
+              {projects.projects.map((project) => (
+                <li key={project.path}>
+                  <button aria-current={projects.selected?.path === project.path ? "page" : undefined} onClick={() => void window.pilot.selectProject(project.path).then(setProjects)}>
+                    <span className="project-icon" aria-hidden="true">◇</span>
+                    <span>{project.name}</span>
+                    <small>{project.taskCount}</small>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -211,38 +269,40 @@ function App() {
         </nav>
 
         <main id="content" className="workspace-main">
-          <header className="topbar">
-            <div>
-              <span className="eyebrow">Command center</span>
-              <h1>Good to have you here.</h1>
-            </div>
-            <span className="privacy"><i /> Local only</span>
-          </header>
+          {projects?.selected ? <ProjectPage project={projects.selected} onChange={setProjects} /> : <>
+            <header className="topbar">
+              <div>
+                <span className="eyebrow">Command center</span>
+                <h1>Good to have you here.</h1>
+              </div>
+              <span className="privacy"><i /> Local only</span>
+            </header>
 
-          {!state ? (
-            <p role="status" className="loading">Checking your Pi environment…</p>
-          ) : state.gaps.length === 0 ? (
-            <section className="ready" aria-label={`${state.passed} readiness checks passed`}>
-              <span className="ready-mark" aria-hidden="true">✓</span>
-              <p className="eyebrow">Environment ready</p>
-              <h2>Ready to work</h2>
-              <p className="muted">Your provider, shell, Pi environment, and task history are compatible.</p>
-            </section>
-          ) : (
-            <section className="readiness" aria-labelledby="readiness-title" tabIndex={0}>
-              <p className="eyebrow">Action required</p>
-              <h2 id="readiness-title">Readiness</h2>
-              <p className="muted">Resolve these items before starting a task.</p>
-              <ol>
-                {state.gaps.map((gap) => (
-                  <li key={gap.area}>
-                    <span className="gap-mark" aria-hidden="true">!</span>
-                    <div><h3>{gap.title}</h3><p>{gap.detail}</p></div>
-                  </li>
-                ))}
-              </ol>
-            </section>
-          )}
+            {!state ? (
+              <p role="status" className="loading">Checking your Pi environment…</p>
+            ) : state.gaps.length === 0 ? (
+              <section className="ready" aria-label={`${state.passed} readiness checks passed`}>
+                <span className="ready-mark" aria-hidden="true">✓</span>
+                <p className="eyebrow">Environment ready</p>
+                <h2>Ready to work</h2>
+                <p className="muted">Your provider, shell, Pi environment, and task history are compatible.</p>
+              </section>
+            ) : (
+              <section className="readiness" aria-labelledby="readiness-title" tabIndex={0}>
+                <p className="eyebrow">Action required</p>
+                <h2 id="readiness-title">Readiness</h2>
+                <p className="muted">Resolve these items before starting a task.</p>
+                <ol>
+                  {state.gaps.map((gap) => (
+                    <li key={gap.area}>
+                      <span className="gap-mark" aria-hidden="true">!</span>
+                      <div><h3>{gap.title}</h3><p>{gap.detail}</p></div>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            )}
+          </>}
         </main>
 
         <aside aria-label="Inspector" className="inspector">

@@ -20,10 +20,13 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px s
 .mark { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid #a6a6a2; border-radius: 6px; font: 17px Georgia, serif; }
 .nav-heading, .tabs { display: flex; align-items: center; }
 .nav-heading { justify-content: space-between; padding: 0 8px 8px; color: #686864; font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; }
-.nav-heading button { border: 0; background: transparent; color: inherit; font-size: 18px; }
+.nav-heading button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 18px; }
+.nav-heading button:hover { color: #20211f; }
 .project-list { list-style: none; margin: 0; padding: 0; }
-.project-list li { display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 4px; padding: 7px 8px; border-radius: 5px; font-size: 13px; }
-.project-list li:first-child { background: #dededb; }
+.project-list li { margin: 0; padding: 0; }
+.project-list button { display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 4px; width: 100%; padding: 7px 8px; border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; font-size: 13px; text-align: left; }
+.project-list button:hover { background: #e3e3e0; }
+.project-list button[aria-current="page"] { background: #dededb; font-weight: 650; }
 .project-list small { color: #6b6b67; }
 .project-icon { color: #555651; }
 .nav-empty { padding: 0 8px; font-size: 12px; line-height: 1.5; }
@@ -46,6 +49,24 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .ready { padding-top: 48px; text-align: center; }
 .ready-mark { display: grid; place-items: center; width: 38px; height: 38px; margin: 0 auto 20px; border: 1px solid #8f9890; border-radius: 50%; color: #287c47; font-weight: 700; }
 .ready .muted { max-width: 400px; margin: 0 auto; font-size: 13px; line-height: 1.6; }
+.project-topbar { padding-bottom: 42px; }
+.project-topbar code { display: block; max-width: 70ch; margin-top: 7px; color: #686864; font-size: 11px; overflow-wrap: anywhere; }
+.project-access { max-width: 680px; margin: 0 auto; }
+.project-access > header { padding-bottom: 18px; }
+.project-access > header p { margin: 0; color: #686864; font-size: 13px; }
+.project-access > section { padding: 20px 0; border-top: 1px solid #dededb; }
+.project-access > section:last-of-type { border-bottom: 1px solid #dededb; }
+.access-heading { display: flex; justify-content: space-between; align-items: start; gap: 24px; }
+.access-heading h3 { font-size: 14px; }
+.access-heading p, .decision-source { max-width: 62ch; margin: 0; color: #686864; font-size: 12px; line-height: 1.5; }
+.access-status { flex: none; padding: 3px 7px; border: 1px solid #c8c8c4; border-radius: 4px; font-size: 11px; font-weight: 650; }
+.decision-source { margin-top: 10px; }
+.decision-source code { overflow-wrap: anywhere; }
+.access-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
+.project-access button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #fdfdfc; cursor: pointer; }
+.project-access button:hover { background: #ededeb; }
+.project-access .primary-action { border-color: #1668d4; color: #fff; background: #1668d4; }
+.project-access .primary-action:hover { background: #0e57b7; }
 .readiness { padding: 24px; border: 1px solid #d8d8d4; background: #fdfdfc; }
 .readiness > .muted { margin: 0 0 22px; font-size: 13px; }
 .readiness ol { display: grid; gap: 1px; list-style: none; margin: 0; padding: 0; border-top: 1px solid #e3e3df; }
@@ -121,13 +142,15 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] .window-bar, :root[data-appearance="dark"] .shell, :root[data-appearance="dark"] .navigation, :root[data-appearance="dark"] .inspector, :root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-navigation { background: #242523; }
 :root[data-appearance="dark"] main { background: #1d1e1c; }
 :root[data-appearance="dark"] .navigation, :root[data-appearance="dark"] .inspector, :root[data-appearance="dark"] .tabs, :root[data-appearance="dark"] dl div, :root[data-appearance="dark"] .nav-footer, :root[data-appearance="dark"] .settings-navigation { border-color: #393a37; }
-:root[data-appearance="dark"] .project-list li:first-child, :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover, :root[data-appearance="dark"] .settings-button:hover { background: #343532; }
+:root[data-appearance="dark"] .project-list button:hover, :root[data-appearance="dark"] .project-list button[aria-current="page"], :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover, :root[data-appearance="dark"] .settings-button:hover { background: #343532; }
 :root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
 :root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-main, :root[data-appearance="dark"] .provider-setup { color: #e8e8e5; }
-:root[data-appearance="dark"] .general-settings label, :root[data-appearance="dark"] .provider-detail, :root[data-appearance="dark"] .credential-summary li, :root[data-appearance="dark"] .model-inspection ul, :root[data-appearance="dark"] .model-inspection li { border-color: #40413d; }
+:root[data-appearance="dark"] .general-settings label, :root[data-appearance="dark"] .provider-detail, :root[data-appearance="dark"] .credential-summary li, :root[data-appearance="dark"] .model-inspection ul, :root[data-appearance="dark"] .model-inspection li, :root[data-appearance="dark"] .project-access > section, :root[data-appearance="dark"] .access-status { border-color: #40413d; }
 :root[data-appearance="dark"] .model-inspection code { color: #bbbcb7; }
-:root[data-appearance="dark"] .general-settings label small, :root[data-appearance="dark"] .muted, :root[data-appearance="dark"] .readiness li p, :root[data-appearance="dark"] .eyebrow, :root[data-appearance="dark"] .privacy, :root[data-appearance="dark"] .nav-heading, :root[data-appearance="dark"] .tabs button, :root[data-appearance="dark"] dt { color: #aaa9a4; }
-:root[data-appearance="dark"] .provider-setup button, :root[data-appearance="dark"] .provider-setup select, :root[data-appearance="dark"] .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] .general-settings label small, :root[data-appearance="dark"] .muted, :root[data-appearance="dark"] .readiness li p, :root[data-appearance="dark"] .eyebrow, :root[data-appearance="dark"] .privacy, :root[data-appearance="dark"] .nav-heading, :root[data-appearance="dark"] .tabs button, :root[data-appearance="dark"] dt, :root[data-appearance="dark"] .project-topbar code, :root[data-appearance="dark"] .project-access header p, :root[data-appearance="dark"] .access-heading p, :root[data-appearance="dark"] .decision-source { color: #aaa9a4; }
+:root[data-appearance="dark"] .nav-heading button:hover { color: #e8e8e5; }
+:root[data-appearance="dark"] .provider-setup button, :root[data-appearance="dark"] .provider-setup select, :root[data-appearance="dark"] .provider-setup input, :root[data-appearance="dark"] .project-access button { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] .project-access .primary-action { border-color: #438eea; background: #1668d4; }
 :root[data-appearance="dark"] .key-form, :root[data-appearance="dark"] .oauth-flow { background: #2c2d2a; }
 :root[data-appearance="dark"] .readiness ol, :root[data-appearance="dark"] .readiness li { border-color: #3b3c39; }
 :root[data-appearance="dark"] .tabs button[aria-selected="true"] { border-bottom-color: #ddd; color: #eee; }
@@ -137,13 +160,15 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .window-bar, :root:is(:not([data-appearance]), [data-appearance="system"]) .shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .navigation, :root:is(:not([data-appearance]), [data-appearance="system"]) .inspector, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation { background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) main { background: #1d1e1c; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .navigation, :root:is(:not([data-appearance]), [data-appearance="system"]) .inspector, :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs, :root:is(:not([data-appearance]), [data-appearance="system"]) dl div, :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-footer, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation { border-color: #393a37; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list li:first-child, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-button:hover { background: #343532; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-button:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-main, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup { color: #e8e8e5; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-detail, :root:is(:not([data-appearance]), [data-appearance="system"]) .credential-summary li, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection ul, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection li { border-color: #40413d; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-detail, :root:is(:not([data-appearance]), [data-appearance="system"]) .credential-summary li, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection ul, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection li, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access > section, :root:is(:not([data-appearance]), [data-appearance="system"]) .access-status { border-color: #40413d; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection code { color: #bbbcb7; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label small, :root:is(:not([data-appearance]), [data-appearance="system"]) .muted, :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness li p, :root:is(:not([data-appearance]), [data-appearance="system"]) .eyebrow, :root:is(:not([data-appearance]), [data-appearance="system"]) .privacy, :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-heading, :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs button, :root:is(:not([data-appearance]), [data-appearance="system"]) dt { color: #aaa9a4; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup button, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup select, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label small, :root:is(:not([data-appearance]), [data-appearance="system"]) .muted, :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness li p, :root:is(:not([data-appearance]), [data-appearance="system"]) .eyebrow, :root:is(:not([data-appearance]), [data-appearance="system"]) .privacy, :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-heading, :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs button, :root:is(:not([data-appearance]), [data-appearance="system"]) dt, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-topbar code, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access header p, :root:is(:not([data-appearance]), [data-appearance="system"]) .access-heading p, :root:is(:not([data-appearance]), [data-appearance="system"]) .decision-source { color: #aaa9a4; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-heading button:hover { color: #e8e8e5; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup button, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup select, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup input, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access button { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access .primary-action { border-color: #438eea; background: #1668d4; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .key-form, :root:is(:not([data-appearance]), [data-appearance="system"]) .oauth-flow { background: #2c2d2a; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness ol, :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness li { border-color: #3b3c39; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs button[aria-selected="true"] { border-bottom-color: #ddd; color: #eee; }
