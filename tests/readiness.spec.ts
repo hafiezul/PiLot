@@ -121,6 +121,11 @@ test("loads the renderer from Vite during development", async () => {
     app = await launch(environment.agentDir, false, { PILOT_DEV_SERVER: "1" });
     await expect(app.window).toHaveURL("http://127.0.0.1:5173/");
     await expect(app.window.locator('script[src*="/@vite/client"]')).toHaveCount(1);
+    await expect(app.window.locator('meta[http-equiv="Content-Security-Policy"]')).toHaveAttribute(
+      "content",
+      /style-src 'self' 'unsafe-inline'.*connect-src ws:\/\/127\.0\.0\.1:5173/,
+    );
+    await expect.poll(() => app?.window.locator(".shell").evaluate((element) => getComputedStyle(element).display)).toBe("grid");
   } finally {
     if (app) await close(app);
     await server.close();
