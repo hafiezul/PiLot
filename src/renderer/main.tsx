@@ -553,12 +553,18 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   const [completionIndex, setCompletionIndex] = useState(0);
   const [dismissedCompletion, setDismissedCompletion] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [imageDragActive, setImageDragActive] = useState(false);
+  const [attachingImages, setAttachingImages] = useState(false);
   const [liveMode, setLiveMode] = useState<LiveInputMode>("steer");
   const [error, setError] = useState("");
   const [attachmentError, setAttachmentError] = useState("");
   const promptInput = useRef<HTMLTextAreaElement>(null);
   const imagePicker = useRef<HTMLInputElement>(null);
+  const imageDragDepth = useRef(0);
+  const currentTaskPath = useRef(task.path);
+  currentTaskPath.current = task.path;
   const completionListId = useId();
+  const imageHelpId = useId();
   const updateModelState = (next: TaskModelState) => { setModelState(next); onDetails(next); };
   const refreshDetails = () => window.pilot.getTaskModel(project.path, task.path).then(updateModelState);
 
@@ -568,6 +574,9 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
     setTimeline(undefined);
     setResources(undefined);
     setImages([]);
+    setImageDragActive(false);
+    setAttachingImages(false);
+    imageDragDepth.current = 0;
     setAttachmentError("");
     setError("");
     const unsubscribe = window.pilot.onTaskRunEvent((next) => {
@@ -642,12 +651,15 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   const attachFiles = async (files: File[]) => {
     if (!files.length) return;
     setAttachmentError("");
+    setAttachingImages(true);
     try {
       if (images.length + files.length > MAXIMUM_IMAGES) throw new Error(`Attach no more than ${MAXIMUM_IMAGES} images at once`);
       const attached = await Promise.all(files.map(imageAttachment));
-      setImages((current) => [...current, ...attached]);
+      if (currentTaskPath.current === task.path) setImages((current) => [...current, ...attached]);
     } catch (reason) {
-      setAttachmentError(reason instanceof Error ? reason.message : String(reason));
+      if (currentTaskPath.current === task.path) setAttachmentError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (currentTaskPath.current === task.path) setAttachingImages(false);
     }
   };
   const submit = (mode?: LiveInputMode) => {
@@ -686,13 +698,26 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       {active && <button className="abort-button" onClick={() => void window.pilot.abortTask(task.path)}>Abort</button>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
-    <form className="task-composer" aria-label="Task composer" onDragOver={(event) => {
+    <form className="task-composer" aria-label="Task composer" onDragEnter={(event) => {
+      if (active || !event.dataTransfer.types.includes("Files")) return;
+      event.preventDefault();
+      imageDragDepth.current += 1;
+      setImageDragActive(true);
+    }} onDragOver={(event) => {
       if (event.dataTransfer.types.includes("Files") && !active) event.preventDefault();
+    }} onDragLeave={(event) => {
+      if (!imageDragActive) return;
+      event.preventDefault();
+      imageDragDepth.current = Math.max(0, imageDragDepth.current - 1);
+      if (!imageDragDepth.current) setImageDragActive(false);
     }} onDrop={(event) => {
+      imageDragDepth.current = 0;
+      setImageDragActive(false);
       if (active || !event.dataTransfer.files.length) return;
       event.preventDefault();
       void attachFiles([...event.dataTransfer.files]);
     }} onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
+      {imageDragActive && <div className="image-drop-feedback" aria-hidden="true"><span>＋</span> Drop images to attach</div>}
       <label htmlFor="task-prompt">{live ? "Guide the active Run" : "Prompt or inline command"}</label>
       {resources?.diagnostics.length ? <section className="resource-diagnostics" aria-label="Pi resource diagnostics">
         {resources.diagnostics.map((diagnostic, index) => <p key={`${diagnostic.path ?? "resource"}-${index}`} className={diagnostic.severity}><strong>Pi resource {diagnostic.severity}:</strong> {diagnostic.message}{diagnostic.path && <code>{diagnostic.path}</code>}</p>)}
@@ -744,16 +769,12 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
           </button>)}
         </div>}
       </div>
-      {!active && <div className="image-attachments">
-        <input ref={imagePicker} className="visually-hidden" type="file" aria-label="Choose images" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => {
-          void attachFiles([...event.currentTarget.files ?? []]);
-          event.currentTarget.value = "";
-        }} />
-        <button type="button" onClick={() => imagePicker.current?.click()}>Attach images</button>
-        <span>Paste, drop, or select · PNG, JPEG, GIF, or WebP · up to 20 MB each</span>
-      </div>}
-      {images.length > 0 && <ul className="attachment-list" aria-label="Image attachments">
-        {images.map((image, index) => <li key={`${image.name}-${index}`}><span><strong>{image.name}</strong><small>{IMAGE_MIME_LABELS[image.mimeType]} · {image.size < 1024 ? `${image.size} B` : `${(image.size / 1024).toFixed(1)} KB`}</small></span><button type="button" aria-label={`Remove ${image.name}`} disabled={active} onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></li>)}
+      {images.length > 0 && <ul className="attachment-list" aria-label="Image attachments" aria-live="polite">
+        {images.map((image, index) => <li key={`${image.name}-${index}`}>
+          <img src={`data:${image.mimeType};base64,${image.data}`} alt="" draggable={false} />
+          <span><strong>{image.name}</strong><small>{IMAGE_MIME_LABELS[image.mimeType]} · {image.size < 1024 ? `${image.size} B` : `${(image.size / 1024).toFixed(1)} KB`}</small></span>
+          <button type="button" aria-label={`Remove ${image.name}`} disabled={active} onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}><span aria-hidden="true">×</span></button>
+        </li>)}
       </ul>}
       {attachmentError && <p className="error attachment-error" role="alert">{attachmentError}</p>}
       {live && <div className="pending-queues" aria-label="Pending live input">
@@ -761,7 +782,19 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
         <ul className="pending-queue" aria-label="Pending follow-ups">{queues.followUp.length ? queues.followUp.map((text, index) => <li key={`${text}-${index}`}><strong>Follow-up</strong><span>{text}</span></li>) : <li className="queue-empty"><strong>Follow-up</strong><span>None pending</span></li>}</ul>
       </div>}
       <div className="composer-controls">
-        <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={updateModelState} onOpenSettings={onOpenSettings} />
+        <div className="composer-leading-controls">
+          {!active && <>
+            <input ref={imagePicker} className="visually-hidden" type="file" aria-label="Choose images" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => {
+              void attachFiles([...(event.currentTarget.files ?? [])]);
+              event.currentTarget.value = "";
+            }} />
+            <button type="button" className="attachment-trigger" aria-label={attachingImages ? "Preparing images" : "Attach images"} aria-describedby={imageHelpId} aria-busy={attachingImages} title="Attach images — PNG, JPEG, GIF, or WebP, up to 20 MB" disabled={attachingImages} onClick={() => imagePicker.current?.click()}>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.3 8.8 9.7 4.4a2.1 2.1 0 0 1 3 3l-5.5 5.5a3.5 3.5 0 0 1-5-5l5.6-5.5" /></svg>
+            </button>
+            <span id={imageHelpId} className="visually-hidden">Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each</span>
+          </>}
+          <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={updateModelState} onOpenSettings={onOpenSettings} />
+        </div>
         <button type="submit" className="run-button" disabled={!draft.trim() || (active && !liveReady)}>{live ? "Queue input" : "Run"}</button>
       </div>
     </form>

@@ -362,6 +362,12 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
       transfer.items.add(new File([bytes], "pasted.png", { type: "image/png" }));
       document.querySelector<HTMLTextAreaElement>('[aria-label="Prompt"]')!.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: transfer }));
     }, onePixelPng.toString("base64"));
+    await app.window.evaluate(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["preview"], "dropped.png", { type: "image/png" }));
+      document.querySelector<HTMLFormElement>('[aria-label="Task composer"]')!.dispatchEvent(new DragEvent("dragenter", { bubbles: true, dataTransfer: transfer }));
+    });
+    await expect(composer.getByText("Drop images to attach")).toBeVisible();
     await app.window.evaluate((base64) => {
       const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
       const transfer = new DataTransfer();
@@ -371,7 +377,7 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     const attachments = composer.getByRole("list", { name: "Image attachments" });
     await expect(attachments.getByRole("listitem")).toHaveCount(3);
     await expect(attachments).toContainText("selected.png");
-    await expect(composer).toContainText("PNG, JPEG, GIF, or WebP · up to 20 MB each");
+    await expect(composer.getByRole("button", { name: "Attach images" })).toHaveAccessibleDescription("Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each");
 
     await prompt.fill("Inspect the attached images");
     await composer.getByRole("button", { name: "Run" }).click();
