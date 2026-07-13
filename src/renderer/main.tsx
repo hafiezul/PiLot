@@ -783,6 +783,9 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       </div>}
       <div className="composer-controls">
         <div className="composer-leading-controls">
+          <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={updateModelState} onOpenSettings={onOpenSettings} />
+        </div>
+        <div className="composer-submit-controls">
           {!active && <>
             <input ref={imagePicker} className="visually-hidden" type="file" aria-label="Choose images" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => {
               void attachFiles([...(event.currentTarget.files ?? [])]);
@@ -793,9 +796,8 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
             </button>
             <span id={imageHelpId} className="visually-hidden">Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each</span>
           </>}
-          <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={updateModelState} onOpenSettings={onOpenSettings} />
+          <button type="submit" className="run-button" disabled={!draft.trim() || (active && !liveReady)}>{live ? "Queue input" : "Run"}</button>
         </div>
-        <button type="submit" className="run-button" disabled={!draft.trim() || (active && !liveReady)}>{live ? "Queue input" : "Run"}</button>
       </div>
     </form>
   </div>;

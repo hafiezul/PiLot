@@ -330,7 +330,8 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     await expect(prompt).toHaveAttribute("aria-activedescendant", await slashCompletion.locator('[aria-selected="true"]').getAttribute("id"));
     await expect(projectTemplate).toContainText("Project");
     await prompt.press("Enter");
-    await prompt.pressSequentially("widget");
+    await expect(prompt).toHaveValue("/project-template ");
+    await prompt.fill("/project-template widget");
     await composer.getByRole("button", { name: "Run" }).click();
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
     expect(provider.requests.at(-1)).toContain("Project template says widget.");
@@ -339,7 +340,8 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     const skillCompletion = composer.getByRole("listbox", { name: "Resource completion" });
     await expect(skillCompletion.getByRole("option", { name: /skill:project-skill/ })).toContainText("Project");
     await prompt.press("Enter");
-    await prompt.pressSequentially("audit now");
+    await expect(prompt).toHaveValue("/skill:project-skill ");
+    await prompt.fill("/skill:project-skill audit now");
     await composer.getByRole("button", { name: "Run" }).click();
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
     expect(provider.requests.at(-1)).toContain("Project skill instructions.");
