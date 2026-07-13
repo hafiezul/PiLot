@@ -24,6 +24,7 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
   const provider = state?.providers.find(({ id }) => id === providerId);
   const update = (next: ProviderState, notice: string) => {
     setState(next);
+    setProviderId((current) => next.providers.some(({ id }) => id === current) ? current : next.providers.find(({ configured }) => configured)?.id ?? next.providers[0]?.id ?? "");
     setOAuth(undefined);
     setMessage(notice);
     setError("");
@@ -38,12 +39,12 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
 
   if (!state) return <section className="provider-setup" aria-label="Provider authentication"><p role="status">Loading providers…</p></section>;
 
-  const modelCount = state.models.filter((model) => model.provider === providerId).length;
+  const providerModels = state.models.filter((model) => model.provider === providerId);
   return (
     <section className="provider-setup" aria-label="Provider authentication">
       <div className="setup-heading">
         <div><p className="eyebrow">Pi environment</p><h2>Provider authentication</h2></div>
-        <span className="muted">Secrets stay in Pi's credential store.</span>
+        <div className="setup-controls"><span className="muted">Secrets stay in Pi's credential store.</span><button onClick={() => void attempt(() => window.pilot.getProviderState(), "Providers refreshed")}>Refresh providers</button></div>
       </div>
       <ul className="credential-summary" aria-label="Detected credentials">
         {state.providers.filter(({ configured }) => configured).map((item) => <li key={item.id}><span>{item.name}</span><small>{item.sourceLabel}</small></li>)}
@@ -55,15 +56,24 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
         </select>
       </label>
 
-      {provider && <div className="provider-detail">
-        <div><strong>{provider.name}</strong><span className={provider.configured ? "connected" : "muted"}>{provider.sourceLabel ?? "Not configured"}</span><span className="muted">{modelCount} model{modelCount === 1 ? "" : "s"} available</span></div>
-        <div className="actions">
-          <button onClick={() => setEditingKey(true)}>{provider.credentialType === "api_key" ? "Replace API key" : "Add API key"}</button>
-          {provider.credentialType === "api_key" && <button onClick={() => void attempt(() => window.pilot.removeApiKey(provider.id), "API key removed")}>Remove API key</button>}
-          {provider.supportsOAuth && <button onClick={() => void attempt(() => window.pilot.login(provider.id), "Signed in")}>{provider.credentialType === "oauth" ? "Reauthenticate" : "Use subscription"}</button>}
-          {provider.credentialType === "oauth" && <button onClick={() => void attempt(() => window.pilot.logout(provider.id), "Logged out")}>Log out</button>}
+      {provider && <>
+        <div className="provider-detail">
+          <div><strong>{provider.name}</strong><span className={provider.configured ? "connected" : "muted"}>{provider.sourceLabel ?? "Not configured"}</span><span className="muted">{providerModels.length} model{providerModels.length === 1 ? "" : "s"} available</span></div>
+          <div className="actions">
+            <button onClick={() => setEditingKey(true)}>{provider.credentialType === "api_key" ? "Replace API key" : "Add API key"}</button>
+            {provider.credentialType === "api_key" && <button onClick={() => void attempt(() => window.pilot.removeApiKey(provider.id), "API key removed")}>Remove API key</button>}
+            {provider.supportsOAuth && <button onClick={() => void attempt(() => window.pilot.login(provider.id), "Signed in")}>{provider.credentialType === "oauth" ? "Reauthenticate" : "Use subscription"}</button>}
+            {provider.credentialType === "oauth" && <button onClick={() => void attempt(() => window.pilot.logout(provider.id), "Logged out")}>Log out</button>}
+          </div>
         </div>
-      </div>}
+        <section className="model-inspection" aria-labelledby="available-models-title">
+          <h3 id="available-models-title">Available models</h3>
+          {providerModels.length ? <ul aria-labelledby="available-models-title">
+            {providerModels.map((model) => <li key={model.id}><strong>{model.name}</strong><code>{model.id}</code></li>)}
+          </ul> : <p className="muted">No models are available with this provider's current credentials.</p>}
+          <p className="muted task-model-guidance">Switch models from the contextual control in a Task.</p>
+        </section>
+      </>}
 
       {editingKey && provider && <form className="key-form" onSubmit={(event) => {
         event.preventDefault();

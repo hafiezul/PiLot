@@ -1,6 +1,7 @@
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -68,7 +69,9 @@ async function launch(
 
 async function close(app: { browser: Browser; process: ChildProcess }) {
   await app.browser.close();
+  const exit = app.process.exitCode === null ? once(app.process, "exit") : undefined;
   app.process.kill();
+  await exit;
 }
 
 test("launches a sandboxed command center from the canonical Pi environment", async () => {
@@ -137,8 +140,33 @@ test("configures providers on a dedicated settings page without exposing secrets
     await expect(setup).not.toContainText("local-placeholder");
 
     await setup.getByLabel("Provider").selectOption("fixture");
-    await expect(setup).toContainText("1 model available");
+    const models = setup.getByRole("list", { name: "Available models" });
+    await expect(models.getByRole("listitem")).toContainText("Fixture model");
+    await expect(models.getByRole("listitem")).toContainText("fixture-model");
+    await expect(setup).toContainText("Switch models from the contextual control in a Task.");
+
+    await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: "http://127.0.0.1:11434/v1",
+          api: "openai-completions",
+          apiKey: "changed-placeholder",
+          models: [
+            { id: "fixture-model", name: "Fixture model" },
+            { id: "external-model", name: "External model" },
+          ],
+        },
+      },
+    }));
+    const refreshProviders = setup.getByRole("button", { name: "Refresh providers" });
+    await refreshProviders.focus();
+    await refreshProviders.press("Enter");
+    await expect(models.getByRole("listitem")).toHaveCount(2);
+    await expect(models).toContainText("External model");
+    await expect(setup).not.toContainText("changed-placeholder");
+
     await setup.getByLabel("Provider").selectOption("anthropic");
+    await expect(setup.getByRole("button", { name: "Use subscription" })).toBeVisible();
     await setup.getByRole("button", { name: "Replace API key" }).click();
     await setup.getByLabel("API key for Anthropic").fill("replacement-secret");
     await setup.getByRole("button", { name: "Save API key" }).click();
@@ -150,6 +178,16 @@ test("configures providers on a dedicated settings page without exposing secrets
     await setup.getByRole("button", { name: "Remove API key" }).click();
     await expect(setup).toContainText("Environment");
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "auth.json"), "utf8")).anthropic).toBeUndefined();
+
+    await writeFile(path.join(environment.agentDir, "auth.json"), JSON.stringify({
+      anthropic: { type: "oauth", access: "oauth-secret", refresh: "refresh-secret", expires: Date.now() + 60_000 },
+    }));
+    await refreshProviders.press("Enter");
+    await expect(setup).toContainText("Subscription");
+    await expect(setup.getByRole("button", { name: "Reauthenticate" })).toBeVisible();
+    await expect(setup).not.toContainText("oauth-secret");
+    await setup.getByRole("button", { name: "Log out" }).click();
+    await expect(setup).toContainText("Environment");
 
     await app.window.getByRole("button", { name: "Back to command center" }).click();
     await expect(app.window.getByRole("main")).toContainText("Ready to work");

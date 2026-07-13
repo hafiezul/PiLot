@@ -74,7 +74,8 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .general-settings label small { color: #686864; font-size: 12px; }
 .provider-setup { background: #fdfdfc; }
 .setup-heading { display: flex; justify-content: space-between; gap: 24px; align-items: start; margin-bottom: 20px; }
-.setup-heading > span { max-width: 220px; font-size: 12px; text-align: right; }
+.setup-controls { display: flex; align-items: center; gap: 10px; }
+.setup-controls span { max-width: 220px; font-size: 12px; text-align: right; }
 .provider-setup label { display: grid; gap: 6px; color: #686864; font-size: 12px; font-weight: 650; }
 .provider-setup select, .provider-setup input { width: 100%; min-height: 34px; border: 1px solid #c8c8c4; border-radius: 4px; padding: 6px 8px; color: inherit; background: #fff; font: inherit; }
 .credential-summary { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0 0 20px; padding: 0; }
@@ -85,6 +86,13 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .provider-detail span { font-size: 11px; }
 .connected, .success { color: #287c47; }
 .actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 6px; }
+.model-inspection { margin-bottom: 20px; }
+.model-inspection h3 { font-size: 12px; }
+.model-inspection ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid #e3e3df; }
+.model-inspection li { display: flex; justify-content: space-between; gap: 18px; padding: 10px 0; border-bottom: 1px solid #e3e3df; font-size: 12px; }
+.model-inspection code { color: #555651; font-size: 11px; overflow-wrap: anywhere; text-align: right; }
+.model-inspection > .muted { font-size: 12px; }
+.task-model-guidance { margin: 12px 0 0; }
 .key-form, .oauth-flow { margin: 0 0 20px; padding: 14px; background: #f1f1ef; }
 .key-form { display: grid; grid-template-columns: 1fr auto auto; align-items: end; gap: 8px; }
 .oauth-flow p { margin: 7px 0; font-size: 12px; }
@@ -114,7 +122,8 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] .project-list li:first-child, :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover { background: #343532; }
 :root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
 :root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-main, :root[data-appearance="dark"] .provider-setup { color: #e8e8e5; }
-:root[data-appearance="dark"] .general-settings label, :root[data-appearance="dark"] .provider-detail, :root[data-appearance="dark"] .credential-summary li { border-color: #40413d; }
+:root[data-appearance="dark"] .general-settings label, :root[data-appearance="dark"] .provider-detail, :root[data-appearance="dark"] .credential-summary li, :root[data-appearance="dark"] .model-inspection ul, :root[data-appearance="dark"] .model-inspection li { border-color: #40413d; }
+:root[data-appearance="dark"] .model-inspection code { color: #bbbcb7; }
 :root[data-appearance="dark"] .general-settings label small, :root[data-appearance="dark"] .muted, :root[data-appearance="dark"] .readiness li p, :root[data-appearance="dark"] .eyebrow, :root[data-appearance="dark"] .privacy, :root[data-appearance="dark"] .nav-heading, :root[data-appearance="dark"] .tabs button, :root[data-appearance="dark"] dt { color: #aaa9a4; }
 :root[data-appearance="dark"] .account-button, :root[data-appearance="dark"] .provider-setup button, :root[data-appearance="dark"] .provider-setup select, :root[data-appearance="dark"] .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
 :root[data-appearance="dark"] .key-form, :root[data-appearance="dark"] .oauth-flow { background: #2c2d2a; }
@@ -129,7 +138,8 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list li:first-child, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-main, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup { color: #e8e8e5; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-detail, :root:is(:not([data-appearance]), [data-appearance="system"]) .credential-summary li { border-color: #40413d; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-detail, :root:is(:not([data-appearance]), [data-appearance="system"]) .credential-summary li, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection ul, :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection li { border-color: #40413d; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .model-inspection code { color: #bbbcb7; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .general-settings label small, :root:is(:not([data-appearance]), [data-appearance="system"]) .muted, :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness li p, :root:is(:not([data-appearance]), [data-appearance="system"]) .eyebrow, :root:is(:not([data-appearance]), [data-appearance="system"]) .privacy, :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-heading, :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs button, :root:is(:not([data-appearance]), [data-appearance="system"]) dt { color: #aaa9a4; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .account-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup button, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup select, :root:is(:not([data-appearance]), [data-appearance="system"]) .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .key-form, :root:is(:not([data-appearance]), [data-appearance="system"]) .oauth-flow { background: #2c2d2a; }
