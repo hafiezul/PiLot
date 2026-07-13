@@ -138,12 +138,15 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .lifecycle-evidence header, .lifecycle-evidence summary { display: flex; justify-content: space-between; gap: 20px; }
 .lifecycle-evidence header span, .lifecycle-evidence summary span { color: #686864; font-size: 11px; }
 .lifecycle-evidence p { margin: 6px 0; line-height: 1.5; }
-.lifecycle-evidence button { border: 1px solid #b98c8c; border-radius: 5px; padding: 5px 8px; color: #912f2f; background: transparent; cursor: pointer; }
 .lifecycle-evidence.failed strong, .lifecycle-evidence.failed summary span { color: #a12c2c; }
 .compaction-evidence > div { padding-left: 18px; }
 .compaction-evidence pre { max-height: 180px; margin: 8px 0; padding: 10px; background: #efefed; overflow: auto; font: 11px/1.55 ui-monospace, "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
-.abort-button { margin-top: 8px; border: 1px solid #b98c8c; border-radius: 5px; padding: 6px 10px; color: #912f2f; background: transparent; cursor: pointer; font-size: 12px; }
-.task-composer { position: sticky; bottom: 0; display: grid; gap: 7px; padding: 14px; border: 1px solid #c8c8c4; border-radius: 7px; background: #fdfdfc; }
+.composer-dock { position: sticky; bottom: 0; z-index: 1; display: grid; justify-items: end; gap: 6px; }
+.jump-latest { display: grid; place-items: center; width: 28px; height: 28px; margin-right: 2px; padding: 0; border: 1px solid #9d9d98; border-radius: 50%; color: #4f504c; background: #fdfdfc; cursor: pointer; }
+.jump-latest svg { width: 16px; height: 16px; fill: none; stroke: currentcolor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.jump-latest:hover { filter: brightness(.92); }
+.jump-latest:active { transform: translateY(1px); }
+.task-composer { display: grid; width: 100%; gap: 7px; padding: 14px; border: 1px solid #c8c8c4; border-radius: 7px; background: #fdfdfc; }
 .task-composer > label { color: #686864; font-size: 11px; font-weight: 650; }
 .image-drop-feedback { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #1668d4; border-radius: 7px; color: #145fbf; background: #fdfdfc; font-size: 12px; font-weight: 650; pointer-events: none; }
 .image-drop-feedback span { font-size: 18px; font-weight: 400; }
@@ -184,7 +187,7 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .composer-controls { display: flex; justify-content: space-between; align-items: end; gap: 8px; }
 .composer-leading-controls, .composer-submit-controls { display: flex; align-items: end; min-width: 0; gap: 5px; }
 .composer-submit-controls { flex: none; }
-.composer-controls button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #f7f7f6; font-size: 12px; }
+.composer-controls button { min-height: 32px; border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #f7f7f6; font-size: 12px; }
 .composer-controls .attachment-trigger { display: grid; place-items: center; width: 32px; height: 32px; flex: none; padding: 0; color: #20211f; background: #fdfdfc; cursor: pointer; }
 .attachment-trigger svg { width: 16px; height: 16px; fill: none; stroke: currentcolor; stroke-width: 1.45; stroke-linecap: round; stroke-linejoin: round; }
 .composer-controls .attachment-trigger:hover { color: #20211f; background: #ededeb; }
@@ -226,8 +229,14 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .model-fallback { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 6px; color: #805814; font-size: 11px; }
 .model-fallback span { max-width: 48ch; }
 .model-fallback button { padding: 2px 4px; border: 0; color: #145fbf; background: transparent; cursor: pointer; text-decoration: underline; white-space: nowrap; }
-.composer-controls .run-button { border-color: #1668d4; color: #fff; background: #1668d4; cursor: pointer; }
-.composer-controls button:disabled { cursor: default; opacity: .58; }
+.composer-controls .composer-action { display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; flex: none; border-radius: 50%; padding: 0; cursor: pointer; }
+.composer-action svg { width: 16px; height: 16px; fill: none; stroke: currentcolor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.composer-controls .send-action { border-color: #1668d4; color: #fff; background: #1668d4; }
+.composer-controls .stop-action { border-color: #a94d4d; color: #912f2f; background: #fdfdfc; }
+.composer-controls .stop-action rect { fill: currentcolor; stroke: none; }
+.composer-controls .composer-action:hover { filter: brightness(.9); }
+.composer-controls .composer-action:active { transform: translateY(1px); }
+.composer-controls button:disabled { cursor: not-allowed; opacity: .52; filter: grayscale(1); }
 .project-access-dialog { width: min(680px, calc(100% - 32px)); max-height: calc(100% - 48px); margin: auto; padding: 24px; border: 1px solid #c8c8c4; border-radius: 8px; color: inherit; background: #f7f7f6; overflow: auto; }
 .project-access-dialog::backdrop { background: rgb(20 20 19 / 52%); }
 .dialog-close { position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; font-size: 18px; }
@@ -338,7 +347,9 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] .project-list button:hover, :root[data-appearance="dark"] .project-list button[aria-current="page"], :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover, :root[data-appearance="dark"] .settings-button:hover { background: #343532; }
 :root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
 :root[data-appearance="dark"] .project-access-dialog { border-color: #50514d; background: #242523; }
-:root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu, :root[data-appearance="dark"] .new-task-button, :root[data-appearance="dark"] .task-composer, :root[data-appearance="dark"] .composer-controls button { border-color: #50514d; background: #30312e; }
+:root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu, :root[data-appearance="dark"] .new-task-button, :root[data-appearance="dark"] .task-composer, :root[data-appearance="dark"] .composer-controls button, :root[data-appearance="dark"] .jump-latest { border-color: #50514d; background: #30312e; }
+:root[data-appearance="dark"] .composer-controls .send-action { border-color: #438eea; background: #1668d4; }
+:root[data-appearance="dark"] .composer-controls .stop-action { border-color: #c46c6c; color: #ff9b9b; background: #30312e; }
 :root[data-appearance="dark"] .model-search input { border-color: #50514d; color: #e8e8e5; background: #242523; }
 :root[data-appearance="dark"] .model-picker-popover, :root[data-appearance="dark"] .composer-completions { border-color: #50514d; color: #e8e8e5; background: #30312e; }
 :root[data-appearance="dark"] .composer-completions button:hover, :root[data-appearance="dark"] .composer-completions button[aria-selected="true"] { background: #3a3b38; }
@@ -387,7 +398,9 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-button:hover { background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access-dialog { border-color: #50514d; background: #242523; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu, :root:is(:not([data-appearance]), [data-appearance="system"]) .new-task-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-composer, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls button { border-color: #50514d; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu, :root:is(:not([data-appearance]), [data-appearance="system"]) .new-task-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-composer, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls button, :root:is(:not([data-appearance]), [data-appearance="system"]) .jump-latest { border-color: #50514d; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .send-action { border-color: #438eea; background: #1668d4; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .stop-action { border-color: #c46c6c; color: #ff9b9b; background: #30312e; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .model-search input { border-color: #50514d; color: #e8e8e5; background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .model-picker-popover, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-completions { border-color: #50514d; color: #e8e8e5; background: #30312e; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-completions button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-completions button[aria-selected="true"] { background: #3a3b38; }

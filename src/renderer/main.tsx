@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useId, useRef, useState } from "react";
+import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
@@ -239,13 +239,12 @@ function ToolBlock({ item }: { item: ToolEvidence }) {
   </details>;
 }
 
-function RetryBlock({ item, onAbort }: { item: RetryEvidence; onAbort(): void }) {
+function RetryBlock({ item }: { item: RetryEvidence }) {
   const waiting = item.status === "waiting";
   return <section className={`lifecycle-evidence retry-evidence ${item.status}`} aria-label={`Provider retry ${item.status}`}>
     <header><strong>{waiting ? "Retrying" : item.status === "succeeded" ? "Retry succeeded" : "Retry failed"}</strong><span>{waiting ? "Waiting" : item.status === "succeeded" ? "Succeeded" : "Failed"}</span></header>
     <p>Attempt {item.attempt} of {item.maxAttempts} · retrying in {item.delayMs < 1000 ? `${item.delayMs} ms` : `${item.delayMs / 1000} s`}</p>
     <p>{item.finalError ?? item.error}</p>
-    {waiting && <button type="button" onClick={onAbort}>Abort retry</button>}
   </section>;
 }
 
@@ -264,7 +263,7 @@ function CompactionBlock({ item }: { item: CompactionEvidence }) {
   </details>;
 }
 
-function RunBlock({ run, index, expandThinking, onAbortRetry }: { run: RunEvidence; index: number; expandThinking: boolean; onAbortRetry(): void }) {
+function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: number; expandThinking: boolean }) {
   const status = run.status[0].toUpperCase() + run.status.slice(1);
   const title = run.input.kind === "command" ? "Inline command" : run.input.kind === "compaction" ? "Context compaction" : "Agent run";
   return <article className={`run-evidence ${run.status}`} aria-labelledby={`run-${run.id}`}>
@@ -283,7 +282,7 @@ function RunBlock({ run, index, expandThinking, onAbortRetry }: { run: RunEviden
         </div>;
         if (item.kind === "tool") return <ToolBlock key={item.id} item={item} />;
         if (item.kind === "command") return <CommandBlock key={item.id} item={item} />;
-        if (item.kind === "retry") return <RetryBlock key={item.id} item={item} onAbort={onAbortRetry} />;
+        if (item.kind === "retry") return <RetryBlock key={item.id} item={item} />;
         if (item.kind === "compaction") return <CompactionBlock key={item.id} item={item} />;
         return <details key={item.id} className={`run-notice ${item.tone}`} open>
           <summary>{item.title}</summary>{item.detail && <p>{item.detail}</p>}
@@ -556,8 +555,13 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   const [imageDragActive, setImageDragActive] = useState(false);
   const [attachingImages, setAttachingImages] = useState(false);
   const [liveMode, setLiveMode] = useState<LiveInputMode>("steer");
+  const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [error, setError] = useState("");
   const [attachmentError, setAttachmentError] = useState("");
+  const taskPage = useRef<HTMLDivElement>(null);
+  const followingLatest = useRef(true);
+  const positionedTask = useRef("");
+  const lastScrollTop = useRef(0);
   const promptInput = useRef<HTMLTextAreaElement>(null);
   const imagePicker = useRef<HTMLInputElement>(null);
   const imageDragDepth = useRef(0);
@@ -609,6 +613,56 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   }, [project.path, task.path]);
 
   useEffect(() => setLiveMode("steer"), [timeline?.activeRunId]);
+
+  useEffect(() => {
+    const scroller = taskPage.current?.closest("main");
+    if (!scroller) return;
+    followingLatest.current = true;
+    lastScrollTop.current = scroller.scrollTop;
+    setShowJumpLatest(false);
+    const handleScroll = () => {
+      const nearLatest = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 32;
+      if (nearLatest) {
+        followingLatest.current = true;
+        setShowJumpLatest(false);
+      } else if (scroller.scrollTop < lastScrollTop.current) {
+        followingLatest.current = false;
+      }
+      lastScrollTop.current = scroller.scrollTop;
+    };
+    scroller.addEventListener("scroll", handleScroll, { passive: true });
+    return () => scroller.removeEventListener("scroll", handleScroll);
+  }, [task.path]);
+
+  const latestRunEvidence = timeline?.runs.at(-1);
+  const latestEvidenceKey = latestRunEvidence ? JSON.stringify(latestRunEvidence) : "";
+
+  useLayoutEffect(() => {
+    if (!timeline) return;
+    const scroller = taskPage.current?.closest("main");
+    if (!scroller) return;
+    const initialPosition = positionedTask.current !== task.path;
+    positionedTask.current = task.path;
+    if (initialPosition || followingLatest.current) {
+      scroller.scrollTop = scroller.scrollHeight;
+      lastScrollTop.current = scroller.scrollTop;
+      followingLatest.current = true;
+      setShowJumpLatest(false);
+    } else if (scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 32) {
+      setShowJumpLatest(true);
+    }
+  }, [task.path, latestEvidenceKey]);
+
+  const jumpToLatest = () => {
+    const scroller = taskPage.current?.closest("main");
+    if (!scroller) return;
+    followingLatest.current = true;
+    setShowJumpLatest(false);
+    scroller.scrollTo({
+      top: scroller.scrollHeight,
+      behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  };
 
   const activeRun = timeline?.runs.find(({ id }) => id === timeline.activeRunId);
   const active = Boolean(activeRun);
@@ -684,7 +738,7 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   };
   const queues = timeline?.queues ?? { steering: [], followUp: [] };
 
-  return <div className="task-page">
+  return <div ref={taskPage} className="task-page">
     <header className="topbar task-topbar">
       <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">Local execution location</span></div>
       <button className="new-task-button" onClick={onCreate}>New Task</button>
@@ -694,11 +748,14 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
         setError("");
         void window.pilot.compactTask(project.path, task.path).then(refreshDetails).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
       }}>Compact context</button></div></div>
-      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} onAbortRetry={() => void window.pilot.abortRetry(task.path)} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
-      {active && <button className="abort-button" onClick={() => void window.pilot.abortTask(task.path)}>Abort</button>}
+      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
-    <form className="task-composer" aria-label="Task composer" onDragEnter={(event) => {
+    <div className="composer-dock">
+      {showJumpLatest && <button type="button" className="jump-latest" aria-label="Jump to latest Run evidence" title="Jump to latest" onClick={jumpToLatest}>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 6.25 3.25 3.25 3.25-3.25" /></svg>
+      </button>}
+      <form className="task-composer" aria-label="Task composer" onDragEnter={(event) => {
       if (active || !event.dataTransfer.types.includes("Files")) return;
       event.preventDefault();
       imageDragDepth.current += 1;
@@ -796,10 +853,18 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
             </button>
             <span id={imageHelpId} className="visually-hidden">Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each</span>
           </>}
-          <button type="submit" className="run-button" disabled={!draft.trim() || (active && !liveReady)}>{live ? "Queue input" : "Run"}</button>
+          {active && !draft.trim()
+            ? <button type="button" className="composer-action stop-action" aria-label="Stop Run" title="Stop Run" onClick={() => void window.pilot.abortTask(task.path)}>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="6" height="6" rx="1" /></svg>
+            </button>
+            : <button type="submit" className="composer-action send-action" aria-label="Send" title="Send" disabled={!draft.trim() || (active && !liveReady)}>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12V4M4.75 7.25 8 4l3.25 3.25" /></svg>
+            </button>}
+
         </div>
       </div>
-    </form>
+      </form>
+    </div>
   </div>;
 }
 

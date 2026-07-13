@@ -583,6 +583,7 @@ export class LocalRunCoordinator {
       this.emit(active.state);
       active.state = { ...active.state, recoveredInput: undefined };
     }
+    active.session?.abortRetry();
     active.session?.abortBash();
     active.session?.abortCompaction();
     await active.session?.abort();

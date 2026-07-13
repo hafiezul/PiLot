@@ -125,9 +125,18 @@ async function deterministicProvider(root: string) {
         id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [choice],
       })}\n\n`);
       if (latestUser.startsWith("<conversation>")) {
-        chunk({ index: 0, delta: { role: "assistant", content: "Compaction summary." }, finish_reason: null });
-        chunk({ index: 0, delta: {}, finish_reason: "stop" });
-        response.end("data: [DONE]\n\n");
+        const finishCompaction = () => {
+          if (response.destroyed) return;
+          chunk({ index: 0, delta: { role: "assistant", content: "Compaction summary." }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+          response.end("data: [DONE]\n\n");
+        };
+        if (latestUser.includes("prepare stop compaction")) {
+          const timer = setTimeout(finishCompaction, 5_000);
+          response.once("close", () => clearTimeout(timer));
+        } else {
+          finishCompaction();
+        }
         return;
       }
       if (latestUser === "two retry episodes") {
@@ -332,7 +341,7 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     await prompt.press("Enter");
     await expect(prompt).toHaveValue("/project-template ");
     await prompt.fill("/project-template widget");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
     expect(provider.requests.at(-1)).toContain("Project template says widget.");
 
@@ -342,7 +351,7 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     await prompt.press("Enter");
     await expect(prompt).toHaveValue("/skill:project-skill ");
     await prompt.fill("/skill:project-skill audit now");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
     expect(provider.requests.at(-1)).toContain("Project skill instructions.");
     expect(provider.requests.at(-1)).toContain("audit now");
@@ -382,7 +391,7 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     await expect(composer.getByRole("button", { name: "Attach images" })).toHaveAccessibleDescription("Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each");
 
     await prompt.fill("Inspect the attached images");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect.poll(() => provider.requests.length).toBe(3);
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
     expect(provider.requests.at(-1)).toContain("data:image/png;base64");
@@ -430,7 +439,11 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await modelControl.focus();
     await expect(modelControl).toBeFocused();
     await composer.getByRole("combobox", { name: "Prompt" }).fill("Reply with a deterministic greeting");
-    await composer.getByRole("button", { name: "Run" }).click();
+    const send = composer.getByRole("button", { name: "Send" });
+    await expect(send).toHaveAttribute("title", "Send");
+    await expect.poll(() => composer.locator(".composer-controls button:visible").evaluateAll((buttons) => buttons.map((button) => getComputedStyle(button).height))).toEqual(["32px", "32px", "32px", "32px"]);
+    await expect(send.locator("svg")).toBeVisible();
+    await send.click();
     const run = app.window.getByRole("region", { name: "Run timeline" });
     await expect(run).toContainText("Streaming ");
     await expect(run).toContainText("Running");
@@ -452,31 +465,44 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await app.window.getByRole("button", { name: "New Task" }).click();
     const abortComposer = app.window.getByRole("form", { name: "Task composer" });
     await abortComposer.getByRole("combobox", { name: "Prompt" }).fill("run abort tool");
-    await abortComposer.getByRole("button", { name: "Run" }).click();
+    await abortComposer.getByRole("button", { name: "Send" }).click();
     const abortRun = app.window.getByRole("region", { name: "Run timeline" });
     await expect(abortRun.locator('details[aria-label="bash tool, running"]')).toBeVisible();
-    await abortRun.getByRole("button", { name: "Abort" }).click();
+    const stopToolRun = abortComposer.getByRole("button", { name: "Stop Run" });
+    await expect(stopToolRun).toHaveAttribute("title", "Stop Run");
+    await expect(stopToolRun.locator("svg")).toBeVisible();
+    await stopToolRun.click();
     await expect(abortRun).toContainText("Aborted");
+    await expect(abortRun.getByRole("button", { name: /Abort/ })).toHaveCount(0);
     await expect.poll(() => readFile(provider.started, "utf8").catch(() => "")).toBe("started");
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(await readFile(provider.finished, "utf8").catch(() => "")).toBe("");
 
     await app.window.getByRole("button", { name: "New Task" }).click();
+    const commandComposer = app.window.getByRole("form", { name: "Task composer" });
+    await commandComposer.getByRole("combobox", { name: "Prompt" }).fill("!sleep 5");
+    await commandComposer.getByRole("button", { name: "Send" }).click();
+    const commandRun = app.window.getByRole("region", { name: "Run timeline" });
+    await expect(commandRun.getByRole("region", { name: "Command: sleep 5" })).toContainText("Running");
+    await commandComposer.getByRole("button", { name: "Stop Run" }).click();
+    await expect(commandRun).toContainText("Aborted");
+
+    await app.window.getByRole("button", { name: "New Task" }).click();
     const modelComposer = app.window.getByRole("form", { name: "Task composer" });
     await modelComposer.getByRole("combobox", { name: "Prompt" }).fill("abort model");
-    await modelComposer.getByRole("button", { name: "Run" }).click();
+    await modelComposer.getByRole("button", { name: "Send" }).click();
     const modelRun = app.window.getByRole("region", { name: "Run timeline" });
     await expect(modelRun).toContainText("Still streaming");
-    await modelRun.getByRole("button", { name: "Abort" }).click();
+    await modelComposer.getByRole("button", { name: "Stop Run" }).click();
     await expect(modelRun).toContainText("Aborted");
     await expect.poll(() => readFile(provider.modelStopped, "utf8").catch(() => "")).toBe("stopped");
 
     const files = await readdir(directory);
-    expect(files.filter((file) => file.endsWith(".jsonl"))).toHaveLength(3);
+    expect(files.filter((file) => file.endsWith(".jsonl"))).toHaveLength(4);
     const outcomes = await Promise.all(files.filter((file) => file.endsWith(".jsonl")).map(async (file) =>
       (await readFile(path.join(directory, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
         .find((entry) => entry.customType === "pilot.run")?.data.outcome));
-    expect(outcomes.sort()).toEqual(["aborted", "aborted", "settled"]);
+    expect(outcomes.sort()).toEqual(["aborted", "aborted", "aborted", "settled"]);
   } finally {
     await close(app);
     await provider.close();
@@ -516,32 +542,32 @@ test("surfaces retry and compaction lifecycles through the Electron boundary", a
     const timeline = app.window.getByRole("region", { name: "Run timeline" });
 
     await prompt.fill("retry then succeed");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(timeline).toContainText("Retrying");
     await expect(timeline).toContainText("Attempt 1 of 2 · retrying in 500 ms");
     await expect(timeline).toContainText("Retry succeeded");
     await expect(timeline).toContainText("Attempt 2 of 2");
     await expect(timeline).toContainText("Retry recovered.");
     await expect(timeline.getByRole("article").last()).toContainText("Settled");
-    await expect(timeline.getByRole("article").last().getByRole("button", { name: "Abort retry" })).toHaveCount(0);
+    await expect(timeline.getByRole("button", { name: /Abort/ })).toHaveCount(0);
 
     await prompt.fill("two retry episodes");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     const repeatedRetries = timeline.getByRole("article").last();
     await expect(repeatedRetries).toContainText("Both retry episodes recovered.");
     await expect(repeatedRetries.getByRole("region", { name: "Provider retry succeeded" })).toHaveCount(2);
-    await expect(repeatedRetries.getByRole("button", { name: "Abort retry" })).toHaveCount(0);
+    await expect(repeatedRetries.getByRole("button", { name: /Abort/ })).toHaveCount(0);
 
     await prompt.fill("abort pending retry");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     const retryingRun = timeline.getByRole("article").last();
-    await expect(retryingRun.getByRole("button", { name: "Abort retry" })).toBeVisible();
-    await retryingRun.getByRole("button", { name: "Abort retry" }).click();
-    await expect(retryingRun).toContainText("Retry cancelled");
-    await expect(retryingRun).toContainText("Failed");
+    await expect(retryingRun).toContainText("Retrying");
+    await expect(retryingRun.getByRole("button", { name: /Abort/ })).toHaveCount(0);
+    await composer.getByRole("button", { name: "Stop Run" }).click();
+    await expect(retryingRun).toContainText("Aborted");
 
     await prompt.fill("Task remains usable");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(timeline.getByRole("article").last()).toContainText("Settled");
 
     await app.window.getByRole("button", { name: "Compact context" }).click();
@@ -557,19 +583,28 @@ test("surfaces retry and compaction lifecycles through the Electron boundary", a
     await expect(composer.getByRole("combobox", { name: "Prompt" })).toBeEnabled();
 
     await prompt.fill("cross compaction threshold");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     const threshold = timeline.getByRole("article").last();
     await expect(threshold).toContainText("Threshold compaction");
     await expect(threshold).toContainText("Succeeded");
     await expect(threshold).toContainText("Settled");
 
     await prompt.fill("recover overflow");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     const overflow = timeline.getByRole("article").last();
     await expect(overflow).toContainText("Overflow recovery");
     await expect(overflow).toContainText("Succeeded");
     await expect(overflow).toContainText("Overflow recovered.");
     await expect(overflow).toContainText("Settled");
+
+    await prompt.fill("prepare stop compaction");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+    await app.window.getByRole("button", { name: "Compact context" }).click();
+    const stoppedCompaction = timeline.getByRole("article").last();
+    await expect(stoppedCompaction).toContainText("Manual compaction");
+    await composer.getByRole("button", { name: "Stop Run" }).click();
+    await expect(stoppedCompaction).toContainText("Aborted");
 
     const directory = sessionDirectory(environment.agentDir, project);
     const file = path.join(directory, (await readdir(directory)).find((value) => value.endsWith(".jsonl"))!);
@@ -581,6 +616,7 @@ test("surfaces retry and compaction lifecycles through the Electron boundary", a
       "Task remains usable",
       "cross compaction threshold",
       "recover overflow",
+      "prepare stop compaction",
     ]);
     expect(saved.filter((entry) => entry.type === "compaction")).toHaveLength(3);
   } finally {
@@ -617,7 +653,7 @@ test("steers, follows up, shows live queues, and restores queued input on abort"
     const composer = app.window.getByRole("form", { name: "Task composer" });
     const prompt = composer.getByRole("combobox", { name: "Prompt" });
     await prompt.fill("start live queue check");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(app.window.locator('details[aria-label="bash tool, running"]')).toBeVisible();
 
     const liveMode = composer.getByRole("radiogroup", { name: "Live input mode" });
@@ -630,7 +666,9 @@ test("steers, follows up, shows live queues, and restores queued input on abort"
 
     await liveMode.getByRole("radio", { name: "Follow-up" }).check();
     await prompt.fill("follow up with pointer");
-    await composer.getByRole("button", { name: "Queue input" }).click();
+    await expect(composer.getByRole("button", { name: "Send" })).toBeVisible();
+    await expect(composer.getByRole("button", { name: "Stop Run" })).toHaveCount(0);
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(composer.getByRole("list", { name: "Pending follow-ups" })).toContainText("follow up with pointer");
     await expect(app.window.getByRole("region", { name: "Run timeline" })).toContainText("Follow-up received.");
     await expect.poll(() => provider.requests.map(latestUserText)).toEqual([
@@ -640,14 +678,14 @@ test("steers, follows up, shows live queues, and restores queued input on abort"
     ]);
 
     await prompt.fill("start abort queue check");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(app.window.locator('details[aria-label="bash tool, running"]')).toBeVisible();
     await prompt.fill("recover queued follow-up");
     await prompt.press("Alt+Enter");
     await expect(composer.getByRole("list", { name: "Pending follow-ups" })).toContainText("recover queued follow-up");
-    await prompt.fill("keep unsent draft");
-    await app.window.getByRole("button", { name: "Abort" }).click();
-    await expect(prompt).toHaveValue("recover queued follow-up\n\nkeep unsent draft");
+    await prompt.fill("");
+    await composer.getByRole("button", { name: "Stop Run" }).click();
+    await expect(prompt).toHaveValue("recover queued follow-up");
   } finally {
     await close(app);
     await provider.close();
@@ -683,21 +721,24 @@ test("renders Run evidence, disclosures, and inline commands through the Electro
     const timeline = app.window.getByRole("region", { name: "Run timeline" });
 
     await prompt.fill("!!printf hidden-command-output");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     const hiddenCommand = timeline.getByRole("region", { name: "Command: printf hidden-command-output" });
     await expect(hiddenCommand).toContainText("hidden-command-output");
     await expect(hiddenCommand).toContainText("Local only");
 
     await prompt.fill("!printf visible-command-output");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     const visibleCommand = timeline.getByRole("region", { name: "Command: printf visible-command-output" });
     await expect(visibleCommand).toContainText("visible-command-output");
     await expect(visibleCommand).toContainText("Included in next Pi context");
 
     await prompt.fill("show evidence");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(timeline).toContainText("Evidence complete.");
     await expect(timeline.getByRole("article")).toHaveCount(3);
+    const workspace = app.window.locator(".workspace-main");
+    const distanceFromLatest = () => workspace.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    await expect.poll(distanceFromLatest).toBeLessThanOrEqual(1);
     const thinking = timeline.locator('details[aria-label="Thinking"]');
     await expect(thinking).not.toHaveAttribute("open", "");
     await thinking.locator("summary").focus();
@@ -716,12 +757,36 @@ test("renders Run evidence, disclosures, and inline commands through the Electro
     expect(modelRequest).toContain("visible-command-output");
     expect(modelRequest).not.toContain("hidden-command-output");
 
+    await prompt.fill("start live queue check");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.locator('details[aria-label="bash tool, running"]')).toBeVisible();
+    await workspace.evaluate((element) => { element.scrollTop = 0; });
+    await expect.poll(() => workspace.evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(app.window.getByRole("button", { name: "Jump to latest Run evidence" })).toHaveCount(0);
+    await prompt.fill("steer with keyboard");
+    await prompt.press("Enter");
+    await expect(composer.getByRole("list", { name: "Pending steering" })).toContainText("steer with keyboard");
+    await expect(app.window.getByRole("button", { name: "Jump to latest Run evidence" })).toHaveCount(0);
+    const jumpToLatest = app.window.getByRole("button", { name: "Jump to latest Run evidence" });
+    await expect(jumpToLatest).toBeVisible();
+    await expect.poll(() => workspace.evaluate((element) => element.scrollTop)).toBe(0);
+    await jumpToLatest.click();
+    await expect.poll(distanceFromLatest).toBeLessThanOrEqual(1);
+    await expect(timeline).toContainText("Steering received.");
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+
     await prompt.fill("show failure");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(timeline).toContainText("Failure recorded.");
     const failedTool = timeline.locator('details[aria-label="bash tool, failed"]');
     await expect(failedTool).toHaveAttribute("open", "");
     await expect(failedTool).toContainText("Command exited with code 7");
+
+    await workspace.evaluate((element) => { element.scrollTop = 0; });
+    await app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("button", { name: /fixture-project/ }).click();
+    await app.window.getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button").first().click();
+    await expect(timeline.getByRole("article")).toHaveCount(6);
+    await expect.poll(distanceFromLatest).toBeLessThanOrEqual(1);
 
     await app.window.getByRole("button", { name: "Settings" }).click();
     await app.window.getByRole("checkbox", { name: "Expand thinking by default" }).check();
@@ -848,7 +913,7 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
 
     const prompt = composer.getByRole("combobox", { name: "Prompt" });
     await prompt.fill("model controls stats");
-    await composer.getByRole("button", { name: "Run" }).click();
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect(first.window.getByRole("region", { name: "Run timeline" })).toContainText("Usage recorded.");
     await expect(first.window.getByRole("region", { name: "Task details" })).toContainText("150 / 1,000");
     await expect(first.window.getByRole("region", { name: "Task details" })).toContainText("$0.00019");
