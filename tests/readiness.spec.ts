@@ -1,5 +1,5 @@
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
@@ -35,13 +35,17 @@ async function availablePort(): Promise<number> {
   });
 }
 
-async function launch(agentDir: string, withoutAuth = false): Promise<{ browser: Browser; process: ChildProcess; window: Page }> {
+async function launch(
+  agentDir: string,
+  withoutAuth = false,
+  extraEnv: Record<string, string> = {},
+): Promise<{ browser: Browser; process: ChildProcess; window: Page }> {
   const port = await availablePort();
   const env = withoutAuth
     ? Object.fromEntries(Object.entries(process.env).filter(([name]) => !/(_API_KEY|_TOKEN|_CREDENTIALS?)$/.test(name)))
     : process.env;
   const child = spawn(electronPath, [appPath, `--pilot-debug-port=${port}`], {
-    env: { ...env, PI_CODING_AGENT_DIR: agentDir },
+    env: { ...env, ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
     stdio: "ignore",
   });
   const endpoint = `http://127.0.0.1:${port}`;
@@ -97,6 +101,61 @@ test("launches a sandboxed command center from the canonical Pi environment", as
       process: "undefined",
       require: "undefined",
     });
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("configures providers and persists the selected model in the shared Pi environment", async () => {
+  const environment = await fixture();
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: "http://127.0.0.1:11434/v1",
+        api: "openai-completions",
+        apiKey: "local-placeholder",
+        models: [{ id: "fixture-model", name: "Fixture model" }],
+      },
+    },
+  }));
+  let app = await launch(environment.agentDir, false, { OPENAI_API_KEY: "fixture-env-secret" });
+
+  try {
+    await app.window.getByRole("button", { name: "Providers and models" }).click();
+    const setup = app.window.getByRole("region", { name: "Providers and models" });
+    await expect(setup).toContainText("Anthropic");
+    await expect(setup).toContainText("Stored API key");
+    await expect(setup).toContainText("Environment");
+    await expect(setup).toContainText("models.json");
+    await expect(setup).not.toContainText("fixture-secret");
+    await expect(setup).not.toContainText("fixture-env-secret");
+    await expect(setup).not.toContainText("local-placeholder");
+
+    await setup.getByLabel("Model").selectOption("fixture/fixture-model");
+    await expect(setup).toContainText("Model saved");
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8"))).toMatchObject({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+    });
+
+    await setup.getByLabel("Provider").selectOption("anthropic");
+    await setup.getByRole("button", { name: "Replace API key" }).click();
+    await setup.getByLabel("API key for Anthropic").fill("replacement-secret");
+    await setup.getByRole("button", { name: "Save API key" }).click();
+    await expect(setup).not.toContainText("replacement-secret");
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "auth.json"), "utf8"))).toMatchObject({
+      anthropic: { type: "api_key", key: "replacement-secret" },
+    });
+
+    await setup.getByRole("button", { name: "Remove API key" }).click();
+    await expect(setup).toContainText("Environment");
+    expect(JSON.parse(await readFile(path.join(environment.agentDir, "auth.json"), "utf8")).anthropic).toBeUndefined();
+
+    await close(app);
+    app = await launch(environment.agentDir, false, { OPENAI_API_KEY: "fixture-env-secret" });
+    await app.window.getByRole("button", { name: "Providers and models" }).click();
+    await expect(app.window.getByLabel("Model", { exact: true })).toHaveValue("fixture/fixture-model");
   } finally {
     await close(app);
     await rm(environment.root, { recursive: true, force: true });

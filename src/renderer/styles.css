@@ -31,6 +31,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px s
 .nav-footer span { display: inline-block; min-width: 20px; font-size: 11px; }
 main { min-height: 0; overflow-y: auto; background: #f7f7f6; padding: 32px 42px; }
 .topbar { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 72px; }
+.top-actions { display: flex; align-items: center; gap: 14px; }
+.account-button, .provider-setup button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #fdfdfc; cursor: pointer; }
 h1 { margin: 5px 0 0; font-size: 22px; line-height: 1.25; letter-spacing: -.02em; }
 h2 { margin: 5px 0 8px; font-size: 20px; letter-spacing: -.015em; }
 h3 { margin: 0 0 5px; font-size: 14px; }
@@ -49,6 +51,26 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .readiness li p { margin: 0; color: #62625e; font-size: 12px; line-height: 1.5; }
 .gap-mark { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid #9b702c; border-radius: 50%; color: #805814; font-size: 11px; font-weight: 800; }
 .loading { color: #686864; text-align: center; }
+.provider-setup { max-width: 620px; margin: 0 auto; padding: 24px; border: 1px solid #d8d8d4; background: #fdfdfc; }
+.setup-heading { display: flex; justify-content: space-between; gap: 24px; align-items: start; margin-bottom: 20px; }
+.setup-heading > span { max-width: 220px; font-size: 12px; text-align: right; }
+.provider-setup label { display: grid; gap: 6px; color: #686864; font-size: 12px; font-weight: 650; }
+.provider-setup select, .provider-setup input { width: 100%; min-height: 34px; border: 1px solid #c8c8c4; border-radius: 4px; padding: 6px 8px; color: inherit; background: #fff; font: inherit; }
+.credential-summary { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0 0 20px; padding: 0; }
+.credential-summary li { display: flex; gap: 6px; padding: 5px 7px; border: 1px solid #dededb; border-radius: 4px; font-size: 11px; }
+.credential-summary small { color: #686864; }
+.provider-detail { display: flex; justify-content: space-between; gap: 18px; margin: 10px 0 20px; padding: 12px 0; border-bottom: 1px solid #e3e3df; }
+.provider-detail > div:first-child { display: grid; gap: 4px; font-size: 13px; }
+.provider-detail span { font-size: 11px; }
+.connected, .success { color: #287c47; }
+.actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 6px; }
+.key-form, .oauth-flow { margin: 0 0 20px; padding: 14px; background: #f1f1ef; }
+.key-form { display: grid; grid-template-columns: 1fr auto auto; align-items: end; gap: 8px; }
+.oauth-flow p { margin: 7px 0; font-size: 12px; }
+.oauth-flow code { display: inline-block; margin-bottom: 10px; font-size: 18px; letter-spacing: .08em; }
+.oauth-flow button { margin: 6px 6px 0 0; }
+.provider-setup > .success, .provider-setup > .error { margin-bottom: 0; font-size: 12px; }
+.error { color: #a12c2c; }
 .inspector { border-left: 1px solid #d7d7d4; }
 .tabs { height: 48px; gap: 16px; padding: 0 16px; border-bottom: 1px solid #d7d7d4; }
 .tabs button { height: 100%; padding: 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #666762; font-size: 12px; }
@@ -70,7 +92,10 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   main { background: #1d1e1c; }
   .navigation, .inspector, .tabs, dl div, .nav-footer { border-color: #393a37; }
   .project-list li:first-child { background: #343532; }
-  .readiness { border-color: #40413d; background: #242523; }
+  .readiness, .provider-setup { border-color: #40413d; background: #242523; }
+  .account-button, .provider-setup button, .provider-setup select, .provider-setup input { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  .provider-detail, .credential-summary li { border-color: #40413d; }
+  .key-form, .oauth-flow { background: #2c2d2a; }
   .readiness ol, .readiness li { border-color: #3b3c39; }
   .muted, .readiness li p, .eyebrow, .privacy, .nav-heading, .tabs button, dt { color: #aaa9a4; }
   .tabs button[aria-selected="true"] { border-bottom-color: #ddd; color: #eee; }
