@@ -30,6 +30,7 @@ function assertDesktopPrompt(text: string) {
 
 type ActiveRun = {
   project: string;
+  executionPath: string;
   state: TaskRunState;
   runId: string;
   session?: AgentSession;
@@ -113,6 +114,15 @@ function toolSummary(name: string, args: unknown) {
   return `${name} · ${compact.length > 90 ? `${compact.slice(0, 89)}…` : compact}`;
 }
 
+function toolChangedFiles(name: string, args: unknown, executionPath: string) {
+  if (name !== "edit" && name !== "write") return;
+  const value = args && typeof args === "object" ? (args as { path?: unknown }).path : undefined;
+  if (typeof value !== "string" || !value) return;
+  const relative = path.relative(executionPath, path.resolve(executionPath, value));
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
+  return [relative.split(path.sep).join("/")];
+}
+
 function currentRun(active: ActiveRun) {
   return active.state.runs.find(({ id }) => id === active.runId)!;
 }
@@ -185,7 +195,7 @@ function compactionEvidence(id: string, data: Record<string, unknown>): Compacti
   };
 }
 
-function savedState(taskPath: string, manager: SessionManager): TaskRunState {
+function savedState(taskPath: string, manager: SessionManager, executionPath: string): TaskRunState {
   const runs: RunEvidence[] = [];
   let current: RunEvidence | undefined;
 
@@ -247,6 +257,7 @@ function savedState(taskPath: string, manager: SessionManager): TaskRunState {
             if (!block || typeof block !== "object" || (block as { type?: string }).type !== "toolCall") continue;
             const tool = block as { id?: string; name?: string; arguments?: unknown };
             if (!tool.id || !tool.name) continue;
+            const changedFiles = toolChangedFiles(tool.name, tool.arguments, executionPath);
             current.items.push({
               id: tool.id,
               kind: "tool",
@@ -254,6 +265,7 @@ function savedState(taskPath: string, manager: SessionManager): TaskRunState {
               summary: toolSummary(tool.name, tool.arguments),
               input: printable(tool.arguments),
               output: "",
+              ...(changedFiles ? { changedFiles } : {}),
               status: "running",
             });
           }
@@ -321,8 +333,8 @@ export class LocalRunCoordinator {
   async getTaskRun(projectPath: string, taskPath: string) {
     const active = this.activeTasks.get(path.resolve(taskPath));
     if (active) return active.state;
-    const { file } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
-    return withTaskWrite(file, async () => savedState(file, SessionManager.open(file)));
+    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    return withTaskWrite(file, async () => savedState(file, SessionManager.open(file), executionPath));
   }
 
   async submitPrompt(projectPath: string, taskPath: string, prompt: string, images: ImageAttachment[] = []) {
@@ -330,7 +342,7 @@ export class LocalRunCoordinator {
     if (!text) throw new Error("Enter a prompt");
     assertDesktopPrompt(text);
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     const preparedImages = await prepareImages(images);
     if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
 
@@ -346,9 +358,10 @@ export class LocalRunCoordinator {
       input: { kind: "prompt", text },
       items: [],
     };
-    const saved = savedState(file, SessionManager.open(file));
+    const saved = savedState(file, SessionManager.open(file), executionPath);
     const active: ActiveRun = {
       project,
+      executionPath,
       state: { ...saved, activeRunId: run.id, runs: [...saved.runs, run], queues: { steering: [], followUp: [] } },
       runId: run.id,
       abortRequested: false,
@@ -363,7 +376,7 @@ export class LocalRunCoordinator {
 
     try {
       await withTaskWrite(file, async () => {
-        const { session, manager } = await this.createSession(project, file, auth, models);
+        const { session, manager } = await this.createSession(executionPath, file, auth, models);
         active.session = session;
         active.manager = manager;
         const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
@@ -417,7 +430,7 @@ export class LocalRunCoordinator {
     const text = command.trim();
     if (!text) throw new Error("Enter a command");
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
 
     const run: RunEvidence = {
@@ -427,9 +440,10 @@ export class LocalRunCoordinator {
       input: { kind: "command", text, includeInContext },
       items: [{ id: "command", kind: "command", command: text, output: "", status: "running", includeInContext }],
     };
-    const saved = savedState(file, SessionManager.open(file));
+    const saved = savedState(file, SessionManager.open(file), executionPath);
     const active: ActiveRun = {
       project,
+      executionPath,
       state: { ...saved, activeRunId: run.id, runs: [...saved.runs, run] },
       runId: run.id,
       abortRequested: false,
@@ -446,7 +460,7 @@ export class LocalRunCoordinator {
       await withTaskWrite(file, async () => {
         const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
         const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
-        const { session, manager } = await this.createSession(project, file, auth, models);
+        const { session, manager } = await this.createSession(executionPath, file, auth, models);
         active.session = session;
         try {
           const result = await session.executeBash(text, (chunk) => {
@@ -502,7 +516,7 @@ export class LocalRunCoordinator {
 
   async compactTask(projectPath: string, taskPath: string) {
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
 
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
@@ -517,9 +531,10 @@ export class LocalRunCoordinator {
       input: { kind: "compaction", text: "Compact context" },
       items: [],
     };
-    const saved = savedState(file, SessionManager.open(file));
+    const saved = savedState(file, SessionManager.open(file), executionPath);
     const active: ActiveRun = {
       project,
+      executionPath,
       state: { ...saved, activeRunId: run.id, runs: [...saved.runs, run] },
       runId: run.id,
       abortRequested: false,
@@ -534,7 +549,7 @@ export class LocalRunCoordinator {
 
     try {
       await withTaskWrite(file, async () => {
-        const { session, manager } = await this.createSession(project, file, auth, models);
+        const { session, manager } = await this.createSession(executionPath, file, auth, models);
         active.session = session;
         active.manager = manager;
         const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
@@ -578,7 +593,7 @@ export class LocalRunCoordinator {
   }
 
   async exportTask(projectPath: string, taskPath: string, format: "jsonl" | "html", outputPath: string) {
-    const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     if (this.activeTasks.has(file)) throw new Error("Stop the active Run before exporting this Task");
     if (format === "jsonl") {
       await copyFile(file, outputPath);
@@ -586,7 +601,7 @@ export class LocalRunCoordinator {
     }
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
     const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
-    const { session } = await this.createSession(project, file, auth, models);
+    const { session } = await this.createSession(executionPath, file, auth, models);
     try {
       await session.exportToHtml(outputPath);
     } finally {
@@ -620,11 +635,11 @@ export class LocalRunCoordinator {
     await Promise.all([...this.activeTasks].map(([taskPath]) => this.abortTask(taskPath)));
   }
 
-  private async createSession(project: string, file: string, auth: AuthStorage, models: ModelRegistry) {
-    const { loader: resources, settings } = await loadTaskResources(this.agentDir, project);
+  private async createSession(executionPath: string, file: string, auth: AuthStorage, models: ModelRegistry) {
+    const { loader: resources, settings } = await loadTaskResources(this.agentDir, executionPath);
     const manager = SessionManager.open(file);
     const { session } = await createAgentSession({
-      cwd: project,
+      cwd: executionPath,
       agentDir: this.agentDir,
       authStorage: auth,
       modelRegistry: models,
@@ -686,7 +701,8 @@ export class LocalRunCoordinator {
         }));
         break;
       }
-      case "tool_execution_start":
+      case "tool_execution_start": {
+        const changedFiles = toolChangedFiles(event.toolName, event.args, active.executionPath);
         appendItem(active, {
           id: event.toolCallId,
           kind: "tool",
@@ -694,9 +710,11 @@ export class LocalRunCoordinator {
           summary: toolSummary(event.toolName, event.args),
           input: printable(event.args),
           output: "",
+          ...(changedFiles ? { changedFiles } : {}),
           status: "running",
         });
         break;
+      }
       case "tool_execution_update": {
         const view = resultView(event.partialResult);
         replaceItem(active, event.toolCallId, (item) => item.kind === "tool" ? { ...item, ...view } : item);

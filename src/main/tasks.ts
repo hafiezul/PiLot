@@ -200,7 +200,7 @@ export async function assertRunnableTask(agentDir: string, projectPath: string, 
   if (task.incompatible) throw new Error("Update PiLot before running this newer Task");
   if (task.malformed) throw new Error("Repair this Task's unreadable history before running it");
   if (!task.task) throw new Error("This Task does not belong to the admitted Project");
-  return { file, project };
+  return { file, project, executionPath: project };
 }
 
 export async function discoverTasks(agentDir: string, projectPath: string) {

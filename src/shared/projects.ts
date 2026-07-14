@@ -80,6 +80,7 @@ export type ToolEvidence = {
   input: string;
   output: string;
   details?: string;
+  changedFiles?: string[];
   status: "running" | "succeeded" | "failed";
   outputTruncated?: boolean;
   fullOutputPath?: string;
@@ -195,6 +196,50 @@ export type TaskResourceState = {
   diagnostics: Array<{ severity: "warning" | "error"; message: string; path?: string }>;
 };
 
+export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "type-changed" | "unmerged" | "untracked";
+
+export type ChangedFile = {
+  path: string;
+  previousPath?: string;
+  status: ChangeStatus;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+};
+
+export type TaskChanges = {
+  taskPath: string;
+  executionPath: string;
+  repository: boolean;
+  checkedAt: number;
+  files: ChangedFile[];
+  additions: number;
+  deletions: number;
+};
+
+export type DiffLine = {
+  kind: "context" | "addition" | "deletion" | "meta";
+  oldLine?: number;
+  newLine?: number;
+  text: string;
+};
+
+export type DiffHunk = {
+  header: string;
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  lines: DiffLine[];
+};
+
+export type TaskFileDiff = ChangedFile & {
+  taskPath: string;
+  truncated: boolean;
+  metadata: string[];
+  hunks: DiffHunk[];
+};
+
 export type ProjectsApi = {
   getProjects(): Promise<ProjectsState>;
   addProject(): Promise<ProjectsState>;
@@ -204,6 +249,9 @@ export type ProjectsApi = {
   getTaskRun(projectPath: string, taskPath: string): Promise<TaskRunState>;
   getTaskModel(projectPath: string, taskPath: string): Promise<TaskModelState>;
   getTaskResources(projectPath: string, taskPath: string): Promise<TaskResourceState>;
+  getTaskChanges(projectPath: string, taskPath: string): Promise<TaskChanges>;
+  getTaskFileDiff(projectPath: string, taskPath: string, filePath: string): Promise<TaskFileDiff>;
+  openTaskPathInEditor(projectPath: string, taskPath: string, filePath?: string): Promise<void>;
   setTaskModel(projectPath: string, taskPath: string, provider: string, modelId: string): Promise<TaskModelState>;
   setTaskThinking(projectPath: string, taskPath: string, level: ThinkingLevel): Promise<TaskModelState>;
   submitPrompt(projectPath: string, taskPath: string, prompt: string, images?: ImageAttachment[]): Promise<void>;

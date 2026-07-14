@@ -1,9 +1,9 @@
-import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CommandEvidence, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskFileDiff, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
@@ -226,18 +226,21 @@ function CommandBlock({ item }: { item: CommandEvidence }) {
   </section>;
 }
 
-function ToolBlock({ item }: { item: ToolEvidence }) {
+function ToolBlock({ item, changePaths, onOpenChange }: { item: ToolEvidence; changePaths: string[]; onOpenChange(path: string): void }) {
   const status = item.status === "succeeded" ? "Succeeded" : item.status === "failed" ? "Failed" : "Running";
-  return <details key={`${item.id}-${item.status}`} className={`tool-evidence ${item.status}`} aria-label={`${item.name} tool, ${item.status}`} open={item.status !== "succeeded" || undefined}>
-    <summary><span>{item.summary}</span><span>{status}</span></summary>
-    <div className="evidence-detail">
-      <h4>Input</h4><pre tabIndex={0}>{item.input}</pre>
-      <h4>Output</h4>{item.output ? <pre tabIndex={0}>{item.output}</pre> : <p className="muted">No output yet.</p>}
-      {item.details && <><h4>Details</h4><pre tabIndex={0}>{item.details}</pre></>}
-      {item.outputTruncated && <p className="output-bound">Output is bounded in the timeline.</p>}
-      <CompleteOutput path={item.fullOutputPath} />
-    </div>
-  </details>;
+  return <div className="tool-record">
+    <details key={`${item.id}-${item.status}`} className={`tool-evidence ${item.status}`} aria-label={`${item.name} tool, ${item.status}`} open={item.status !== "succeeded" || undefined}>
+      <summary><span>{item.summary}</span><span>{status}</span></summary>
+      <div className="evidence-detail">
+        <h4>Input</h4><pre tabIndex={0}>{item.input}</pre>
+        <h4>Output</h4>{item.output ? <pre tabIndex={0}>{item.output}</pre> : <p className="muted">No output yet.</p>}
+        {item.details && <><h4>Details</h4><pre tabIndex={0}>{item.details}</pre></>}
+        {item.outputTruncated && <p className="output-bound">Output is bounded in the timeline.</p>}
+        <CompleteOutput path={item.fullOutputPath} />
+      </div>
+    </details>
+    {item.status === "succeeded" && item.changedFiles?.filter((file) => changePaths.includes(file)).map((file) => <button key={file} type="button" className="tool-change-link" onClick={() => onOpenChange(file)}>Review {file} in Changes</button>)}
+  </div>;
 }
 
 function RetryBlock({ item }: { item: RetryEvidence }) {
@@ -264,7 +267,7 @@ function CompactionBlock({ item }: { item: CompactionEvidence }) {
   </details>;
 }
 
-function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: number; expandThinking: boolean }) {
+function RunBlock({ run, index, expandThinking, changePaths, onOpenChange }: { run: RunEvidence; index: number; expandThinking: boolean; changePaths: string[]; onOpenChange(path: string): void }) {
   const status = run.status[0].toUpperCase() + run.status.slice(1);
   const title = run.input.kind === "command" ? "Inline command" : run.input.kind === "compaction" ? "Context compaction" : "Agent run";
   return <article className={`run-evidence ${run.status}`} aria-labelledby={`run-${run.id}`}>
@@ -281,7 +284,7 @@ function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: num
           </details>}
           {item.text && <div className="assistant-text"><span>Pi</span><p>{item.text}</p></div>}
         </div>;
-        if (item.kind === "tool") return <ToolBlock key={item.id} item={item} />;
+        if (item.kind === "tool") return <ToolBlock key={item.id} item={item} changePaths={changePaths} onOpenChange={onOpenChange} />;
         if (item.kind === "command") return <CommandBlock key={item.id} item={item} />;
         if (item.kind === "retry") return <RetryBlock key={item.id} item={item} />;
         if (item.kind === "compaction") return <CompactionBlock key={item.id} item={item} />;
@@ -291,6 +294,198 @@ function RunBlock({ run, index, expandThinking }: { run: RunEvidence; index: num
       })}
     </div>
   </article>;
+}
+
+type InspectorView = "details" | "changes";
+type DiffRow = { kind: "hunk"; text: string } | { kind: "line"; line: DiffLine };
+
+const changeStatusLabels: Record<ChangedFile["status"], string> = {
+  added: "Added",
+  modified: "Modified",
+  deleted: "Deleted",
+  renamed: "Renamed",
+  copied: "Copied",
+  "type-changed": "Type changed",
+  unmerged: "Unmerged",
+  untracked: "Untracked",
+};
+
+function InspectorTabs({ selected, changeCount, onSelect }: { selected: InspectorView; changeCount: number; onSelect(view: InspectorView): void }) {
+  const tabs: Array<{ id: InspectorView; label: string }> = [{ id: "details", label: "Details" }, { id: "changes", label: "Changes" }];
+  const move = (event: React.KeyboardEvent<HTMLButtonElement>, direction: number) => {
+    const index = tabs.findIndex(({ id }) => id === selected);
+    const next = tabs[(index + direction + tabs.length) % tabs.length];
+    onSelect(next.id);
+    requestAnimationFrame(() => document.getElementById(`inspector-${next.id}-tab`)?.focus());
+    event.preventDefault();
+  };
+  return <div className="tabs" role="tablist" aria-label="Inspector views">
+    {tabs.map(({ id, label }) => <button key={id} id={`inspector-${id}-tab`} role="tab" data-action={id === "details" ? "view.details" : undefined} aria-controls={`inspector-${id}-panel`} aria-selected={selected === id} aria-label={id === "changes" ? `Changes, ${changeCount} changed file${changeCount === 1 ? "" : "s"}` : label} tabIndex={selected === id ? 0 : -1} onClick={() => onSelect(id)} onKeyDown={(event) => {
+      if (event.key === "ArrowLeft") move(event, -1);
+      else if (event.key === "ArrowRight") move(event, 1);
+      else if (event.key === "Home") move(event, -tabs.findIndex(({ id: value }) => value === selected));
+      else if (event.key === "End") move(event, tabs.length - 1 - tabs.findIndex(({ id: value }) => value === selected));
+    }}><span>{label}</span>{id === "changes" && changeCount > 0 && <span className="tab-badge" aria-hidden="true">{changeCount}</span>}</button>)}
+    <button role="tab" aria-selected="false" tabIndex={-1} disabled>History</button>
+  </div>;
+}
+
+function VirtualDiff({ diff }: { diff: TaskFileDiff }) {
+  const rows = useMemo<DiffRow[]>(() => diff.hunks.flatMap((hunk) => [
+    { kind: "hunk" as const, text: hunk.header },
+    ...hunk.lines.map((line) => ({ kind: "line" as const, line })),
+  ]), [diff]);
+  const grid = useRef<HTMLDivElement>(null);
+  const id = useId().replace(/:/g, "");
+  const rowHeight = 23;
+  const overscan = 10;
+  const [viewport, setViewport] = useState({ top: 0, height: 360 });
+  const [active, setActive] = useState(0);
+  const activeRow = Math.max(0, Math.min(active, rows.length - 1));
+
+  useLayoutEffect(() => {
+    const element = grid.current;
+    if (!element) return;
+    element.scrollTop = 0;
+    setActive(0);
+    setViewport({ top: 0, height: element.clientHeight || 360 });
+    const observer = new ResizeObserver(() => setViewport((current) => ({ ...current, height: element.clientHeight || 360 })));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [diff.path]);
+  useLayoutEffect(() => {
+    const element = grid.current;
+    if (!element) return;
+    const top = Math.min(element.scrollTop, Math.max(0, rows.length * rowHeight - element.clientHeight));
+    if (top !== element.scrollTop) element.scrollTop = top;
+    setViewport({ top, height: element.clientHeight || 360 });
+    setActive((current) => Math.max(0, Math.min(current, rows.length - 1)));
+  }, [rows.length]);
+
+  const first = rows.length ? Math.min(rows.length - 1, Math.max(0, Math.floor(viewport.top / rowHeight) - overscan)) : 0;
+  const last = Math.min(rows.length, Math.max(first + 1, Math.ceil((viewport.top + viewport.height) / rowHeight) + overscan));
+  const move = (next: number) => {
+    const index = Math.max(0, Math.min(rows.length - 1, next));
+    const element = grid.current;
+    setActive(index);
+    if (!element) return;
+    let top = element.scrollTop;
+    if (index * rowHeight < top) top = index * rowHeight;
+    else if ((index + 1) * rowHeight > top + element.clientHeight) top = (index + 1) * rowHeight - element.clientHeight;
+    if (top !== element.scrollTop) element.scrollTop = top;
+    setViewport({ top, height: element.clientHeight || viewport.height });
+  };
+  const lineLabel = (line: DiffLine) => line.kind === "addition"
+    ? `Added line ${line.newLine}: ${line.text || "blank line"}`
+    : line.kind === "deletion" ? `Deleted line ${line.oldLine}: ${line.text || "blank line"}`
+      : line.kind === "context" ? `Unchanged line ${line.newLine}: ${line.text || "blank line"}` : line.text;
+
+  return <div ref={grid} className="diff-grid" role="grid" aria-label={`Unified diff for ${diff.path}`} aria-rowcount={rows.length} aria-colcount={3} aria-activedescendant={rows.length ? `${id}-row-${activeRow}` : undefined} tabIndex={0} onScroll={(event) => {
+    const { scrollTop: top, clientHeight: height } = event.currentTarget;
+    const visibleFirst = Math.floor(top / rowHeight);
+    const visibleLast = Math.max(visibleFirst, Math.ceil((top + height) / rowHeight) - 1);
+    setViewport({ top, height });
+    setActive((current) => current < visibleFirst || current > visibleLast ? visibleFirst : current);
+  }} onKeyDown={(event) => {
+    if (!rows.length) return;
+    if (event.key === "ArrowDown") move(activeRow + 1);
+    else if (event.key === "ArrowUp") move(activeRow - 1);
+    else if (event.key === "Home") move(0);
+    else if (event.key === "End") move(rows.length - 1);
+    else if (event.key === "PageDown") move(activeRow + Math.max(1, Math.floor(viewport.height / rowHeight)));
+    else if (event.key === "PageUp") move(activeRow - Math.max(1, Math.floor(viewport.height / rowHeight)));
+    else return;
+    event.preventDefault();
+  }}>
+    <div role="presentation" style={{ height: first * rowHeight }} />
+    {rows.slice(first, last).map((row, offset) => {
+      const index = first + offset;
+      if (row.kind === "hunk") return <div key={index} id={`${id}-row-${index}`} className="diff-row diff-hunk" role="row" aria-rowindex={index + 1} aria-selected={activeRow === index} aria-label={`Diff hunk ${row.text}`} onClick={() => setActive(index)}>
+        <span role="gridcell" aria-colspan={3}>{row.text}</span>
+      </div>;
+      const { line } = row;
+      return <div key={index} id={`${id}-row-${index}`} className={`diff-row diff-${line.kind}`} role="row" aria-rowindex={index + 1} aria-selected={activeRow === index} aria-label={lineLabel(line)} onClick={() => setActive(index)}>
+        <span className="diff-line-number" role="gridcell" aria-label={line.oldLine === undefined ? "No old line" : `Old line ${line.oldLine}`}>{line.oldLine ?? ""}</span>
+        <span className="diff-line-number" role="gridcell" aria-label={line.newLine === undefined ? "No new line" : `New line ${line.newLine}`}>{line.newLine ?? ""}</span>
+        <code role="gridcell"><span className="diff-marker" aria-hidden="true">{line.kind === "addition" ? "+" : line.kind === "deletion" ? "−" : " "}</span>{line.text}</code>
+      </div>;
+    })}
+    <div role="presentation" style={{ height: Math.max(0, rows.length - last) * rowHeight }} />
+  </div>;
+}
+
+function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelect }: {
+  project: ProjectAccess;
+  task: TaskSummary;
+  changes?: TaskChanges;
+  loadError: string;
+  selectedPath?: string;
+  onSelect(path: string): void;
+}) {
+  const panel = useRef<HTMLElement>(null);
+  const [diff, setDiff] = useState<TaskFileDiff>();
+  const [diffError, setDiffError] = useState("");
+  const [openError, setOpenError] = useState("");
+  const selected = changes?.files.find(({ path }) => path === selectedPath);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDiffError("");
+    if (!selected) { setDiff(undefined); return; }
+    setDiff((current) => current?.path === selected.path ? current : undefined);
+    void window.pilot.getTaskFileDiff(project.path, task.path, selected.path).then((value) => {
+      if (cancelled) return;
+      const focused = document.activeElement;
+      const preserveFocus = focused === panel.current?.querySelector(".diff-grid");
+      setDiff(value);
+      if (preserveFocus) requestAnimationFrame(() => {
+        if (document.activeElement === focused || document.activeElement === document.body) panel.current?.querySelector<HTMLElement>(".diff-grid")?.focus({ preventScroll: true });
+      });
+    }).catch((reason) => {
+      if (!cancelled) setDiffError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => { cancelled = true; };
+  }, [project.path, task.path, selected?.path, changes?.checkedAt]);
+
+  const open = (filePath?: string) => {
+    setOpenError("");
+    void window.pilot.openTaskPathInEditor(project.path, task.path, filePath).catch((reason) => setOpenError(reason instanceof Error ? reason.message : String(reason)));
+  };
+
+  if (!changes) return loadError
+    ? <div className="changes-empty" role="alert"><strong>Could not read Git changes</strong><p>{loadError}</p></div>
+    : <p className="muted changes-loading" role="status">Reading Git changes…</p>;
+  return <section ref={panel} className="changes-panel" aria-label="Task changes">
+    <header className="changes-heading">
+      <div><p className="eyebrow">Working tree</p><h2>Task changes</h2></div>
+      <div className="change-totals" aria-label={`${changes.files.length} changed files, ${changes.additions} additions, ${changes.deletions} deletions`}>
+        <strong>{changes.files.length} file{changes.files.length === 1 ? "" : "s"}</strong><span className="additions">+{changes.additions.toLocaleString()}</span><span className="deletions">−{changes.deletions.toLocaleString()}</span>
+      </div>
+    </header>
+    <div className="execution-editor-row"><code title={changes.executionPath}>{changes.executionPath}</code><button type="button" onClick={() => open()}>Open execution location in editor</button></div>
+    {!changes.repository ? <div className="changes-empty"><strong>Git changes unavailable</strong><p>This Execution location is not a Git working tree.</p></div>
+      : !changes.files.length ? <div className="changes-empty"><strong>No current changes</strong><p>Git reports a clean working tree.</p></div>
+        : <>
+          <ul className="changed-file-list" aria-label="Changed files">
+            {changes.files.map((file) => <li key={file.path}><button type="button" aria-current={file.path === selected?.path ? "true" : undefined} aria-label={`${changeStatusLabels[file.status]} ${file.path}${file.previousPath ? `, from ${file.previousPath}` : ""}, ${file.binary ? "binary file" : `${file.additions} additions, ${file.deletions} deletions`}`} onClick={() => onSelect(file.path)}>
+              <span className={`change-status status-${file.status}`} aria-hidden="true">{file.status === "untracked" ? "?" : file.status[0].toUpperCase()}</span>
+              <span className="change-file-name"><strong>{file.path}</strong>{file.previousPath && <small>from {file.previousPath}</small>}</span>
+              <span className="change-file-stat">{file.binary ? "Binary" : <><span className="additions">+{file.additions}</span> <span className="deletions">−{file.deletions}</span></>}</span>
+            </button></li>)}
+          </ul>
+          {selected && <section className="file-diff" aria-labelledby="selected-change-title">
+            <header><div><span>{changeStatusLabels[selected.status]}</span><h3 id="selected-change-title">{selected.path}</h3></div><button type="button" disabled={selected.status === "deleted"} onClick={() => open(selected.path)}>Open {selected.path} in editor</button></header>
+            {!diff && !diffError ? <p className="muted" role="status">Loading unified diff…</p>
+              : diff?.binary ? <p className="muted">Binary file content is not shown.</p>
+                : diff?.truncated ? <p className="muted">This diff is too large to display. Open the file in your editor to review it.</p>
+                  : diff ? <>
+                    {diff.metadata.length > 0 && <ul className="diff-metadata" aria-label="Git change metadata">{diff.metadata.map((line) => <li key={line}><code>{line}</code></li>)}</ul>}
+                    {diff.hunks.length ? <VirtualDiff key={diff.path} diff={diff} /> : <p className="muted">No text hunks to display.</p>}
+                  </> : null}
+          </section>}
+        </>}
+    {(diffError || openError) && <p className="error changes-error" role="alert">{diffError || openError}</p>}
+  </section>;
 }
 
 type TaskModel = TaskModelState["providers"][number]["models"][number];
@@ -540,13 +735,15 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   </div>;
 }
 
-function TaskPage({ project, task, reloadToken, onCreate, onDetails, onOpenSettings, onRunChange, onActionStart, onError }: {
+function TaskPage({ project, task, reloadToken, changePaths, onCreate, onDetails, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
   project: ProjectAccess;
   task: TaskSummary;
   reloadToken: number;
+  changePaths: string[];
   onCreate(): void;
   onDetails(next: TaskModelState): void;
   onOpenSettings(): void;
+  onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
   onActionStart(): void;
   onError(reason: unknown, recovery: string): void;
@@ -771,7 +968,7 @@ function TaskPage({ project, task, reloadToken, onCreate, onDetails, onOpenSetti
         onActionStart();
         void window.pilot.compactTask(project.path, task.path).then(refreshDetails).catch((reason) => onError(reason, "Add more Task history or check provider access, then try compacting again."));
       }} data-action="run.compact">Compact context</button></div></div>
-      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
+      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
       {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
@@ -892,17 +1089,19 @@ function TaskPage({ project, task, reloadToken, onCreate, onDetails, onOpenSetti
   </div>;
 }
 
-function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onOpenSettings, onRunChange, onActionStart, onError }: {
+function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, changePaths, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
   project: ProjectAccess;
   needsAccess: boolean;
   selectedTaskPath?: string;
   reloadToken: number;
+  changePaths: string[];
   onSelectTask(path: string): void;
   onCreateTask(): void;
   onOpenAccess(): void;
   onChange(state: ProjectsState): void;
   onDetails(state: TaskModelState): void;
   onOpenSettings(): void;
+  onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
   onActionStart(): void;
   onError(reason: unknown, recovery: string): void;
@@ -910,7 +1109,7 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, onSe
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   const selectedTask = active.find(({ path }) => path === selectedTaskPath);
-  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} onCreate={onCreateTask} onDetails={onDetails} onOpenSettings={onOpenSettings} onRunChange={onRunChange} onActionStart={onActionStart} onError={onError} />;
+  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} changePaths={changePaths} onCreate={onCreateTask} onDetails={onDetails} onOpenSettings={onOpenSettings} onOpenChange={onOpenChange} onRunChange={onRunChange} onActionStart={onActionStart} onError={onError} />;
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
@@ -1132,9 +1331,13 @@ function App() {
   const [reloadToken, setReloadToken] = useState(0);
   const [runActive, setRunActive] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
-  const [compactLayout, setCompactLayout] = useState(() => matchMedia("(max-width: 900px)").matches);
+  const [compactLayout, setCompactLayout] = useState(() => matchMedia("(max-width: 1040px)").matches);
   const [actionError, setActionError] = useState<ActionFailure>();
   const [taskDetails, setTaskDetails] = useState<TaskModelState>();
+  const [inspectorView, setInspectorView] = useState<InspectorView>("details");
+  const [taskChanges, setTaskChanges] = useState<TaskChanges>();
+  const [changesError, setChangesError] = useState("");
+  const [selectedChangePath, setSelectedChangePath] = useState<string>();
   const settingsButton = useRef<HTMLButtonElement>(null);
   const detailsReturnFocus = useRef<HTMLElement | null>(null);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
@@ -1172,6 +1375,15 @@ function App() {
     setShowDetails(false);
     requestAnimationFrame(() => detailsReturnFocus.current?.focus());
   }, []);
+  const openChange = useCallback((filePath: string) => {
+    const target = taskChanges?.files.find((file) => file.path === filePath || file.previousPath === filePath)?.path;
+    if (!target) return;
+    detailsReturnFocus.current = document.activeElement as HTMLElement | null;
+    setSelectedChangePath(target);
+    setInspectorView("changes");
+    setShowDetails(true);
+    requestAnimationFrame(() => document.getElementById("inspector-changes-tab")?.focus());
+  }, [taskChanges]);
   const clearActionError = useCallback(() => setActionError(undefined), []);
   const reportActionError = useCallback((reason: unknown, recovery: string) => {
     setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery });
@@ -1183,6 +1395,31 @@ function App() {
   const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
   const workspaceAvailable = !showSettings;
   const taskAvailable = Boolean(workspaceAvailable && selectedTask && !needsProjectAccess);
+  useEffect(() => {
+    let cancelled = false;
+    let timer = 0;
+    setTaskChanges(undefined);
+    setChangesError("");
+    setSelectedChangePath(undefined);
+    if (!selectedProject || !selectedTask || needsProjectAccess) return;
+    const refreshChanges = async () => {
+      try {
+        const next = await window.pilot.getTaskChanges(selectedProject.path, selectedTask.path);
+        if (cancelled) return;
+        setTaskChanges(next);
+        setChangesError("");
+        setSelectedChangePath((current) => current && next.files.some(({ path }) => path === current) ? current : next.files[0]?.path);
+      } catch (reason) {
+        if (!cancelled) {
+          setTaskChanges(undefined);
+          setChangesError(reason instanceof Error ? reason.message : String(reason));
+        }
+      }
+      if (!cancelled) timer = window.setTimeout(refreshChanges, 1_500);
+    };
+    void refreshChanges();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [selectedProject?.path, selectedTask?.path, needsProjectAccess]);
   const unavailable = (reason: string) => ({ enabled: false, reason });
   const availability: ActionAvailability = {
     "project.add": workspaceAvailable ? { enabled: true } : unavailable("Return to the command center to add a Project"),
@@ -1212,8 +1449,9 @@ function App() {
     if (id === "view.details") {
       if (compactLayout && showDetails) { closeDetails(); return; }
       detailsReturnFocus.current = returnFocus ?? document.activeElement as HTMLElement | null;
+      setInspectorView("details");
       setShowDetails(true);
-      requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-action="view.details"]')?.focus());
+      requestAnimationFrame(() => document.getElementById("inspector-details-tab")?.focus());
       return;
     }
     if (id === "project.add") { attempt(window.pilot.addProject().then(setProjects), "Choose another folder or check its permissions, then try again."); return; }
@@ -1244,7 +1482,7 @@ function App() {
   useEffect(() => window.pilot.setActionState(actionState), [actionStateKey]);
   useEffect(() => window.pilot.onAction(invokeAction), [invokeAction]);
   useEffect(() => {
-    const media = matchMedia("(max-width: 900px)");
+    const media = matchMedia("(max-width: 1040px)");
     const updateLayout = () => setCompactLayout(media.matches);
     media.addEventListener("change", updateLayout);
     return () => media.removeEventListener("change", updateLayout);
@@ -1320,12 +1558,14 @@ function App() {
             needsAccess={needsProjectAccess}
             selectedTaskPath={selectedTaskPath}
             reloadToken={reloadToken}
+            changePaths={taskChanges?.files.flatMap(({ path, previousPath }) => previousPath ? [path, previousPath] : [path]) ?? []}
             onSelectTask={(path) => { setTaskDetails(undefined); setSelectedTaskPath(path); }}
             onCreateTask={() => void createSelectedTask()}
             onOpenAccess={() => setShowProjectAccess(true)}
             onChange={setProjects}
             onDetails={setTaskDetails}
             onOpenSettings={openProviderSettings}
+            onOpenChange={openChange}
             onRunChange={handleRunChange}
             onActionStart={clearActionError}
             onError={reportActionError}
@@ -1366,13 +1606,9 @@ function App() {
         </main>
 
         <aside aria-label="Inspector" className={`inspector${showDetails ? " details-visible" : ""}`}>
-          <div className="tabs" role="tablist" aria-label="Inspector views">
-            <button id="inspector-details-tab" role="tab" data-action="view.details" aria-controls="inspector-details-panel" aria-selected="true">Details</button>
-            <button role="tab" aria-selected="false" disabled>Changes</button>
-            <button role="tab" aria-selected="false" disabled>History</button>
-          </div>
+          <InspectorTabs selected={inspectorView} changeCount={taskChanges?.files.length ?? 0} onSelect={setInspectorView} />
           <button type="button" className="inspector-close" aria-label="Close Inspector" onClick={closeDetails}>×</button>
-          <div id="inspector-details-panel" className="inspector-body" role="tabpanel" aria-labelledby="inspector-details-tab">
+          {inspectorView === "details" ? <div id="inspector-details-panel" className="inspector-body" role="tabpanel" aria-labelledby="inspector-details-tab">
             {selectedProject ? needsProjectAccess ? <>
               <p className="eyebrow">Project</p>
               <h2>{selectedProject.name}</h2>
@@ -1404,7 +1640,11 @@ function App() {
                 <div><dt>Network reporting</dt><dd>Off</dd></div>
               </dl>
             </>}
-          </div>
+          </div> : <div id="inspector-changes-panel" className="inspector-body changes-inspector-body" role="tabpanel" aria-labelledby="inspector-changes-tab">
+            {selectedProject && selectedTask && !needsProjectAccess
+              ? <ChangesPanel project={selectedProject} task={selectedTask} changes={taskChanges} loadError={changesError} selectedPath={selectedChangePath} onSelect={setSelectedChangePath} />
+              : <div className="changes-empty"><strong>Select a Task</strong><p>Choose an active Task to review its Git changes.</p></div>}
+          </div>}
         </aside>
       </div>
       {selectedProject && (needsProjectAccess || showProjectAccess) && <ProjectAccessDialog project={selectedProject} dismissible={!needsProjectAccess} onChange={updateProjectAccess} onClose={closeProjectAccess} />}

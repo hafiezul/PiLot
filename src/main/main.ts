@@ -11,6 +11,7 @@ import { LocalRunCoordinator } from "./runs.js";
 import { getTaskModelState, setTaskModel, setTaskThinking } from "./tasks.js";
 import { getTaskResources } from "./resources.js";
 import { getStartupState } from "./readiness.js";
+import { getTaskChanges, getTaskFileDiff, openTaskPathInEditor } from "./changes.js";
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
 import type { ImageAttachment, ThinkingLevel } from "../shared/projects.js";
@@ -214,6 +215,16 @@ app.whenReady().then(async () => {
     getTaskModelState(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) =>
     getTaskResources(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-changes", async (_event, projectPath: unknown, taskPath: unknown) =>
+    getTaskChanges(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-file-diff", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {
+    if (typeof filePath !== "string" || !filePath) throw new Error("A changed file is required");
+    return getTaskFileDiff(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), filePath);
+  });
+  ipcMain.handle("tasks:open-in-editor", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {
+    if (filePath !== undefined && (typeof filePath !== "string" || !filePath)) throw new Error("A changed file is required");
+    return openTaskPathInEditor(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), filePath as string | undefined);
+  });
   ipcMain.handle("tasks:set-model", async (_event, projectPath: unknown, taskPath: unknown, provider: unknown, modelId: unknown) => {
     if (typeof provider !== "string" || typeof modelId !== "string") throw new Error("A provider and model are required");
     return setTaskModel(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), provider, modelId);

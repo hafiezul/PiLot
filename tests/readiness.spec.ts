@@ -1,8 +1,9 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { promisify } from "node:util";
 import { createServer as createHttpServer } from "node:http";
 import { createRequire } from "node:module";
 import { createServer as createPortServer } from "node:net";
@@ -12,6 +13,7 @@ import { createServer } from "vite";
 
 const appPath = path.resolve(import.meta.dirname, "..");
 const electronPath = createRequire(import.meta.url)("electron") as string;
+const execute = promisify(execFile);
 
 async function fixture(version = 3) {
   const root = await mkdtemp(path.join(tmpdir(), "pilot-"));
@@ -204,6 +206,22 @@ async function deterministicProvider(root: string) {
         } else {
           chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
             index: 0, id: "failure-tool", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "printf failed-output; exit 7" }) },
+          }] }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+        }
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (latestUser === "edit tracked file") {
+        if (body.includes("changes-edit-tool")) {
+          chunk({ index: 0, delta: { role: "assistant", content: "Changes ready." }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        } else {
+          chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
+            index: 0, id: "changes-edit-tool", type: "function", function: { name: "edit", arguments: JSON.stringify({
+              path: "src/app.ts",
+              edits: [{ oldText: "export const value = 1;", newText: "export const value = 2;\nexport const extra = true;" }],
+            }) },
           }] }, finish_reason: null });
           chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
         }
@@ -990,6 +1008,136 @@ test("renders Run evidence, disclosures, and inline commands through the Electro
     await app.window.getByRole("checkbox", { name: "Expand thinking by default" }).check();
     await app.window.getByRole("button", { name: "Back to command center" }).click();
     await expect(timeline.locator('details[aria-label="Thinking"]')).toHaveAttribute("open", "");
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("reviews aggregate Task changes through the Electron boundary", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  const executionPath = await realpath(environment.project);
+  const sourceDirectory = path.join(environment.project, "src");
+  const editorScript = path.join(environment.root, "editor.mjs");
+  const editorLog = path.join(environment.root, "editor.log");
+  const generatedContent = Array.from({ length: 1_500 }, (_, index) => `export const generated${index} = ${index};`).join("\n") + "\n";
+  await mkdir(sourceDirectory, { recursive: true });
+  await Promise.all([
+    writeFile(path.join(sourceDirectory, "app.ts"), "export const value = 1;\nkeep\n"),
+    writeFile(path.join(sourceDirectory, "a[1].ts"), "export const bracket = 1;\n"),
+    writeFile(path.join(sourceDirectory, "a1.ts"), "export const plain = 1;\n"),
+    writeFile(path.join(sourceDirectory, "old-name.ts"), "export const renamed = true;\n"),
+    writeFile(path.join(sourceDirectory, "mode.sh"), "#!/bin/sh\necho ready\n"),
+    writeFile(path.join(environment.project, "obsolete.txt"), "remove me\n"),
+    writeFile(editorScript, `import { appendFileSync } from "node:fs";\nappendFileSync(process.argv[2], process.argv[3] + "\\n");\n`),
+  ]);
+  await execute("git", ["init"], { cwd: environment.project });
+  await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: environment.project });
+  await execute("git", ["config", "user.name", "PiLot Test"], { cwd: environment.project });
+  await execute("git", ["config", "core.filemode", "false"], { cwd: environment.project });
+  await execute("git", ["add", "."], { cwd: environment.project });
+  await execute("git", ["commit", "-m", "fixture"], { cwd: environment.project });
+  await execute("git", ["mv", "src/old-name.ts", "src/new-name.ts"], { cwd: environment.project });
+  await execute("git", ["update-index", "--chmod=+x", "src/mode.sh"], { cwd: environment.project });
+  await Promise.all([
+    rm(path.join(environment.project, "obsolete.txt")),
+    writeFile(path.join(environment.project, "asset.bin"), Buffer.from([0, 1, 2, 3])),
+    writeFile(path.join(sourceDirectory, "a[1].ts"), "export const bracket = 2;\n"),
+    writeFile(path.join(sourceDirectory, "a1.ts"), "export const plain = 2;\n"),
+    writeFile(path.join(sourceDirectory, "generated.ts"), generatedContent),
+    writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: provider.baseUrl,
+          api: "openai-completions",
+          apiKey: "fixture-key",
+          models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+        },
+      },
+    })),
+    writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+      externalEditor: `"${process.execPath}" "${editorScript}" "${editorLog}"`,
+    })),
+  ]);
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const prompt = app.window.getByRole("combobox", { name: "Prompt" });
+    await prompt.fill("edit tracked file");
+    await app.window.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" })).toContainText("Changes ready.");
+
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const detailsTab = inspector.getByRole("tab", { name: "Details" });
+    const changesTab = inspector.getByRole("tab", { name: /Changes/ });
+    await expect(changesTab).toHaveAccessibleName("Changes, 8 changed files");
+    await detailsTab.focus();
+    await writeFile(path.join(sourceDirectory, "later.ts"), "export const later = true;\n");
+    await expect(changesTab).toHaveAccessibleName("Changes, 9 changed files");
+    await expect(detailsTab).toHaveAttribute("aria-selected", "true");
+    await expect(detailsTab).toBeFocused();
+
+    const editEvidence = app.window.getByRole("button", { name: "Review src/app.ts in Changes" });
+    await editEvidence.click();
+    await expect(changesTab).toHaveAttribute("aria-selected", "true");
+    const changes = inspector.getByRole("tabpanel", { name: /Changes/ });
+    await expect(changes).toContainText("9 files");
+    await expect(changes).toContainText("+1,505");
+    await expect(changes).toContainText("−4");
+    const changedFiles = changes.getByRole("list", { name: "Changed files" });
+    await expect(changedFiles.getByRole("button", { name: /Modified src\/app\.ts/ })).toHaveAttribute("aria-current", "true");
+    await expect(changedFiles.getByRole("button", { name: /Deleted obsolete\.txt/ })).toBeVisible();
+    await expect(changedFiles.getByRole("button", { name: "Renamed src/new-name.ts, from src/old-name.ts, 0 additions, 0 deletions" })).toBeVisible();
+    await expect(changedFiles.getByRole("button", { name: "Untracked asset.bin, binary file" })).toBeVisible();
+    await expect(changedFiles.getByRole("button", { name: /Untracked src\/generated\.ts/ })).toBeVisible();
+
+    await changedFiles.getByRole("button", { name: /Modified src\/a\[1\]\.ts/ }).click();
+    const literalDiff = changes.getByRole("grid", { name: "Unified diff for src/a[1].ts" });
+    await expect(literalDiff.getByRole("row", { name: "Added line 1: export const bracket = 2;" })).toBeVisible();
+    await expect(literalDiff).not.toContainText("plain");
+
+    await changedFiles.getByRole("button", { name: /Modified src\/mode\.sh/ }).click();
+    const metadata = changes.getByRole("list", { name: "Git change metadata" });
+    await expect(metadata).toContainText("old mode 100644");
+    await expect(metadata).toContainText("new mode 100755");
+    await expect(changes).toContainText("No text hunks to display.");
+
+    await changedFiles.getByRole("button", { name: /Untracked src\/generated\.ts/ }).click();
+    const diff = changes.getByRole("grid", { name: "Unified diff for src/generated.ts" });
+    await expect(diff).toHaveAttribute("aria-rowcount", "1501");
+    expect(await diff.getByRole("row").count()).toBeLessThan(100);
+    await expect(diff.getByRole("row", { name: "Added line 1: export const generated0 = 0;" })).toBeVisible();
+    await diff.focus();
+    await diff.press("ArrowDown");
+    await expect(diff).toHaveAttribute("aria-activedescendant", /-row-1$/);
+    await expect(diff.locator('[role="row"][aria-selected="true"]')).toHaveAttribute("aria-rowindex", "2");
+    expect(await diff.evaluate((element) => getComputedStyle(element).userSelect)).toBe("text");
+    await writeFile(path.join(sourceDirectory, "generated.ts"), generatedContent.replace("generated0 = 0", "generated0 = 9"));
+    await expect(diff.getByRole("row", { name: "Added line 1: export const generated0 = 9;" })).toBeVisible();
+    await expect(diff).toBeFocused();
+    await expect(changesTab).toHaveAttribute("aria-selected", "true");
+    await diff.press("End");
+    await expect(diff.locator('[role="row"][aria-selected="true"]')).toHaveAttribute("aria-rowindex", "1501");
+    const shortenedContent = generatedContent.replace("generated0 = 0", "generated0 = 9").split("\n").slice(0, 3).join("\n") + "\n";
+    await writeFile(path.join(sourceDirectory, "generated.ts"), shortenedContent);
+    await expect(diff).toHaveAttribute("aria-rowcount", "4");
+    await expect(diff).toBeFocused();
+    const activeDescendant = await diff.getAttribute("aria-activedescendant");
+    await expect(diff.locator(`[id="${activeDescendant}"]`)).toHaveCount(1);
+
+    await changes.getByRole("button", { name: "Open src/generated.ts in editor" }).click();
+    await changes.getByRole("button", { name: "Open execution location in editor" }).click();
+    await expect.poll(async () => (await readFile(editorLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).sort()).toEqual([
+      path.join(executionPath, "src", "generated.ts"),
+      executionPath,
+    ].sort());
   } finally {
     await close(app);
     await provider.close();
