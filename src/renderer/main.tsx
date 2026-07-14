@@ -1180,6 +1180,15 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
         onActionStart();
         void window.pilot.compactTask(project.path, task.path).then(async () => { await refreshDetails(); onHistoryChange(); }).catch((reason) => onError(reason, "Add more Task history or check provider access, then try compacting again."));
       }} data-action="run.compact">Compact context</button></div></div>
+      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
+      {interrupted && <section className="interrupted-recovery" role="status" aria-label="Interrupted Run recovery"><strong>Run interrupted</strong><p>PiLot did not retry the interrupted input. Review the timeline and Changes before continuing.</p></section>}
+      {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
+    </section>
+    <div className="composer-dock">
+      {showJumpLatest && <button type="button" className="jump-latest" aria-label="Jump to latest Run evidence" title="Jump to latest" onClick={jumpToLatest}>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 6.25 3.25 3.25 3.25-3.25" /></svg>
+      </button>}
       {externallyChanged && <section className="continuity-alert" role="alert" aria-labelledby="continuity-alert-title">
         <div><strong id="continuity-alert-title">Task changed outside PiLot</strong><p>PiLot paused Task history writes to protect both paths. Review the Run timeline and Changes before continuing.</p></div>
         <div className="continuity-actions">
@@ -1198,15 +1207,6 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
           }}>Fork Task</button>
         </div>
       </section>}
-      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
-      {interrupted && <section className="interrupted-recovery" role="status" aria-label="Interrupted Run recovery"><strong>Run interrupted</strong><p>PiLot did not retry the interrupted input. Review the timeline and Changes before continuing.</p></section>}
-      {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
-    </section>
-    <div className="composer-dock">
-      {showJumpLatest && <button type="button" className="jump-latest" aria-label="Jump to latest Run evidence" title="Jump to latest" onClick={jumpToLatest}>
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 6.25 3.25 3.25 3.25-3.25" /></svg>
-      </button>}
       <form className="task-composer" aria-label="Task composer" aria-disabled={externallyChanged || undefined} onDragEnter={(event) => {
       if (active || externallyChanged || !event.dataTransfer.types.includes("Files")) return;
       event.preventDefault();

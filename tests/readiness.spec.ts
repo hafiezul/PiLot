@@ -844,6 +844,10 @@ test("pauses externally changed Tasks until Reload or Fork", async () => {
     await expect(continuity).toContainText("Review the Run timeline and Changes before continuing");
     await expect(continuity.getByRole("button", { name: "Reload Task" })).toBeVisible();
     await expect(continuity.getByRole("button", { name: "Fork Task" })).toBeVisible();
+    const [continuityBox, composerBox] = await Promise.all([continuity.boundingBox(), composer.boundingBox()]);
+    expect(continuityBox).not.toBeNull();
+    expect(composerBox).not.toBeNull();
+    expect(composerBox!.y - (continuityBox!.y + continuityBox!.height)).toBeLessThanOrEqual(8);
     await expect(prompt).toBeDisabled();
     const blocked = await app.window.evaluate(async ({ projectPath, taskPath }) => {
       try {
