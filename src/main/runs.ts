@@ -8,7 +8,9 @@ import {
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { copyFile } from "node:fs/promises";
 import path from "node:path";
+import { builtInTuiCommand } from "../shared/actions.js";
 import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type RetryEvidence, type RunEvidence, type RunEvidenceItem, type RunStatus, type TaskRunState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
 import { loadTaskResources } from "./resources.js";
@@ -20,6 +22,11 @@ const compactionMetadataType = "pilot.compaction";
 const maximumOutputCharacters = 12_000;
 
 type PreparedImage = { type: "image"; data: string; mimeType: string };
+
+function assertDesktopPrompt(text: string) {
+  const tuiCommand = builtInTuiCommand(text);
+  if (tuiCommand) throw new Error(`/${tuiCommand} is a Pi terminal command. Use PiLot's menus or Command Palette instead.`);
+}
 
 type ActiveRun = {
   project: string;
@@ -321,6 +328,7 @@ export class LocalRunCoordinator {
   async submitPrompt(projectPath: string, taskPath: string, prompt: string, images: ImageAttachment[] = []) {
     const text = prompt.trim();
     if (!text) throw new Error("Enter a prompt");
+    assertDesktopPrompt(text);
     await assertExecutionAllowed(this.userData, projectPath);
     const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     const preparedImages = await prepareImages(images);
@@ -398,6 +406,7 @@ export class LocalRunCoordinator {
   async queuePrompt(taskPath: string, prompt: string, mode: LiveInputMode) {
     const text = prompt.trim();
     if (!text) throw new Error("Enter a prompt");
+    assertDesktopPrompt(text);
     const active = this.activeTasks.get(path.resolve(taskPath));
     if (!active || currentRun(active).input.kind !== "prompt") throw new Error("This Task has no active agent Run");
     if (!active.session || !active.session.isStreaming || active.abortRequested) throw new Error("The Run is not ready for live input");
@@ -565,6 +574,23 @@ export class LocalRunCoordinator {
       this.activeTasks.delete(file);
       this.activeProjects.delete(project);
       this.emit({ ...active.state, activeRunId: undefined });
+    }
+  }
+
+  async exportTask(projectPath: string, taskPath: string, format: "jsonl" | "html", outputPath: string) {
+    const { file, project } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    if (this.activeTasks.has(file)) throw new Error("Stop the active Run before exporting this Task");
+    if (format === "jsonl") {
+      await copyFile(file, outputPath);
+      return;
+    }
+    const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
+    const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
+    const { session } = await this.createSession(project, file, auth, models);
+    try {
+      await session.exportToHtml(outputPath);
+    } finally {
+      session.dispose();
     }
   }
 

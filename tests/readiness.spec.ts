@@ -279,6 +279,94 @@ async function deterministicProvider(root: string) {
   };
 }
 
+test("invokes native actions through menus and the Command Palette", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", reasoning: true, thinkingLevelMap: { off: null, high: "high" } }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture-model" }));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project, PILOT_TEST_EXPORT_DIR: environment.root });
+  const primary = process.platform === "darwin" ? "Meta" : "Control";
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const prompt = app.window.getByRole("combobox", { name: "Prompt" });
+
+    await prompt.focus();
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    const palette = app.window.getByRole("dialog", { name: "Command Palette" });
+    await expect(palette).toBeVisible();
+    const actions = palette.getByRole("listbox", { name: "Actions" });
+    await expect(actions.getByRole("option", { name: /Open Command Palette/ })).toContainText(process.platform === "darwin" ? "⇧⌘P" : "Ctrl+Shift+P");
+    await palette.getByRole("combobox", { name: "Search actions" }).press("Escape");
+    await expect(palette).toBeHidden();
+    await expect(prompt).toBeFocused();
+
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("choose model");
+    await palette.getByRole("option", { name: /Choose Model/ }).click();
+    const modelPicker = app.window.getByRole("dialog", { name: "Choose model" });
+    await expect(modelPicker).toBeVisible();
+    await modelPicker.press("Escape");
+    await expect(app.window.getByRole("button", { name: /Provider and model/ })).toBeFocused();
+
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("reload resources");
+    await palette.getByRole("option", { name: /Reload Pi Resources/ }).click();
+    await expect(app.window.getByRole("status").filter({ hasText: "Pi resources reloaded" })).toBeVisible();
+
+    await app.window.setViewportSize({ width: 800, height: 700 });
+    await prompt.focus();
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("show details");
+    await palette.getByRole("option", { name: /Show Details/ }).click();
+    await expect(app.window.getByRole("complementary", { name: "Inspector" })).toBeVisible();
+    await app.window.getByRole("button", { name: "Close Inspector" }).click();
+    await expect(prompt).toBeFocused();
+    await app.window.setViewportSize({ width: 1180, height: 760 });
+
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("export jsonl");
+    const exportAction = palette.getByRole("option", { name: /Export Task as JSONL/ });
+    await expect(exportAction).toHaveAttribute("aria-disabled", "false");
+    await expect(exportAction).toContainText("File");
+    await exportAction.click();
+    await expect.poll(() => readFile(path.join(environment.root, "pilot-export.jsonl"), "utf8").catch(() => "")).toContain('"type":"session"');
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("export html");
+    await palette.getByRole("option", { name: /Export Task as HTML/ }).click();
+    await expect.poll(() => readFile(path.join(environment.root, "pilot-export.html"), "utf8").catch(() => "")).toContain("<html");
+
+    const activeTasks = app.window.getByRole("list", { name: /Active Tasks in/ }).getByRole("button");
+    await expect(activeTasks).toHaveCount(2);
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("new task");
+    await expect(palette.getByRole("option", { name: /New Task/ })).toContainText(process.platform === "darwin" ? "⌘N" : "Ctrl+N");
+    await palette.getByRole("option", { name: /New Task/ }).click();
+    await expect(activeTasks).toHaveCount(3);
+
+    const nextPrompt = app.window.getByRole("combobox", { name: "Prompt" });
+    await nextPrompt.fill("/compact summarize this");
+    await app.window.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.getByRole("alert")).toContainText("Pi terminal command");
+    expect(provider.requests).toHaveLength(0);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("attaches images and invokes trusted Pi resources through the Electron boundary", async () => {
   const environment = await fixture();
   const provider = await deterministicProvider(environment.root);

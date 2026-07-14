@@ -210,6 +210,7 @@ export type ProjectsApi = {
   queuePrompt(taskPath: string, prompt: string, mode: LiveInputMode): Promise<void>;
   executeCommand(projectPath: string, taskPath: string, command: string, includeInContext: boolean): Promise<void>;
   compactTask(projectPath: string, taskPath: string): Promise<void>;
+  exportTask(projectPath: string, taskPath: string, format: "jsonl" | "html"): Promise<boolean>;
   abortRetry(taskPath: string): Promise<void>;
   abortTask(taskPath: string): Promise<void>;
   openOutput(path: string): Promise<void>;

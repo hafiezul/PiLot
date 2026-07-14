@@ -1,5 +1,6 @@
 import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { desktopActions, type DesktopActionId } from "../shared/actions";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CommandEvidence, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
@@ -385,7 +386,7 @@ function ThinkingPicker({ state, disabled, onSelect }: {
   };
 
   return <>
-    <button ref={trigger} type="button" className="thinking-picker-trigger" aria-haspopup="dialog" aria-expanded={open} aria-label={`Thinking level: ${thinkingLevelLabel(state.thinkingLevel)}`} disabled={disabled} onClick={show}>
+    <button ref={trigger} type="button" data-action="task.chooseThinking" className="thinking-picker-trigger" aria-haspopup="dialog" aria-expanded={open} aria-label={`Thinking level: ${thinkingLevelLabel(state.thinkingLevel)}`} disabled={disabled} onClick={show}>
       <span>Thinking · {thinkingLevelLabel(state.thinkingLevel)}</span><span aria-hidden="true">⌄</span>
     </button>
     <div ref={popover} popover="auto" className="model-picker-popover thinking-picker-popover" role="dialog" aria-label="Choose thinking level" onToggle={(event) => setOpen(event.currentTarget.matches(":popover-open"))} onKeyDown={(event) => {
@@ -480,7 +481,7 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
     </div>}
     {state?.selected && selectedProvider && <>
       <div className="model-control-row">
-        <button ref={pickerTrigger} type="button" className="model-picker-trigger" aria-haspopup="dialog" aria-expanded={pickerOpen} aria-label={`Provider and model: ${selectedProvider.name} · ${state.selected.name} · ${state.selected.id}`} disabled={disabled} onClick={openPicker}>
+        <button ref={pickerTrigger} type="button" data-action="task.chooseModel" className="model-picker-trigger" aria-haspopup="dialog" aria-expanded={pickerOpen} aria-label={`Provider and model: ${selectedProvider.name} · ${state.selected.name} · ${state.selected.id}`} disabled={disabled} onClick={openPicker}>
           <ProviderIcon id={selectedProvider.id} builtIn={selectedProvider.builtIn} />
           <span className="model-trigger-label">{state.selected.name}</span><span aria-hidden="true">⌄</span>
         </button>
@@ -536,12 +537,14 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   </div>;
 }
 
-function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
+function TaskPage({ project, task, reloadToken, onCreate, onDetails, onOpenSettings, onRunChange }: {
   project: ProjectAccess;
   task: TaskSummary;
+  reloadToken: number;
   onCreate(): void;
   onDetails(next: TaskModelState): void;
   onOpenSettings(): void;
+  onRunChange(active: boolean): void;
 }) {
   const [timeline, setTimeline] = useState<TaskRunState>();
   const [modelState, setModelState] = useState<TaskModelState>();
@@ -557,6 +560,7 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   const [liveMode, setLiveMode] = useState<LiveInputMode>("steer");
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [error, setError] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
   const [attachmentError, setAttachmentError] = useState("");
   const taskPage = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
@@ -583,6 +587,7 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
     imageDragDepth.current = 0;
     setAttachmentError("");
     setError("");
+    setActionNotice("");
     const unsubscribe = window.pilot.onTaskRunEvent((next) => {
       if (next.taskPath !== task.path) return;
       receivedRunEvent = true;
@@ -600,7 +605,10 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       updateModelState(model);
     }).catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
     void window.pilot.getTaskResources(project.path, task.path).then((taskResources) => {
-      if (!cancelled) setResources(taskResources);
+      if (!cancelled) {
+        setResources(taskResources);
+        if (reloadToken) setActionNotice("Pi resources reloaded");
+      }
     }).catch((reason) => {
       if (!cancelled) setResources({
         taskPath: task.path,
@@ -610,9 +618,13 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
       });
     });
     return () => { cancelled = true; unsubscribe(); };
-  }, [project.path, task.path]);
+  }, [project.path, task.path, reloadToken]);
 
   useEffect(() => setLiveMode("steer"), [timeline?.activeRunId]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => promptInput.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [task.path]);
 
   useEffect(() => {
     const scroller = taskPage.current?.closest("main");
@@ -666,6 +678,10 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
 
   const activeRun = timeline?.runs.find(({ id }) => id === timeline.activeRunId);
   const active = Boolean(activeRun);
+  useEffect(() => {
+    onRunChange(active);
+    return () => onRunChange(false);
+  }, [active, onRunChange]);
   const live = activeRun?.input.kind === "prompt";
   const liveReady = live && activeRun.status === "running";
   const beforeCursor = draft.slice(0, cursor);
@@ -741,14 +757,15 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   return <div ref={taskPage} className="task-page">
     <header className="topbar task-topbar">
       <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">Local execution location</span></div>
-      <button className="new-task-button" onClick={onCreate}>New Task</button>
+      <button className="new-task-button" data-action="task.new" onClick={onCreate}>New Task</button>
     </header>
     <section className="run-timeline" aria-label="Run timeline">
       <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active} onClick={() => {
         setError("");
         void window.pilot.compactTask(project.path, task.path).then(refreshDetails).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-      }}>Compact context</button></div></div>
+      }} data-action="run.compact">Compact context</button></div></div>
       {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
+      {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
     <div className="composer-dock">
@@ -785,7 +802,7 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
         <label><input type="radio" name="live-input-mode" checked={liveMode === "followUp"} onChange={() => setLiveMode("followUp")} />Follow-up <small>after this Run settles</small></label>
       </fieldset>}
       <div className="composer-editor">
-        <textarea ref={promptInput} id="task-prompt" role="combobox" aria-label="Prompt" aria-autocomplete="list" aria-expanded={showCompletions} aria-controls={completionListId} aria-activedescendant={showCompletions ? `${completionListId}-${completionIndex}` : undefined} value={draft} disabled={active && !live} onChange={(event) => {
+        <textarea ref={promptInput} id="task-prompt" data-action="view.focusPrompt" role="combobox" aria-label="Prompt" aria-autocomplete="list" aria-expanded={showCompletions} aria-controls={completionListId} aria-activedescendant={showCompletions ? `${completionListId}-${completionIndex}` : undefined} value={draft} disabled={active && !live} onChange={(event) => {
           setDraft(event.target.value);
           setCursor(event.target.selectionStart);
           setDismissedCompletion("");
@@ -854,7 +871,7 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
             <span id={imageHelpId} className="visually-hidden">Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each</span>
           </>}
           {active && !draft.trim()
-            ? <button type="button" className="composer-action stop-action" aria-label="Stop Run" title="Stop Run" onClick={() => void window.pilot.abortTask(task.path)}>
+            ? <button type="button" data-action="run.stop" className="composer-action stop-action" aria-label="Stop Run" title="Stop Run" onClick={() => void window.pilot.abortTask(task.path)}>
               <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="6" height="6" rx="1" /></svg>
             </button>
             : <button type="submit" className="composer-action send-action" aria-label="Send" title="Send" disabled={!draft.trim() || (active && !liveReady)}>
@@ -868,21 +885,23 @@ function TaskPage({ project, task, onCreate, onDetails, onOpenSettings }: {
   </div>;
 }
 
-function ProjectPage({ project, needsAccess, selectedTaskPath, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onOpenSettings }: {
+function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onOpenSettings, onRunChange }: {
   project: ProjectAccess;
   needsAccess: boolean;
   selectedTaskPath?: string;
+  reloadToken: number;
   onSelectTask(path: string): void;
   onCreateTask(): void;
   onOpenAccess(): void;
   onChange(state: ProjectsState): void;
   onDetails(state: TaskModelState): void;
   onOpenSettings(): void;
+  onRunChange(active: boolean): void;
 }) {
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   const selectedTask = active.find(({ path }) => path === selectedTaskPath);
-  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} onCreate={onCreateTask} onDetails={onDetails} onOpenSettings={onOpenSettings} />;
+  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} onCreate={onCreateTask} onDetails={onDetails} onOpenSettings={onOpenSettings} onRunChange={onRunChange} />;
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
@@ -896,7 +915,7 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, onSelectTask, onC
         {project.diagnostics.map((diagnostic) => <div key={diagnostic.title}><strong>{diagnostic.title}</strong><p>{diagnostic.detail}</p></div>)}
       </section>}
       <section className="task-section" aria-label="Active tasks">
-        <div className="task-section-heading"><h2>Active Tasks</h2><div><span>{active.length}</span><button className="new-task-button" onClick={onCreateTask}>New Task</button></div></div>
+        <div className="task-section-heading"><h2>Active Tasks</h2><div><span>{active.length}</span><button className="new-task-button" data-action="task.new" onClick={onCreateTask}>New Task</button></div></div>
         {active.length ? <ul>{active.map((task) => <li key={task.path}><button className="task-title-button" onClick={() => onSelectTask(task.path)}>{task.title}</button><span>Active</span><button onClick={() => void window.pilot.setTaskArchived(project.path, task.path, true).then(onChange)}>Archive</button></li>)}</ul> : <p className="muted">No active Tasks</p>}
       </section>
       <section className="task-section" aria-label="Archived tasks">
@@ -974,6 +993,86 @@ function SettingsPage({ initialDestination, onChange, onClose }: { initialDestin
   </div>;
 }
 
+type ActionAvailability = Record<DesktopActionId, { enabled: boolean; reason?: string }>;
+
+function shortcutLabel(accelerator?: string) {
+  if (!accelerator) return "";
+  const parts = accelerator.split("+");
+  if (window.pilot.platform !== "darwin") return parts.map((part) => part === "CommandOrControl" ? "Ctrl" : part).join("+");
+  const symbols: Record<string, string> = { Control: "⌃", Alt: "⌥", Shift: "⇧", CommandOrControl: "⌘" };
+  const order = ["Control", "Alt", "Shift", "CommandOrControl"];
+  return [...parts.filter((part) => order.includes(part)).sort((left, right) => order.indexOf(left) - order.indexOf(right)), ...parts.filter((part) => !order.includes(part))]
+    .map((part) => symbols[part] ?? part).join("");
+}
+
+function CommandPalette({ open, availability, onClose, onInvoke }: {
+  open: boolean;
+  availability: ActionAvailability;
+  onClose(): void;
+  onInvoke(id: DesktopActionId, returnFocus?: HTMLElement | null): void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const restoreFocus = useRef(true);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+  const results = desktopActions.filter((action) => words.every((word) =>
+    `${action.label} ${action.menu} ${action.keywords}`.toLocaleLowerCase().includes(word)));
+  const activeIndex = Math.min(selected, Math.max(0, results.length - 1));
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    if (open && !element.open) {
+      previousFocus.current = document.activeElement as HTMLElement | null;
+      restoreFocus.current = true;
+      setQuery("");
+      setSelected(0);
+      element.showModal();
+      requestAnimationFrame(() => search.current?.focus());
+    } else if (!open && element.open) {
+      element.close();
+      if (restoreFocus.current) requestAnimationFrame(() => previousFocus.current?.focus());
+    }
+  }, [open]);
+  useEffect(() => setSelected(0), [query]);
+  useEffect(() => {
+    dialog.current?.querySelector<HTMLElement>(`#command-palette-option-${activeIndex}`)?.scrollIntoView({ block: "nearest" });
+  }, [query, activeIndex]);
+
+  const invoke = (id: DesktopActionId) => {
+    if (!availability[id].enabled) return;
+    restoreFocus.current = !["task.new", "task.archive", "task.chooseModel", "task.chooseThinking", "run.compact", "view.focusPrompt", "view.details", "view.settings"].includes(id);
+    onClose();
+    requestAnimationFrame(() => onInvoke(id, previousFocus.current));
+  };
+
+  return <dialog ref={dialog} className="command-palette" aria-label="Command Palette" onCancel={(event) => { event.preventDefault(); restoreFocus.current = true; onClose(); }}>
+    <label><span className="visually-hidden">Search actions</span><input ref={search} type="search" role="combobox" aria-label="Search actions" aria-expanded="true" aria-controls="command-palette-results" aria-activedescendant={results.length ? `command-palette-option-${activeIndex}` : undefined} placeholder="Type an action…" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+      if (!results.length) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        setSelected((current) => (current + (event.key === "ArrowDown" ? 1 : -1) + results.length) % results.length);
+        event.preventDefault();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        invoke(results[activeIndex]?.id ?? results[0].id);
+      }
+    }} /></label>
+    <div id="command-palette-results" className="command-palette-results" role="listbox" aria-label="Actions">
+      {results.map((action, index) => {
+        const state = availability[action.id];
+        return <button id={`command-palette-option-${index}`} key={action.id} type="button" role="option" aria-selected={activeIndex === index} aria-disabled={!state.enabled} onMouseMove={() => setSelected(index)} onClick={() => invoke(action.id)}>
+          <span><strong>{action.label}</strong><small>{state.enabled ? action.menu : state.reason}</small></span>
+          {"accelerator" in action && <kbd>{shortcutLabel(action.accelerator)}</kbd>}
+        </button>;
+      })}
+      {!results.length && <p>No actions found</p>}
+    </div>
+  </dialog>;
+}
+
 function App() {
   const [state, setState] = useState<StartupState>();
   const [projects, setProjects] = useState<ProjectsState>();
@@ -981,8 +1080,14 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsDestination, setSettingsDestination] = useState<"general" | "providers">("general");
   const [showProjectAccess, setShowProjectAccess] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [runActive, setRunActive] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [actionError, setActionError] = useState("");
   const [taskDetails, setTaskDetails] = useState<TaskModelState>();
   const settingsButton = useRef<HTMLButtonElement>(null);
+  const detailsReturnFocus = useRef<HTMLElement | null>(null);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
     setState(startup);
     setProjects(projectState);
@@ -1000,26 +1105,110 @@ function App() {
   const createSelectedTask = useCallback(async () => {
     const project = projects?.selected;
     if (!project) return;
-    const task = await window.pilot.createTask(project.path);
-    setProjects(await window.pilot.getProjects());
-    setTaskDetails(undefined);
-    setSelectedTaskPath(task.path);
+    setActionError("");
+    try {
+      const task = await window.pilot.createTask(project.path);
+      setProjects(await window.pilot.getProjects());
+      setTaskDetails(undefined);
+      setSelectedTaskPath(task.path);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    }
   }, [projects?.selected?.path]);
   const openProviderSettings = useCallback(() => {
     setSettingsDestination("providers");
     setShowSettings(true);
   }, []);
+  const handleRunChange = useCallback((active: boolean) => setRunActive(active), []);
 
+  const selectedProject = projects?.selected;
+  const selectedTask = selectedProject?.tasks.find(({ path }) => path === selectedTaskPath);
+  const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
+  const workspaceAvailable = !showSettings;
+  const taskAvailable = Boolean(workspaceAvailable && selectedTask && !needsProjectAccess);
+  const unavailable = (reason: string) => ({ enabled: false, reason });
+  const availability: ActionAvailability = {
+    "project.add": { enabled: workspaceAvailable },
+    "task.new": taskAvailable || Boolean(workspaceAvailable && selectedProject && !needsProjectAccess) ? { enabled: true } : unavailable("Select an admitted Project"),
+    "task.exportJsonl": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
+    "task.exportHtml": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
+    "task.archive": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
+    "task.chooseModel": taskAvailable && !runActive && Boolean(taskDetails?.selected) ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task with an available model"),
+    "task.chooseThinking": taskAvailable && !runActive && (taskDetails?.thinkingLevels.length ?? 0) > 1 ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "No alternative thinking levels"),
+    "resources.reload": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
+    "run.compact": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "A Run is active" : "Select a Task"),
+    "run.stop": runActive ? { enabled: true } : unavailable("No Run is active"),
+    "view.focusPrompt": taskAvailable ? { enabled: true } : unavailable("Select a Task"),
+    "view.details": workspaceAvailable ? { enabled: true } : unavailable("Return to the command center"),
+    "view.settings": { enabled: true },
+    "view.commandPalette": { enabled: true },
+  };
+
+  const invokeAction = useCallback((id: DesktopActionId, returnFocus?: HTMLElement | null) => {
+    if (!availability[id].enabled) return;
+    const attempt = (operation: Promise<unknown>) => {
+      setActionError("");
+      void operation.catch((reason) => setActionError(reason instanceof Error ? reason.message : String(reason)));
+    };
+    if (id === "view.commandPalette") { setPaletteOpen(true); return; }
+    if (id === "view.settings") { setSettingsDestination("general"); setShowSettings(true); return; }
+    if (id === "view.details") {
+      detailsReturnFocus.current = returnFocus ?? document.activeElement as HTMLElement | null;
+      setShowDetails(true);
+      requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-action="view.details"]')?.focus());
+      return;
+    }
+    if (id === "project.add") { attempt(window.pilot.addProject().then(setProjects)); return; }
+    if (id === "task.new") { void createSelectedTask(); return; }
+    if (id === "task.archive" && selectedProject && selectedTask) {
+      attempt(window.pilot.setTaskArchived(selectedProject.path, selectedTask.path, true).then((next) => {
+        setProjects(next);
+        setSelectedTaskPath(undefined);
+        setTaskDetails(undefined);
+        requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-action="task.new"]')?.focus());
+      }));
+      return;
+    }
+    if ((id === "task.exportJsonl" || id === "task.exportHtml") && selectedProject && selectedTask) {
+      attempt(window.pilot.exportTask(selectedProject.path, selectedTask.path, id === "task.exportJsonl" ? "jsonl" : "html"));
+      return;
+    }
+    if (id === "resources.reload") { setReloadToken((value) => value + 1); return; }
+    if (id === "run.stop" && selectedTask) { attempt(window.pilot.abortTask(selectedTask.path)); return; }
+    const target = document.querySelector<HTMLElement>(`[data-action="${id}"]`);
+    if (!target) return;
+    target.focus();
+    if (id !== "view.focusPrompt") target.click();
+  }, [availability, createSelectedTask, selectedProject?.path, selectedTask?.path]);
+  const closeDetails = () => {
+    setShowDetails(false);
+    requestAnimationFrame(() => detailsReturnFocus.current?.focus());
+  };
+
+  const enabledActionKey = desktopActions.filter(({ id }) => availability[id].enabled).map(({ id }) => id).join("|");
+  useEffect(() => window.pilot.setEnabledActions(enabledActionKey ? enabledActionKey.split("|") as DesktopActionId[] : []), [enabledActionKey]);
+  useEffect(() => window.pilot.onAction(invokeAction), [invokeAction]);
+  useEffect(() => {
+    const openPalette = (event: KeyboardEvent) => {
+      if ((window.pilot.platform === "darwin" ? event.metaKey : event.ctrlKey) && event.shiftKey && event.key.toLocaleLowerCase() === "p") {
+        event.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", openPalette);
+    return () => window.removeEventListener("keydown", openPalette);
+  }, []);
   useEffect(() => {
     refresh();
     void window.pilot.getPreferences().then((value) => applyAppearance(value.appearance));
   }, []);
 
-  const selectedProject = projects?.selected;
-  const selectedTask = selectedProject?.tasks.find(({ path }) => path === selectedTaskPath);
-  const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
-
-  if (showSettings) return <><div className="window-bar" aria-hidden="true" /><SettingsPage initialDestination={settingsDestination} onChange={refresh} onClose={closeSettings} /></>;
+  if (showSettings) return <>
+    <div className="window-bar" aria-hidden="true" />
+    <SettingsPage initialDestination={settingsDestination} onChange={refresh} onClose={closeSettings} />
+    <CommandPalette open={paletteOpen} availability={availability} onClose={() => setPaletteOpen(false)} onInvoke={invokeAction} />
+    {actionError && <p className="action-error" role="alert">{actionError}</p>}
+  </>;
 
   return (
     <>
@@ -1033,7 +1222,7 @@ function App() {
           </header>
           <div className="nav-heading">
             <span>Projects</span>
-            <button aria-label="Add project" title="Add Project" onClick={() => void window.pilot.addProject().then(setProjects)}>+</button>
+            <button data-action="project.add" aria-label="Add project" title="Add Project" onClick={() => void window.pilot.addProject().then(setProjects)}>+</button>
           </div>
           {projects?.projects.length ? (
             <ul className="project-list">
@@ -1059,7 +1248,7 @@ function App() {
           )}
           <div className="nav-footer">
             <span className="command-center"><span aria-hidden="true">⌘</span> Command center</span>
-            <button ref={settingsButton} className="settings-button" aria-label="Settings" title="Settings" onClick={() => { setSettingsDestination("general"); setShowSettings(true); }}><span aria-hidden="true">⚙</span></button>
+            <button ref={settingsButton} data-action="view.settings" className="settings-button" aria-label="Settings" title="Settings" onClick={() => { setSettingsDestination("general"); setShowSettings(true); }}><span aria-hidden="true">⚙</span></button>
           </div>
         </nav>
 
@@ -1068,12 +1257,14 @@ function App() {
             project={selectedProject}
             needsAccess={needsProjectAccess}
             selectedTaskPath={selectedTaskPath}
+            reloadToken={reloadToken}
             onSelectTask={(path) => { setTaskDetails(undefined); setSelectedTaskPath(path); }}
             onCreateTask={() => void createSelectedTask()}
             onOpenAccess={() => setShowProjectAccess(true)}
             onChange={setProjects}
             onDetails={setTaskDetails}
             onOpenSettings={openProviderSettings}
+            onRunChange={handleRunChange}
           /> : <>
             <header className="topbar">
               <div>
@@ -1110,12 +1301,13 @@ function App() {
           </>}
         </main>
 
-        <aside aria-label="Inspector" className="inspector">
+        <aside aria-label="Inspector" className={`inspector${showDetails ? " details-visible" : ""}`}>
           <div className="tabs" role="tablist" aria-label="Inspector views">
-            <button role="tab" aria-selected="true">Details</button>
+            <button role="tab" data-action="view.details" aria-selected="true">Details</button>
             <button role="tab" aria-selected="false" disabled>Changes</button>
             <button role="tab" aria-selected="false" disabled>History</button>
           </div>
+          <button type="button" className="inspector-close" aria-label="Close Inspector" onClick={closeDetails}>×</button>
           <div className="inspector-body">
             {selectedProject ? needsProjectAccess ? <>
               <p className="eyebrow">Project</p>
@@ -1152,6 +1344,8 @@ function App() {
         </aside>
       </div>
       {selectedProject && (needsProjectAccess || showProjectAccess) && <ProjectAccessDialog project={selectedProject} dismissible={!needsProjectAccess} onChange={updateProjectAccess} onClose={closeProjectAccess} />}
+      <CommandPalette open={paletteOpen} availability={availability} onClose={() => setPaletteOpen(false)} onInvoke={invokeAction} />
+      {actionError && <p className="action-error" role="alert">{actionError}</p>}
     </>
   );
 }

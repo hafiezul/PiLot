@@ -1,10 +1,18 @@
 const { contextBridge, ipcRenderer } = require("electron") as typeof import("electron");
+import type { DesktopActionId } from "./shared/actions.js";
 import type { TaskRunState } from "./shared/projects.js";
 import type { OAuthEvent } from "./shared/providers.js";
 import type { PiLotApi } from "./shared/readiness.js";
 
 const api: PiLotApi = {
   getStartupState: () => ipcRenderer.invoke("startup:get"),
+  platform: process.platform as "darwin" | "win32" | "linux",
+  setEnabledActions: (ids) => ipcRenderer.send("actions:set-enabled", ids),
+  onAction: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, id: DesktopActionId) => listener(id);
+    ipcRenderer.on("actions:invoke", handler);
+    return () => ipcRenderer.removeListener("actions:invoke", handler);
+  },
   getPreferences: () => ipcRenderer.invoke("preferences:get"),
   setAppearance: (appearance) => ipcRenderer.invoke("preferences:set-appearance", appearance),
   setExpandThinking: (expand) => ipcRenderer.invoke("preferences:set-expand-thinking", expand),
@@ -33,6 +41,7 @@ const api: PiLotApi = {
   queuePrompt: (taskPath, prompt, mode) => ipcRenderer.invoke("tasks:queue", taskPath, prompt, mode),
   executeCommand: (projectPath, taskPath, command, includeInContext) => ipcRenderer.invoke("tasks:command", projectPath, taskPath, command, includeInContext),
   compactTask: (projectPath, taskPath) => ipcRenderer.invoke("tasks:compact", projectPath, taskPath),
+  exportTask: (projectPath, taskPath, format) => ipcRenderer.invoke("tasks:export", projectPath, taskPath, format),
   abortRetry: (taskPath) => ipcRenderer.invoke("tasks:abort-retry", taskPath),
   abortTask: (taskPath) => ipcRenderer.invoke("tasks:abort", taskPath),
   openOutput: (path) => ipcRenderer.invoke("outputs:open", path),
