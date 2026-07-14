@@ -198,6 +198,10 @@ app.whenReady().then(async () => {
     if (typeof value !== "string" || !value) throw new Error("A Task path is required");
     return value;
   };
+  const requireHistoryEntry = (value: unknown) => {
+    if (typeof value !== "string" || !value || value.length > 128 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error("A history entry is required");
+    return value;
+  };
   const editorContext = async (projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
@@ -239,6 +243,20 @@ app.whenReady().then(async () => {
     getTaskModelState(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) =>
     getTaskResources(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-history", async (_event, projectPath: unknown, taskPath: unknown) =>
+    runs.getTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath)));
+  ipcMain.handle("tasks:navigate-history", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, summarize: unknown, customInstructions: unknown) => {
+    if (typeof summarize !== "boolean" || (customInstructions !== undefined && typeof customInstructions !== "string")) throw new Error("Choose valid history navigation options");
+    return runs.navigateTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId), summarize, customInstructions as string | undefined);
+  });
+  ipcMain.handle("tasks:set-history-label", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, label: unknown) => {
+    if (label !== undefined && typeof label !== "string") throw new Error("A history label must be text");
+    return runs.setTaskHistoryLabel(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId), label as string | undefined);
+  });
+  ipcMain.handle("tasks:fork-history", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown) =>
+    runs.forkTaskFromHistory(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId)));
+  ipcMain.handle("tasks:clone-history", async (_event, projectPath: unknown, taskPath: unknown) =>
+    runs.cloneTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath)));
   ipcMain.handle("tasks:get-changes", async (_event, projectPath: unknown, taskPath: unknown) =>
     getTaskChanges(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-file-diff", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {

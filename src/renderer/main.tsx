@@ -4,7 +4,7 @@ import { desktopActions, type DesktopActionId } from "../shared/actions";
 import type { EditorId, EditorState } from "../shared/editors";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskFileDiff, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
@@ -297,7 +297,7 @@ function RunBlock({ run, index, expandThinking, changePaths, onOpenChange }: { r
   </article>;
 }
 
-type InspectorView = "details" | "changes";
+type InspectorView = "details" | "changes" | "history";
 type DiffRow = { kind: "hunk"; text: string } | { kind: "line"; line: DiffLine };
 
 const changeStatusLabels: Record<ChangedFile["status"], string> = {
@@ -311,8 +311,8 @@ const changeStatusLabels: Record<ChangedFile["status"], string> = {
   untracked: "Untracked",
 };
 
-function InspectorTabs({ selected, changeCount, onSelect }: { selected: InspectorView; changeCount: number; onSelect(view: InspectorView): void }) {
-  const tabs: Array<{ id: InspectorView; label: string }> = [{ id: "details", label: "Details" }, { id: "changes", label: "Changes" }];
+function InspectorTabs({ selected, changeCount, historyPaths, onSelect }: { selected: InspectorView; changeCount: number; historyPaths: number; onSelect(view: InspectorView): void }) {
+  const tabs: Array<{ id: InspectorView; label: string }> = [{ id: "details", label: "Details" }, { id: "changes", label: "Changes" }, { id: "history", label: "History" }];
   const move = (event: React.KeyboardEvent<HTMLButtonElement>, direction: number) => {
     const index = tabs.findIndex(({ id }) => id === selected);
     const next = tabs[(index + direction + tabs.length) % tabs.length];
@@ -321,13 +321,12 @@ function InspectorTabs({ selected, changeCount, onSelect }: { selected: Inspecto
     event.preventDefault();
   };
   return <div className="tabs" role="tablist" aria-label="Inspector views">
-    {tabs.map(({ id, label }) => <button key={id} id={`inspector-${id}-tab`} role="tab" data-action={id === "details" ? "view.details" : undefined} aria-controls={`inspector-${id}-panel`} aria-selected={selected === id} aria-label={id === "changes" ? `Changes, ${changeCount} changed file${changeCount === 1 ? "" : "s"}` : label} tabIndex={selected === id ? 0 : -1} onClick={() => onSelect(id)} onKeyDown={(event) => {
+    {tabs.map(({ id, label }) => <button key={id} id={`inspector-${id}-tab`} role="tab" data-action={id === "details" ? "view.details" : undefined} aria-controls={`inspector-${id}-panel`} aria-selected={selected === id} aria-label={id === "changes" ? `Changes, ${changeCount} changed file${changeCount === 1 ? "" : "s"}` : id === "history" ? `History, ${historyPaths} active path${historyPaths === 1 ? "" : "s"}` : label} tabIndex={selected === id ? 0 : -1} onClick={() => onSelect(id)} onKeyDown={(event) => {
       if (event.key === "ArrowLeft") move(event, -1);
       else if (event.key === "ArrowRight") move(event, 1);
       else if (event.key === "Home") move(event, -tabs.findIndex(({ id: value }) => value === selected));
       else if (event.key === "End") move(event, tabs.length - 1 - tabs.findIndex(({ id: value }) => value === selected));
-    }}><span>{label}</span>{id === "changes" && changeCount > 0 && <span className="tab-badge" aria-hidden="true">{changeCount}</span>}</button>)}
-    <button role="tab" aria-selected="false" tabIndex={-1} disabled>History</button>
+    }}><span>{label}</span>{id === "changes" && changeCount > 0 && <span className="tab-badge" aria-hidden="true">{changeCount}</span>}{id === "history" && historyPaths > 1 && <span className="tab-badge" aria-hidden="true">{historyPaths}</span>}</button>)}
   </div>;
 }
 
@@ -563,6 +562,115 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
           </section>}
         </>}
     {(diffError || openError || editorError) && <p className="error changes-error" role="alert">{diffError || openError || editorError}</p>}
+  </section>;
+}
+
+type FlatHistoryNode = { node: TaskHistoryNode; depth: number; parentId?: string; position: number; setSize: number };
+
+function HistoryPanel({ project, task, history, loadError, disabled, onChange, onNavigate, onTaskCreated }: {
+  project: ProjectAccess;
+  task: TaskSummary;
+  history?: TaskHistoryState;
+  loadError: string;
+  disabled: boolean;
+  onChange(next: TaskHistoryState): void;
+  onNavigate(editorText?: string): void;
+  onTaskCreated(result: TaskHistoryTaskResult): Promise<void>;
+}) {
+  const tree = useRef<HTMLDivElement>(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [label, setLabel] = useState("");
+  const [summarize, setSummarize] = useState(false);
+  const [summaryFocus, setSummaryFocus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const allNodes = useMemo(() => {
+    const values: TaskHistoryNode[] = [];
+    const visit = (nodes: TaskHistoryNode[]) => nodes.forEach((node) => { values.push(node); visit(node.children); });
+    visit(history?.roots ?? []);
+    return values;
+  }, [history]);
+
+  useEffect(() => {
+    setExpanded(new Set(allNodes.filter(({ children }) => children.length).map(({ id }) => id)));
+    setSelectedId((current) => allNodes.some(({ id }) => id === current) ? current : history?.currentLeafId ?? allNodes[0]?.id ?? "");
+  }, [history?.taskPath, history?.currentLeafId, history?.pathCount]);
+  const selected = allNodes.find(({ id }) => id === selectedId);
+  useEffect(() => setLabel(selected?.label ?? ""), [selected?.id, selected?.label]);
+  useLayoutEffect(() => {
+    requestAnimationFrame(() => tree.current?.querySelector<HTMLElement>('[data-current="true"]')?.scrollIntoView({ block: "nearest" }));
+  }, [history?.taskPath, history?.currentLeafId]);
+
+  const flat = useMemo(() => {
+    const values: FlatHistoryNode[] = [];
+    const visit = (nodes: TaskHistoryNode[], depth: number, parentId?: string) => nodes.forEach((node, index) => {
+      values.push({ node, depth, parentId, position: index + 1, setSize: nodes.length });
+      if (expanded.has(node.id)) visit(node.children, depth + 1, node.id);
+    });
+    visit(history?.roots ?? [], 1);
+    return values;
+  }, [history, expanded]);
+  const focusIndex = (index: number) => {
+    const next = Math.max(0, Math.min(flat.length - 1, index));
+    const id = flat[next]?.node.id;
+    if (!id) return;
+    setSelectedId(id);
+    requestAnimationFrame(() => tree.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[next]?.focus());
+  };
+  const attempt = async (operation: () => Promise<void>) => {
+    setBusy(true);
+    setNotice("");
+    setError("");
+    try { await operation(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  };
+
+  if (!history) return loadError
+    ? <div className="history-empty" role="alert"><strong>Could not read Task history</strong><p>{loadError}</p></div>
+    : <p className="muted history-loading" role="status">Reading Task history…</p>;
+
+  return <section className="history-panel" aria-label="Task history inspector" aria-busy={busy}>
+    <header className="history-heading"><div><p className="eyebrow">Pi session tree</p><h2>Task history</h2></div><div><span>{history.pathCount} path{history.pathCount === 1 ? "" : "s"}</span><button type="button" disabled={disabled || busy} onClick={() => void attempt(async () => onTaskCreated(await window.pilot.cloneTaskHistory(project.path, task.path)))}>Clone active path</button></div></header>
+    {!history.roots.length ? <div className="history-empty"><strong>No history entries yet</strong><p>Submit a prompt to begin this Task's history.</p></div> : <>
+      {history.roots.length > 1 && <p className="history-root-branch" role="note">Task start · {history.roots.length} branches</p>}
+      <div ref={tree} className="history-tree" role="tree" aria-label="Task history">
+        {flat.map(({ node, depth, parentId, position, setSize }, index) => <button key={node.id} type="button" role="treeitem" data-current={node.current || undefined} aria-level={depth} aria-posinset={position} aria-setsize={setSize} aria-selected={node.id === selectedId} aria-expanded={node.children.length ? expanded.has(node.id) : undefined} tabIndex={node.id === selectedId ? 0 : -1} style={{ paddingInlineStart: `${8 + (depth - 1) * 17}px` }} onFocus={() => setSelectedId(node.id)} onClick={() => setSelectedId(node.id)} onKeyDown={(event) => {
+          if (event.key === "ArrowDown") focusIndex(index + 1);
+          else if (event.key === "ArrowUp") focusIndex(index - 1);
+          else if (event.key === "Home") focusIndex(0);
+          else if (event.key === "End") focusIndex(flat.length - 1);
+          else if (event.key === "ArrowRight" && node.children.length) {
+            if (!expanded.has(node.id)) setExpanded((current) => new Set(current).add(node.id));
+            else focusIndex(index + 1);
+          } else if (event.key === "ArrowLeft") {
+            if (node.children.length && expanded.has(node.id)) setExpanded((current) => { const next = new Set(current); next.delete(node.id); return next; });
+            else if (parentId) focusIndex(flat.findIndex(({ node: candidate }) => candidate.id === parentId));
+          } else return;
+          event.preventDefault();
+        }}>
+          <span className={`history-marker history-${node.kind}`} aria-hidden="true">{node.children.length ? expanded.has(node.id) ? "−" : "+" : "·"}</span>
+          <span className="history-entry-copy"><span><strong>{node.title}</strong>{node.label && <span className="history-label">{node.label}</span>}</span>{node.description && <small>{node.description}</small>}<span className="history-entry-meta"><time dateTime={node.timestamp}>{new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{node.children.length > 1 && <span>{node.children.length} branches</span>}{node.current && <span className="history-current">Current leaf</span>}</span></span>
+        </button>)}
+      </div>
+      {selected && <section className="history-actions" aria-label={`Actions for ${selected.title}`}>
+        {selected.kind === "prompt" && <button className="history-fork" type="button" disabled={disabled || busy} onClick={() => void attempt(async () => onTaskCreated(await window.pilot.forkTaskFromHistory(project.path, task.path, selected.id)))}>Fork from prompt</button>}
+        <form onSubmit={(event) => { event.preventDefault(); void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id, label); onChange(next); setNotice("Label saved"); }); }}>
+          <label>History label<input aria-label="History label" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} /></label>
+          <div><button type="submit" disabled={disabled || busy || !label.trim()}>Save label</button><button type="button" disabled={disabled || busy || !selected.label} onClick={() => void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id); onChange(next); setLabel(""); setNotice("Label cleared"); })}>Clear label</button></div>
+        </form>
+        <fieldset disabled={disabled || busy || selected.current}>
+          <legend>Continue from this entry</legend>
+          <label className="history-summary-choice"><input type="checkbox" checked={summarize} onChange={(event) => setSummarize(event.target.checked)} />Summarize abandoned branch</label>
+          {summarize && <label>Summary focus<input aria-label="Summary focus" value={summaryFocus} maxLength={2000} placeholder="Optional instructions" onChange={(event) => setSummaryFocus(event.target.value)} /></label>}
+          <button type="button" onClick={() => void attempt(async () => { const result = await window.pilot.navigateTaskHistory(project.path, task.path, selected.id, summarize, summaryFocus.trim() || undefined); onChange(result.history); onNavigate(result.editorText); setNotice("History position changed"); })}>Navigate here</button>
+        </fieldset>
+      </section>}
+    </>}
+    {busy && <p className="muted history-notice" role="status">Updating Task history…</p>}
+    {notice && <p className="success history-notice" role="status">{notice}</p>}
+    {error && <p className="error history-notice" role="alert">{error}</p>}
   </section>;
 }
 
@@ -818,13 +926,16 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   </div>;
 }
 
-function TaskPage({ project, task, reloadToken, changePaths, onCreate, onDetails, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
+function TaskPage({ project, task, reloadToken, revision, historyDraft, changePaths, onCreate, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
   project: ProjectAccess;
   task: TaskSummary;
   reloadToken: number;
+  revision: number;
+  historyDraft?: { text: string; version: number };
   changePaths: string[];
   onCreate(): void;
   onDetails(next: TaskModelState): void;
+  onHistoryChange(): void;
   onOpenSettings(): void;
   onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
@@ -904,8 +1015,17 @@ function TaskPage({ project, task, reloadToken, changePaths, onCreate, onDetails
       });
     });
     return () => { cancelled = true; unsubscribe(); };
-  }, [project.path, task.path, reloadToken, onError]);
+  }, [project.path, task.path, reloadToken, revision, onError]);
 
+  useEffect(() => {
+    if (!historyDraft) return;
+    setDraft(historyDraft.text);
+    setCursor(historyDraft.text.length);
+    requestAnimationFrame(() => {
+      promptInput.current?.focus();
+      promptInput.current?.setSelectionRange(historyDraft.text.length, historyDraft.text.length);
+    });
+  }, [historyDraft?.version]);
   useEffect(() => setLiveMode("steer"), [timeline?.activeRunId]);
   useEffect(() => {
     const frame = requestAnimationFrame(() => promptInput.current?.focus());
@@ -1030,9 +1150,10 @@ function TaskPage({ project, task, reloadToken, changePaths, onCreate, onDetails
       : command !== undefined
         ? window.pilot.executeCommand(project.path, task.path, command, !hiddenCommand)
         : window.pilot.submitPrompt(project.path, task.path, input, images);
-    void operation.then(() => {
+    void operation.then(async () => {
       if (!active) setImages([]);
-      return refreshDetails();
+      await refreshDetails();
+      onHistoryChange();
     }).catch((reason) => {
       setDraft((current) => [input, current].filter((value) => value.trim()).join("\n\n"));
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -1049,7 +1170,7 @@ function TaskPage({ project, task, reloadToken, changePaths, onCreate, onDetails
       <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active} onClick={() => {
         setError("");
         onActionStart();
-        void window.pilot.compactTask(project.path, task.path).then(refreshDetails).catch((reason) => onError(reason, "Add more Task history or check provider access, then try compacting again."));
+        void window.pilot.compactTask(project.path, task.path).then(async () => { await refreshDetails(); onHistoryChange(); }).catch((reason) => onError(reason, "Add more Task history or check provider access, then try compacting again."));
       }} data-action="run.compact">Compact context</button></div></div>
       {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
       {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
@@ -1144,7 +1265,7 @@ function TaskPage({ project, task, reloadToken, changePaths, onCreate, onDetails
       </div>}
       <div className="composer-controls">
         <div className="composer-leading-controls">
-          <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={updateModelState} onOpenSettings={onOpenSettings} onActionStart={onActionStart} onError={onError} />
+          <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={(next) => { updateModelState(next); onHistoryChange(); }} onOpenSettings={onOpenSettings} onActionStart={onActionStart} onError={onError} />
         </div>
         <div className="composer-submit-controls">
           {!active && <>
@@ -1172,17 +1293,20 @@ function TaskPage({ project, task, reloadToken, changePaths, onCreate, onDetails
   </div>;
 }
 
-function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, changePaths, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
+function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revision, historyDraft, changePaths, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
   project: ProjectAccess;
   needsAccess: boolean;
   selectedTaskPath?: string;
   reloadToken: number;
+  revision: number;
+  historyDraft?: { text: string; version: number };
   changePaths: string[];
   onSelectTask(path: string): void;
   onCreateTask(): void;
   onOpenAccess(): void;
   onChange(state: ProjectsState): void;
   onDetails(state: TaskModelState): void;
+  onHistoryChange(): void;
   onOpenSettings(): void;
   onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
@@ -1192,7 +1316,7 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, chan
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   const selectedTask = active.find(({ path }) => path === selectedTaskPath);
-  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} changePaths={changePaths} onCreate={onCreateTask} onDetails={onDetails} onOpenSettings={onOpenSettings} onOpenChange={onOpenChange} onRunChange={onRunChange} onActionStart={onActionStart} onError={onError} />;
+  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} revision={revision} historyDraft={historyDraft} changePaths={changePaths} onCreate={onCreateTask} onDetails={onDetails} onHistoryChange={onHistoryChange} onOpenSettings={onOpenSettings} onOpenChange={onOpenChange} onRunChange={onRunChange} onActionStart={onActionStart} onError={onError} />;
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
@@ -1421,6 +1545,10 @@ function App() {
   const [taskChanges, setTaskChanges] = useState<TaskChanges>();
   const [changesError, setChangesError] = useState("");
   const [selectedChangePath, setSelectedChangePath] = useState<string>();
+  const [taskHistory, setTaskHistory] = useState<TaskHistoryState>();
+  const [historyError, setHistoryError] = useState("");
+  const [taskRevision, setTaskRevision] = useState(0);
+  const [historyDraft, setHistoryDraft] = useState<{ taskPath: string; text: string; version: number }>();
   const settingsButton = useRef<HTMLButtonElement>(null);
   const detailsReturnFocus = useRef<HTMLElement | null>(null);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
@@ -1503,6 +1631,18 @@ function App() {
     void refreshChanges();
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [selectedProject?.path, selectedTask?.path, needsProjectAccess]);
+  useEffect(() => {
+    let cancelled = false;
+    setTaskHistory(undefined);
+    setHistoryError("");
+    if (!selectedProject || !selectedTask || needsProjectAccess) return;
+    void window.pilot.getTaskHistory(selectedProject.path, selectedTask.path).then((next) => {
+      if (!cancelled) setTaskHistory(next);
+    }).catch((reason) => {
+      if (!cancelled) setHistoryError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => { cancelled = true; };
+  }, [selectedProject?.path, selectedTask?.path, needsProjectAccess, taskRevision]);
   const unavailable = (reason: string) => ({ enabled: false, reason });
   const availability: ActionAvailability = {
     "project.add": workspaceAvailable ? { enabled: true } : unavailable("Return to the command center to add a Project"),
@@ -1641,12 +1781,15 @@ function App() {
             needsAccess={needsProjectAccess}
             selectedTaskPath={selectedTaskPath}
             reloadToken={reloadToken}
+            revision={taskRevision}
+            historyDraft={historyDraft?.taskPath === selectedTaskPath ? historyDraft : undefined}
             changePaths={taskChanges?.files.flatMap(({ path, previousPath }) => previousPath ? [path, previousPath] : [path]) ?? []}
             onSelectTask={(path) => { setTaskDetails(undefined); setSelectedTaskPath(path); }}
             onCreateTask={() => void createSelectedTask()}
             onOpenAccess={() => setShowProjectAccess(true)}
             onChange={setProjects}
             onDetails={setTaskDetails}
+            onHistoryChange={() => setTaskRevision((value) => value + 1)}
             onOpenSettings={openProviderSettings}
             onOpenChange={openChange}
             onRunChange={handleRunChange}
@@ -1689,7 +1832,7 @@ function App() {
         </main>
 
         <aside aria-label="Inspector" className={`inspector${showDetails ? " details-visible" : ""}`}>
-          <InspectorTabs selected={inspectorView} changeCount={taskChanges?.files.length ?? 0} onSelect={setInspectorView} />
+          <InspectorTabs selected={inspectorView} changeCount={taskChanges?.files.length ?? 0} historyPaths={taskHistory?.pathCount ?? 0} onSelect={setInspectorView} />
           <button type="button" className="inspector-close" aria-label="Close Inspector" onClick={closeDetails}>×</button>
           {inspectorView === "details" ? <div id="inspector-details-panel" className="inspector-body" role="tabpanel" aria-labelledby="inspector-details-tab">
             {selectedProject ? needsProjectAccess ? <>
@@ -1723,10 +1866,24 @@ function App() {
                 <div><dt>Network reporting</dt><dd>Off</dd></div>
               </dl>
             </>}
-          </div> : <div id="inspector-changes-panel" className="inspector-body changes-inspector-body" role="tabpanel" aria-labelledby="inspector-changes-tab">
+          </div> : inspectorView === "changes" ? <div id="inspector-changes-panel" className="inspector-body changes-inspector-body" role="tabpanel" aria-labelledby="inspector-changes-tab">
             {selectedProject && selectedTask && !needsProjectAccess
               ? <ChangesPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} changes={taskChanges} loadError={changesError} selectedPath={selectedChangePath} onSelect={setSelectedChangePath} />
               : <div className="changes-empty"><strong>Select a Task</strong><p>Choose an active Task to review its Git changes.</p></div>}
+          </div> : <div id="inspector-history-panel" className="inspector-body history-inspector-body" role="tabpanel" aria-labelledby="inspector-history-tab">
+            {selectedProject && selectedTask && !needsProjectAccess
+              ? <HistoryPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} history={taskHistory} loadError={historyError} disabled={runActive} onChange={setTaskHistory} onNavigate={(editorText) => {
+                setTaskDetails(undefined);
+                setHistoryDraft((current) => ({ taskPath: selectedTask.path, text: editorText ?? "", version: (current?.version ?? 0) + 1 }));
+                setTaskRevision((value) => value + 1);
+              }} onTaskCreated={async (result) => {
+                setProjects(await window.pilot.getProjects());
+                setTaskDetails(undefined);
+                setSelectedTaskPath(result.task.path);
+                setHistoryDraft((current) => ({ taskPath: result.task.path, text: result.draft ?? "", version: (current?.version ?? 0) + 1 }));
+                setTaskRevision((value) => value + 1);
+              }} />
+              : <div className="history-empty"><strong>Select a Task</strong><p>Choose an active Task to inspect its Pi history.</p></div>}
           </div>}
         </aside>
       </div>

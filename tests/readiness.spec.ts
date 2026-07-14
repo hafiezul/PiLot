@@ -43,6 +43,51 @@ async function writeSession(agentDir: string, project: string, name: string, ent
   return file;
 }
 
+const historyTimestamp = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`;
+const historyUsage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+
+function historyUser(id: string, parentId: string, content: string, second: number) {
+  return { type: "message", id, parentId, timestamp: historyTimestamp(second), message: { role: "user", content, timestamp: Date.parse(historyTimestamp(second)) } };
+}
+
+function historyAssistant(id: string, parentId: string, content: string, second: number) {
+  return {
+    type: "message", id, parentId, timestamp: historyTimestamp(second),
+    message: {
+      role: "assistant", content: [{ type: "text", text: content }], api: "openai-completions",
+      provider: "fixture", model: "fixture-model", usage: historyUsage, stopReason: "stop",
+      timestamp: Date.parse(historyTimestamp(second)),
+    },
+  };
+}
+
+async function writeBranchedHistory(agentDir: string, project: string) {
+  return writeSession(agentDir, project, "history", [
+    { type: "session", version: 3, id: "history-fixture", timestamp: historyTimestamp(0), cwd: project },
+    { type: "custom", customType: "pilot.task", id: "task-meta", parentId: null, timestamp: historyTimestamp(1), data: { version: 1, title: "History fixture", lifecycle: "active" } },
+    historyUser("root-prompt", "task-meta", "Choose an architecture", 2),
+    historyAssistant("shared-answer", "root-prompt", "Shared answer", 3),
+    historyUser("branch-a-prompt", "shared-answer", "Implement branch A", 4),
+    historyAssistant("branch-a-answer", "branch-a-prompt", "Branch A done", 5),
+    { type: "compaction", id: "compaction-a", parentId: "branch-a-answer", timestamp: historyTimestamp(6), summary: "Earlier branch A context", firstKeptEntryId: "branch-a-prompt", tokensBefore: 12000 },
+    { type: "model_change", id: "model-a", parentId: "compaction-a", timestamp: historyTimestamp(7), provider: "fixture", modelId: "fixture-model" },
+    { type: "thinking_level_change", id: "thinking-a", parentId: "model-a", timestamp: historyTimestamp(8), thinkingLevel: "high" },
+    historyUser("branch-b-prompt", "shared-answer", "Implement branch B", 9),
+    historyAssistant("branch-b-answer", "branch-b-prompt", "Branch B done", 10),
+    { type: "label", id: "label-b", parentId: "branch-b-answer", timestamp: historyTimestamp(11), targetId: "branch-b-prompt", label: "Preferred route" },
+    { type: "custom", customType: "pilot.run", id: "run-b", parentId: "label-b", timestamp: historyTimestamp(12), data: { version: 1, outcome: "settled" } },
+  ]);
+}
+
+async function childSession(directory: string, parentSession: string) {
+  const files = (await readdir(directory)).filter((name) => name.endsWith(".jsonl")).map((name) => path.join(directory, name));
+  for (const file of files) {
+    const header = JSON.parse((await readFile(file, "utf8")).split("\n", 1)[0]);
+    if (header.parentSession === parentSession) return file;
+  }
+  return "";
+}
+
 async function availablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createPortServer();
@@ -1264,6 +1309,174 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
   } finally {
     await close(app);
     await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("renders and navigates branched Task history through the Electron boundary", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  const historyFile = await writeBranchedHistory(environment.agentDir, environment.project);
+  await Promise.all([
+    writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: provider.baseUrl,
+          api: "openai-completions",
+          apiKey: "fixture-key",
+          models: [{ id: "fixture-model", name: "Fixture model", reasoning: true, contextWindow: 32_000, maxTokens: 2_048 }],
+        },
+      },
+    })),
+    writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture-model" })),
+  ]);
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("button", { name: "History fixture", exact: true }).click();
+
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await inspector.getByRole("tab", { name: /History/ }).click();
+    const tree = inspector.getByRole("tree", { name: "Task history" });
+    await expect(tree.getByRole("treeitem", { name: /Shared answer/ })).toContainText("2 branches");
+    await expect(tree.getByRole("treeitem", { name: /Branch B done/ })).toContainText("Current leaf");
+    await expect(tree.getByRole("treeitem", { name: /Implement branch B/ })).toContainText("Preferred route");
+    await expect(tree.getByRole("treeitem", { name: /Compaction/ })).toContainText("12,000 tokens");
+    await expect(tree.getByRole("treeitem", { name: /Model change/ })).toContainText("fixture/fixture-model");
+    await expect(tree.getByRole("treeitem", { name: /Thinking change/ })).toContainText("High");
+
+    const branchPoint = tree.getByRole("treeitem", { name: /Shared answer/ });
+    await branchPoint.focus();
+    await branchPoint.press("ArrowLeft");
+    await expect(branchPoint).toHaveAttribute("aria-expanded", "false");
+    await expect(tree.getByRole("treeitem", { name: /Branch A done/ })).toHaveCount(0);
+    await branchPoint.press("ArrowRight");
+    await expect(branchPoint).toHaveAttribute("aria-expanded", "true");
+    await branchPoint.press("ArrowRight");
+    await expect(tree.getByRole("treeitem", { name: /Implement branch A/ })).toBeFocused();
+
+    const firstEntry = tree.getByRole("treeitem").first();
+    await firstEntry.focus();
+    await firstEntry.press("End");
+    await expect(tree.getByRole("treeitem", { name: /Branch B done/ })).toBeFocused();
+    await app.window.keyboard.press("ArrowUp");
+    await expect(tree.getByRole("treeitem", { name: /Implement branch B/ })).toBeFocused();
+
+    const compaction = tree.getByRole("treeitem", { name: /Compaction/ });
+    await compaction.focus();
+    await compaction.press("Enter");
+    const label = inspector.getByRole("textbox", { name: "History label" });
+    const saveLabel = inspector.getByRole("button", { name: "Save label" });
+    const clearLabel = inspector.getByRole("button", { name: "Clear label" });
+    await label.fill("Compact checkpoint");
+    await label.press("Tab");
+    await expect(saveLabel).toBeFocused();
+    await saveLabel.press("Enter");
+    await expect(compaction).toContainText("Compact checkpoint");
+    await label.fill("Revised checkpoint");
+    await label.press("Tab");
+    await saveLabel.press("Enter");
+    await expect(compaction).toContainText("Revised checkpoint");
+    await label.focus();
+    await label.press("Tab");
+    await saveLabel.press("Tab");
+    await expect(clearLabel).toBeFocused();
+    await clearLabel.press("Enter");
+    await expect(compaction).not.toContainText("Revised checkpoint");
+
+    const branchA = tree.getByRole("treeitem", { name: /Branch A done/ });
+    await branchA.focus();
+    await branchA.press("Enter");
+    await branchA.press("Tab");
+    await expect(label).toBeFocused();
+    await label.press("Tab");
+    const summarizeBranch = inspector.getByRole("checkbox", { name: "Summarize abandoned branch" });
+    await expect(summarizeBranch).toBeFocused();
+    await summarizeBranch.press("Tab");
+    const navigate = inspector.getByRole("button", { name: "Navigate here" });
+    await expect(navigate).toBeFocused();
+    await navigate.press("Enter");
+    await expect(inspector.getByRole("status")).toContainText("History position changed");
+    await expect(tree.getByRole("treeitem", { name: /Navigation point/ })).toContainText("Current leaf");
+    await expect(tree.getByRole("treeitem", { name: /Branch A done/ })).toBeVisible();
+    await expect(tree.getByRole("treeitem", { name: /Branch B done/ })).toBeVisible();
+
+    const branchB = tree.getByRole("treeitem", { name: /Branch B done/ });
+    await branchB.focus();
+    await branchB.press("Enter");
+    await branchB.press("Tab");
+    await label.press("Tab");
+    await expect(summarizeBranch).toBeFocused();
+    await summarizeBranch.press("Space");
+    await summarizeBranch.press("Tab");
+    const summaryFocus = inspector.getByRole("textbox", { name: "Summary focus" });
+    await expect(summaryFocus).toBeFocused();
+    await summaryFocus.fill("Preserve the chosen approach");
+    await summaryFocus.press("Tab");
+    await expect(navigate).toBeFocused();
+    await navigate.press("Enter");
+    await expect(inspector.getByRole("status")).toContainText("History position changed");
+    await expect(tree.getByRole("treeitem", { name: /Branch summary/ })).toContainText("Current leaf");
+    await expect(tree.getByRole("treeitem", { name: /Branch A done/ })).toBeVisible();
+    expect(provider.requests.some((request) => latestUserText(request).startsWith("<conversation>"))).toBe(true);
+
+    const saved = await readFile(historyFile, "utf8");
+    expect(saved).toContain('"type":"branch_summary"');
+    expect(saved).toContain("Branch B done");
+    expect(() => SessionManager.open(historyFile).getTree()).not.toThrow();
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("forks prompts and clones active paths as standard Pi Tasks", async () => {
+  const environment = await fixture();
+  const historyFile = await writeBranchedHistory(environment.agentDir, environment.project);
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    const taskNavigation = app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("list", { name: /Active Tasks in/ });
+    await taskNavigation.getByRole("button", { name: "History fixture", exact: true }).click();
+
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await inspector.getByRole("tab", { name: /History/ }).click();
+    const tree = inspector.getByRole("tree", { name: "Task history" });
+    const branchPrompt = tree.getByRole("treeitem", { name: /Implement branch B/ });
+    await branchPrompt.focus();
+    await branchPrompt.press("Enter");
+    await branchPrompt.press("Tab");
+    const fork = inspector.getByRole("button", { name: "Fork from prompt" });
+    await expect(fork).toBeFocused();
+    await fork.press("Enter");
+    await expect(taskNavigation.getByRole("button")).toHaveCount(3);
+    await expect(app.window.getByRole("combobox", { name: "Prompt" })).toHaveValue("Implement branch B");
+
+    const directory = sessionDirectory(environment.agentDir, environment.project);
+    await expect.poll(() => childSession(directory, historyFile)).not.toBe("");
+    const forkFile = await childSession(directory, historyFile);
+    const forkContent = await readFile(forkFile, "utf8");
+    expect(forkContent).toContain("Shared answer");
+    expect(forkContent).not.toContain('"id":"branch-b-prompt"');
+
+    const clone = inspector.getByRole("button", { name: "Clone active path" });
+    await clone.focus();
+    await clone.press("Enter");
+    await expect(taskNavigation.getByRole("button")).toHaveCount(4);
+    await expect.poll(() => childSession(directory, forkFile)).not.toBe("");
+    const cloneFile = await childSession(directory, forkFile);
+    const forkEntries = SessionManager.open(forkFile).getEntries();
+    expect(SessionManager.open(cloneFile).getEntries().slice(0, forkEntries.length)).toEqual(forkEntries);
+
+    for (const file of [historyFile, forkFile, cloneFile]) expect(() => SessionManager.open(file).getTree()).not.toThrow();
+    expect(await readFile(historyFile, "utf8")).toContain("Branch B done");
+  } finally {
+    await close(app);
     await rm(environment.root, { recursive: true, force: true });
   }
 });

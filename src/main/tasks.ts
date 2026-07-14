@@ -45,7 +45,7 @@ function text(content: unknown) {
     : []).filter((part): part is string => typeof part === "string").join(" ");
 }
 
-function safeTitle(value: string) {
+export function safeTaskTitle(value: string) {
   const title = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
   if (!title) return "Untitled task";
   return title.length > 80 ? `${title.slice(0, 79).trimEnd()}…` : title;
@@ -143,7 +143,7 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
 
     const headerActivity = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : NaN;
     const modified = lastActivity ?? (Number.isFinite(headerActivity) ? headerActivity : fileStat.mtimeMs);
-    const title = safeTitle(sessionName || metadata?.title || firstMessage);
+    const title = safeTaskTitle(sessionName || metadata?.title || firstMessage);
     const lifecycle = metadata?.lifecycle ?? "active";
     return {
       task: { id: header.id!, path: file, title, lifecycle, modified: new Date(modified).toISOString() },

@@ -18,6 +18,8 @@
   --diff-delete-background: #fff0f0;
   --diff-hunk-background: #edf1f5;
   --diff-hunk-text: #315d91;
+  --history-summary: #805814;
+  --history-summary-border: #a57a31;
 }
 
 * { box-sizing: border-box; }
@@ -438,6 +440,48 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .changes-empty strong { font-size: 12px; }
 .changes-empty p { margin: 5px 0 0; color: var(--change-muted); font-size: 11px; line-height: 1.5; }
 .changes-error { flex: none; margin: 8px 14px 12px; font-size: 11px; }
+.history-inspector-body { padding: 0; overflow: hidden; }
+.history-panel { display: flex; min-height: 0; height: 100%; flex-direction: column; background: var(--change-surface); }
+.history-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; flex: none; padding: 16px 16px 12px; border-bottom: 1px solid var(--change-border); }
+.history-heading h2 { margin-bottom: 0; }
+.history-heading > div:last-child { display: grid; justify-items: end; gap: 6px; }
+.history-heading > div:last-child > span { color: var(--change-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.history-heading button { border: 0; padding: 2px 0; color: var(--change-link); background: transparent; cursor: pointer; font-size: 10px; text-decoration: underline; }
+.history-heading button:disabled { cursor: not-allowed; opacity: .5; }
+.history-loading { margin: 22px 18px; font-size: 12px; }
+.history-root-branch { flex: none; margin: 0; padding: 7px 12px; border-bottom: 1px solid var(--change-border); color: var(--change-muted); background: var(--change-subtle); font-size: 10px; font-weight: 650; }
+.history-tree { min-height: 120px; flex: 1; padding: 5px; overflow-y: auto; overscroll-behavior: contain; }
+.history-tree button { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; width: 100%; gap: 6px; border: 0; border-radius: 4px; padding-block: 7px; padding-right: 7px; color: inherit; background: transparent; cursor: default; text-align: left; }
+.history-tree button:hover { background: var(--change-subtle); }
+.history-tree button[aria-selected="true"] { background: var(--diff-hunk-background); box-shadow: inset 0 0 0 1px var(--change-selection); }
+.history-marker { display: grid; place-items: center; width: 16px; height: 16px; margin-top: 1px; border: 1px solid var(--change-border); border-radius: 50%; color: var(--change-muted); background: var(--change-surface); font-size: 11px; font-weight: 700; line-height: 1; }
+.history-model-change, .history-thinking-change, .history-navigation { border-radius: 4px; }
+.history-compaction, .history-branch-summary { border-color: var(--history-summary-border); color: var(--history-summary); }
+.history-navigation { border-color: var(--change-selection); color: var(--diff-hunk-text); }
+.history-entry-copy { display: grid; min-width: 0; gap: 3px; }
+.history-entry-copy > span:first-child { display: flex; align-items: center; min-width: 0; flex-wrap: wrap; gap: 5px; }
+.history-entry-copy strong { font-size: 11px; font-weight: 650; }
+.history-entry-copy small { display: -webkit-box; overflow: hidden; color: var(--change-muted); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.history-label { max-width: 100%; padding: 1px 5px; border: 1px solid var(--change-border); border-radius: 999px; overflow: hidden; color: var(--change-muted); font-size: 9px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.history-entry-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--change-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.history-current { color: var(--diff-hunk-text); font-weight: 700; }
+.history-actions { flex: none; max-height: 270px; padding: 12px 14px 14px; border-top: 1px solid var(--change-border); overflow-y: auto; }
+.history-actions form, .history-actions fieldset { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+.history-actions .history-fork { margin-bottom: 11px; }
+.history-actions fieldset { margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--change-border); }
+.history-actions label { display: grid; gap: 5px; color: var(--change-muted); font-size: 10px; font-weight: 650; }
+.history-actions input[type="text"], .history-actions input:not([type]) { width: 100%; min-height: 30px; border: 1px solid var(--change-button-border); border-radius: 4px; padding: 5px 7px; color: inherit; background: var(--change-surface); font: inherit; font-size: 11px; }
+.history-actions form > div { display: flex; gap: 6px; }
+.history-actions button { justify-self: start; border: 1px solid var(--change-button-border); border-radius: 5px; padding: 5px 8px; color: inherit; background: var(--change-surface); cursor: pointer; font-size: 10px; }
+.history-actions button:hover:not(:disabled) { background: var(--change-subtle); }
+.history-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.history-actions legend { margin-bottom: 8px; font-size: 10px; font-weight: 700; }
+.history-actions .history-summary-choice { display: flex; align-items: center; grid-template-columns: auto 1fr; gap: 6px; color: inherit; cursor: pointer; font-weight: 500; }
+.history-summary-choice input { margin: 0; accent-color: var(--focus-ring); }
+.history-notice { flex: none; margin: 0; padding: 0 14px 10px; font-size: 10px; }
+.history-empty { margin: 22px 18px; }
+.history-empty strong { font-size: 12px; }
+.history-empty p { margin: 5px 0 0; color: var(--change-muted); font-size: 11px; line-height: 1.5; }
 dl { margin: 25px 0 0; }
 dl div { display: flex; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid #d7d7d4; font-size: 12px; }
 dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
@@ -450,7 +494,7 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   .inspector-close:hover { background: #dededb; }
 }
 
-:root[data-appearance="dark"] { color: #e8e8e5; background: #1d1e1c; --focus-ring: #72aef4; --change-surface: #30312e; --change-subtle: #3a3b38; --change-border: #50514d; --change-add: #8ad4a4; --change-delete: #ff9b9b; --change-muted: #aaa9a4; --change-button-border: #50514d; --change-link: #72aef4; --change-selection: #72aef4; --diff-add-background: #203329; --diff-delete-background: #3a2525; --diff-hunk-background: #293747; --diff-hunk-text: #9bc3f0; }
+:root[data-appearance="dark"] { color: #e8e8e5; background: #1d1e1c; --focus-ring: #72aef4; --change-surface: #30312e; --change-subtle: #3a3b38; --change-border: #50514d; --change-add: #8ad4a4; --change-delete: #ff9b9b; --change-muted: #aaa9a4; --change-button-border: #50514d; --change-link: #72aef4; --change-selection: #72aef4; --diff-add-background: #203329; --diff-delete-background: #3a2525; --diff-hunk-background: #293747; --diff-hunk-text: #9bc3f0; --history-summary: #f1c46b; --history-summary-border: #9b702c; }
 :root[data-appearance="dark"] .window-bar, :root[data-appearance="dark"] .shell, :root[data-appearance="dark"] .navigation, :root[data-appearance="dark"] .inspector, :root[data-appearance="dark"] .settings-shell, :root[data-appearance="dark"] .settings-navigation { background: #242523; }
 :root[data-appearance="dark"] main { background: #1d1e1c; }
 :root[data-appearance="dark"] .navigation, :root[data-appearance="dark"] .inspector, :root[data-appearance="dark"] .tabs, :root[data-appearance="dark"] dl div, :root[data-appearance="dark"] .nav-footer, :root[data-appearance="dark"] .settings-navigation { border-color: #393a37; }
@@ -518,7 +562,7 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] .tabs button[aria-selected="true"] { border-bottom-color: #ddd; color: #eee; }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-appearance]), :root[data-appearance="system"] { color: #e8e8e5; background: #1d1e1c; --focus-ring: #72aef4; --change-surface: #30312e; --change-subtle: #3a3b38; --change-border: #50514d; --change-add: #8ad4a4; --change-delete: #ff9b9b; --change-muted: #aaa9a4; --change-button-border: #50514d; --change-link: #72aef4; --change-selection: #72aef4; --diff-add-background: #203329; --diff-delete-background: #3a2525; --diff-hunk-background: #293747; --diff-hunk-text: #9bc3f0; }
+  :root:not([data-appearance]), :root[data-appearance="system"] { color: #e8e8e5; background: #1d1e1c; --focus-ring: #72aef4; --change-surface: #30312e; --change-subtle: #3a3b38; --change-border: #50514d; --change-add: #8ad4a4; --change-delete: #ff9b9b; --change-muted: #aaa9a4; --change-button-border: #50514d; --change-link: #72aef4; --change-selection: #72aef4; --diff-add-background: #203329; --diff-delete-background: #3a2525; --diff-hunk-background: #293747; --diff-hunk-text: #9bc3f0; --history-summary: #f1c46b; --history-summary-border: #9b702c; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .window-bar, :root:is(:not([data-appearance]), [data-appearance="system"]) .shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .navigation, :root:is(:not([data-appearance]), [data-appearance="system"]) .inspector, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-shell, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation { background: #242523; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) main { background: #1d1e1c; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .navigation, :root:is(:not([data-appearance]), [data-appearance="system"]) .inspector, :root:is(:not([data-appearance]), [data-appearance="system"]) .tabs, :root:is(:not([data-appearance]), [data-appearance="system"]) dl div, :root:is(:not([data-appearance]), [data-appearance="system"]) .nav-footer, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation { border-color: #393a37; }

@@ -180,6 +180,36 @@ export type ImageAttachment = {
   data: string;
 };
 
+export type TaskHistoryKind = "prompt" | "response" | "tool" | "command" | "compaction" | "branch-summary" | "navigation" | "model-change" | "thinking-change" | "task-name" | "custom";
+
+export type TaskHistoryNode = {
+  id: string;
+  kind: TaskHistoryKind;
+  title: string;
+  description?: string;
+  timestamp: string;
+  label?: string;
+  current: boolean;
+  children: TaskHistoryNode[];
+};
+
+export type TaskHistoryState = {
+  taskPath: string;
+  roots: TaskHistoryNode[];
+  currentLeafId?: string;
+  pathCount: number;
+};
+
+export type TaskHistoryNavigation = {
+  history: TaskHistoryState;
+  editorText?: string;
+};
+
+export type TaskHistoryTaskResult = {
+  task: TaskSummary;
+  draft?: string;
+};
+
 export type TaskResourceState = {
   taskPath: string;
   commands: Array<{
@@ -251,6 +281,11 @@ export type ProjectsApi = {
   getTaskRun(projectPath: string, taskPath: string): Promise<TaskRunState>;
   getTaskModel(projectPath: string, taskPath: string): Promise<TaskModelState>;
   getTaskResources(projectPath: string, taskPath: string): Promise<TaskResourceState>;
+  getTaskHistory(projectPath: string, taskPath: string): Promise<TaskHistoryState>;
+  navigateTaskHistory(projectPath: string, taskPath: string, entryId: string, summarize: boolean, customInstructions?: string): Promise<TaskHistoryNavigation>;
+  setTaskHistoryLabel(projectPath: string, taskPath: string, entryId: string, label?: string): Promise<TaskHistoryState>;
+  forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string): Promise<TaskHistoryTaskResult>;
+  cloneTaskHistory(projectPath: string, taskPath: string): Promise<TaskHistoryTaskResult>;
   getTaskChanges(projectPath: string, taskPath: string): Promise<TaskChanges>;
   getTaskFileDiff(projectPath: string, taskPath: string, filePath: string): Promise<TaskFileDiff>;
   openTaskPathInEditor(projectPath: string, taskPath: string, editor: EditorId, filePath?: string): Promise<void>;

@@ -15,6 +15,7 @@ import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type
 import { assertExecutionAllowed } from "./projects.js";
 import { loadTaskResources } from "./resources.js";
 import { assertRunnableTask, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
+import { cloneActivePath, forkFromPrompt, historyLabel, historyNavigationType, navigateWithoutSummary, taskHistoryState } from "./history.js";
 
 const runMetadataType = "pilot.run";
 const retryMetadataType = "pilot.retry";
@@ -330,11 +331,79 @@ export class LocalRunCoordinator {
     private emit: (state: TaskRunState) => void,
   ) {}
 
+  private async mutateTaskHistory<T>(projectPath: string, taskPath: string, operation: (context: { file: string; project: string; executionPath: string }) => Promise<T>) {
+    const context = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    if (this.activeProjects.has(context.project)) throw new Error("Stop the active Run before changing Task history");
+    this.activeProjects.add(context.project);
+    try {
+      return await withTaskWrite(context.file, () => operation(context));
+    } finally {
+      this.activeProjects.delete(context.project);
+    }
+  }
+
   async getTaskRun(projectPath: string, taskPath: string) {
     const active = this.activeTasks.get(path.resolve(taskPath));
     if (active) return active.state;
     const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     return withTaskWrite(file, async () => savedState(file, SessionManager.open(file), executionPath));
+  }
+
+  async getTaskHistory(projectPath: string, taskPath: string) {
+    const { file } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const active = this.activeTasks.get(file);
+    if (active?.manager) return taskHistoryState(file, active.manager);
+    if (active) return taskHistoryState(file, SessionManager.open(file));
+    return withTaskWrite(file, async () => taskHistoryState(file, SessionManager.open(file)));
+  }
+
+  async setTaskHistoryLabel(projectPath: string, taskPath: string, entryId: string, value?: string) {
+    const label = historyLabel(value);
+    return this.mutateTaskHistory(projectPath, taskPath, async ({ file }) => {
+      const manager = SessionManager.open(file);
+      if (!manager.getEntry(entryId)) throw new Error("Choose an available history entry");
+      manager.appendLabelChange(entryId, label);
+      return taskHistoryState(file, manager);
+    });
+  }
+
+  async forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string) {
+    await assertExecutionAllowed(this.userData, projectPath);
+    return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project }) =>
+      forkFromPrompt(file, project, SessionManager.open(file), entryId));
+  }
+
+  async cloneTaskHistory(projectPath: string, taskPath: string) {
+    await assertExecutionAllowed(this.userData, projectPath);
+    return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project }) =>
+      cloneActivePath(file, project, SessionManager.open(file)));
+  }
+
+  async navigateTaskHistory(projectPath: string, taskPath: string, entryId: string, summarize: boolean, customInstructions?: string) {
+    const instructions = customInstructions?.trim();
+    if (instructions && instructions.length > 2_000) throw new Error("Summary focus must be 2,000 characters or fewer");
+    if (summarize) await assertExecutionAllowed(this.userData, projectPath);
+    return this.mutateTaskHistory(projectPath, taskPath, async ({ file, executionPath }) => {
+      if (!summarize) {
+        const manager = SessionManager.open(file);
+        const editorText = navigateWithoutSummary(manager, entryId);
+        return { history: taskHistoryState(file, manager), ...(editorText === undefined ? {} : { editorText }) };
+      }
+
+      const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
+      const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
+      if (models.getError()) throw new Error(`Fix models.json before summarizing Task history: ${models.getError()}`);
+      if (!models.getAvailable().length) throw new Error("Connect a provider in Settings before summarizing Task history");
+      const { session, manager } = await this.createSession(executionPath, file, auth, models);
+      try {
+        const result = await session.navigateTree(entryId, { summarize: true, ...(instructions ? { customInstructions: instructions } : {}) });
+        if (result.cancelled) throw new Error(result.aborted ? "Branch summarization was stopped" : "History navigation was cancelled");
+        if (!result.summaryEntry) manager.appendCustomEntry(historyNavigationType, { version: 1, targetId: entryId });
+        return { history: taskHistoryState(file, manager), ...(result.editorText === undefined ? {} : { editorText: result.editorText }) };
+      } finally {
+        session.dispose();
+      }
+    });
   }
 
   async submitPrompt(projectPath: string, taskPath: string, prompt: string, images: ImageAttachment[] = []) {
