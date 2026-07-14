@@ -60,6 +60,10 @@ _Avoid_: Completed task, closed task
 A period of agent activity initiated by accepted input and ending when no retry, compaction retry, or queued continuation remains.
 _Avoid_: Turn, task, session
 
+**Stop Run**:
+A user request to end the active Run before it settles naturally. The resulting Run outcome is Aborted.
+_Avoid_: Abort Run, Cancel Run
+
 **Thinking level**:
 The selected amount of model reasoning for a Task, limited to the levels supported by its current model.
 _Avoid_: Thinking mode, reasoning mode
