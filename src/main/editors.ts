@@ -4,13 +4,14 @@ import { constants } from "node:fs";
 import { access, lstat, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { configuredEditorId, editorDefinitions, fileManagerId, type EditorId, type EditorState } from "../shared/editors.js";
+import { shell } from "electron";
+import { configuredEditorId, editorDefinitions, fileManagerId, type ApplicationId, type ApplicationState } from "../shared/editors.js";
 
 export type ConfiguredEditor = { command: string; label: string; baseDirectory?: string };
-type ResolvedEditor = { id: EditorId; label: string; command: string; args: string[]; fileManager?: boolean };
+type ResolvedApplication = { id: ApplicationId; label: string; command: string; args: string[]; fileManager?: boolean };
 const terminalEditorCommands = new Set(["emacs", "helix", "hx", "micro", "nano", "nvim", "pico", "vi", "vim"]);
 
-let editorCache: { expiresAt: number; editors: ResolvedEditor[] } | undefined;
+let editorCache: { expiresAt: number; editors: ResolvedApplication[] } | undefined;
 
 async function isExecutableFile(file: string) {
   const details = await stat(file).catch(() => undefined);
@@ -85,7 +86,7 @@ async function findWindowsApplication(definition: typeof editorDefinitions[numbe
   }
 }
 
-async function resolveEditor(definition: typeof editorDefinitions[number]): Promise<ResolvedEditor | undefined> {
+async function resolveEditor(definition: typeof editorDefinitions[number]): Promise<ResolvedApplication | undefined> {
   for (const command of definition.commands) {
     const executable = await findExecutable(command);
     if (executable) return { id: definition.id, label: definition.label, command: executable, args: "baseArgs" in definition ? [...definition.baseArgs] : [] };
@@ -104,7 +105,7 @@ async function resolveEditor(definition: typeof editorDefinitions[number]): Prom
 
 async function staticEditors() {
   if (editorCache && editorCache.expiresAt > Date.now()) return editorCache.editors;
-  const editors = (await Promise.all(editorDefinitions.map(resolveEditor))).filter((editor): editor is ResolvedEditor => Boolean(editor));
+  const editors = (await Promise.all(editorDefinitions.map(resolveEditor))).filter((editor): editor is ResolvedApplication => Boolean(editor));
   editorCache = { expiresAt: Date.now() + 5_000, editors };
   return editors;
 }
@@ -133,11 +134,16 @@ function terminalEditorName(configured?: ConfiguredEditor) {
   if (!configured?.command.trim()) return;
   let parts: string[];
   try { parts = editorCommandParts(configured.command); } catch { return; }
-  const name = path.basename(parts[0] ?? "").replace(/\.exe$/i, "");
-  return terminalEditorCommands.has(name.toLocaleLowerCase()) ? name : undefined;
+  const [command, ...args] = parts;
+  const name = path.basename(command ?? "").replace(/\.exe$/i, "");
+  const normalized = name.toLocaleLowerCase();
+  if (normalized === "emacs" && !args.some((argument) => ["-nw", "--no-window-system", "-t", "--terminal"].includes(argument))) return;
+  if (["vi", "vim", "nvim"].includes(normalized)
+    && (args.includes("-g") || args.some((argument) => argument === "--server" || argument.startsWith("--remote")))) return;
+  return terminalEditorCommands.has(normalized) ? name : undefined;
 }
 
-async function resolveConfiguredEditor(configured?: ConfiguredEditor): Promise<ResolvedEditor | undefined> {
+async function resolveConfiguredEditor(configured?: ConfiguredEditor): Promise<ResolvedApplication | undefined> {
   if (!configured?.command.trim() || terminalEditorName(configured)) return;
   let parts: string[];
   try { parts = editorCommandParts(configured.command); } catch { return; }
@@ -145,23 +151,17 @@ async function resolveConfiguredEditor(configured?: ConfiguredEditor): Promise<R
   if (!command) return;
   const executable = await findExecutable(command, configured.baseDirectory);
   if (!executable) return;
-  return { id: configuredEditorId, label: configured.label, command: executable, args } satisfies ResolvedEditor;
+  return { id: configuredEditorId, label: configured.label, command: executable, args } satisfies ResolvedApplication;
 }
 
-async function resolveFileManager(): Promise<ResolvedEditor | undefined> {
-  if (process.platform === "win32") {
-    const executable = await findExecutable("explorer") ?? (windowsEnvironment("SystemRoot") ? path.join(windowsEnvironment("SystemRoot")!, "explorer.exe") : undefined);
-    if (executable && await isExecutableFile(executable)) return { id: fileManagerId, label: "File Explorer", command: executable, args: [], fileManager: true };
-  }
-  if (process.platform === "darwin") return { id: fileManagerId, label: "Finder", command: "/usr/bin/open", args: [], fileManager: true };
-  const executable = await findExecutable("xdg-open");
-  if (executable) return { id: fileManagerId, label: "Files", command: executable, args: [], fileManager: true };
+function fileManager(): ResolvedApplication {
+  const label = process.platform === "darwin" ? "Finder" : process.platform === "win32" ? "File Explorer" : "Files";
+  return { id: fileManagerId, label, command: "", args: [], fileManager: true };
 }
 
-async function resolvedEditors(configured?: ConfiguredEditor) {
-  const [known, custom, fileManager] = await Promise.all([staticEditors(), resolveConfiguredEditor(configured), resolveFileManager()]);
-  const editors = custom ? [custom, ...known] : known;
-  return [...editors, ...(fileManager ? [fileManager] : [])];
+async function resolvedApplications(configured?: ConfiguredEditor) {
+  const [known, custom] = await Promise.all([staticEditors(), resolveConfiguredEditor(configured)]);
+  return [...(custom ? [custom, ...known] : known), fileManager()];
 }
 
 export function getConfiguredEditor(agentDir: string, executionPath: string): ConfiguredEditor | undefined {
@@ -175,16 +175,16 @@ export function getConfiguredEditor(agentDir: string, executionPath: string): Co
   if (process.env.EDITOR?.trim()) return { command: process.env.EDITOR, label: "Environment editor" };
 }
 
-export async function getEditorState(preferred?: EditorId, configured?: ConfiguredEditor): Promise<EditorState> {
-  const editors = await resolvedEditors(configured);
-  const effective = preferred && editors.some(({ id }) => id === preferred) ? preferred : editors[0]?.id;
+export async function getApplicationState(preferred?: ApplicationId, configured?: ConfiguredEditor): Promise<ApplicationState> {
+  const applications = await resolvedApplications(configured);
+  const effective = preferred && applications.some(({ id }) => id === preferred) ? preferred : applications[0]?.id;
   const terminalEditor = terminalEditorName(configured);
-  const configuredAvailable = editors.some(({ id }) => id === configuredEditorId);
+  const configuredAvailable = applications.some(({ id }) => id === configuredEditorId);
   const notice = terminalEditor
     ? `${terminalEditor} needs an attached terminal, so choose a GUI editor here or open it from Pi.`
     : configured && !configuredAvailable ? `${configured.label} could not be found. Use an absolute executable path or a command available on PATH.` : undefined;
   return {
-    available: editors.map(({ id, label, fileManager }) => ({ id, label, kind: fileManager ? "file-manager" as const : "editor" as const })),
+    available: applications.map(({ id, label, fileManager }) => ({ id, label, kind: fileManager ? "file-manager" as const : "editor" as const })),
     ...(effective ? { preferred: effective } : {}),
     ...(preferred ? { storedPreferred: preferred } : {}),
     ...(notice ? { notice } : {}),
@@ -210,17 +210,17 @@ async function launchWindowsScript(command: string, args: string[], cwd: string)
   await launchDetached(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/v:off", "/c", invocation], cwd, env);
 }
 
-export async function launchEditor(editor: EditorId, target: string, cwd: string, configured?: ConfiguredEditor) {
-  const resolved = (await resolvedEditors(configured)).find(({ id }) => id === editor);
-  if (!resolved) throw new Error(`${editorDefinitions.find(({ id }) => id === editor)?.label ?? configured?.label ?? editor} is not available on this computer`);
-  const directory = resolved.fileManager && (await lstat(target)).isDirectory();
-  const args = resolved.fileManager
-    ? process.platform === "darwin" ? directory ? [target] : ["-R", target]
-      : process.platform === "win32" ? directory ? [target] : ["/select,", target]
-        : [directory ? target : path.dirname(target)]
-    : [...resolved.args, target];
+export async function launchApplication(application: ApplicationId, target: string, cwd: string, configured?: ConfiguredEditor) {
+  const resolved = (await resolvedApplications(configured)).find(({ id }) => id === application);
+  if (!resolved) throw new Error(`${editorDefinitions.find(({ id }) => id === application)?.label ?? configured?.label ?? application} is not available on this computer`);
+  const args = [...resolved.args, target];
   try {
-    if (process.platform === "win32" && /\.(?:bat|cmd)$/i.test(resolved.command)) await launchWindowsScript(resolved.command, args, cwd);
+    if (resolved.fileManager) {
+      if ((await lstat(target)).isDirectory()) {
+        const error = await shell.openPath(target);
+        if (error) throw new Error(error);
+      } else shell.showItemInFolder(target);
+    } else if (process.platform === "win32" && /\.(?:bat|cmd)$/i.test(resolved.command)) await launchWindowsScript(resolved.command, args, cwd);
     else await launchDetached(resolved.command, args, cwd);
   } catch (reason) {
     throw new Error(`Could not open ${target} in ${resolved.label}: ${reason instanceof Error ? reason.message : String(reason)}`);

@@ -4,17 +4,17 @@ import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPreferences, saveAppearance, saveExpandThinking, savePreferredEditor } from "./preferences.js";
+import { loadPreferences, saveAppearance, saveExpandThinking, savePreferredApplication } from "./preferences.js";
 import { addProject, assertProjectAdmitted, createTask, getProjectsState, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { LocalRunCoordinator } from "./runs.js";
 import { assertRunnableTask, getTaskModelState, setTaskModel, setTaskThinking } from "./tasks.js";
 import { getTaskResources } from "./resources.js";
 import { getStartupState } from "./readiness.js";
-import { getTaskChanges, getTaskFileDiff, openTaskPathInEditor } from "./changes.js";
-import { getConfiguredEditor, getEditorState } from "./editors.js";
+import { getTaskChanges, getTaskFileDiff, openTaskPathInApplication } from "./changes.js";
+import { getApplicationState, getConfiguredEditor } from "./editors.js";
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
-import { editorIds, type EditorId } from "../shared/editors.js";
+import { applicationIds, type ApplicationId } from "../shared/editors.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
 import type { ImageAttachment, ThinkingLevel } from "../shared/projects.js";
 
@@ -209,15 +209,15 @@ app.whenReady().then(async () => {
     const { executionPath } = await assertRunnableTask(getAgentDir(), project, task);
     return getConfiguredEditor(getAgentDir(), executionPath);
   };
-  ipcMain.handle("editors:get", async (_event, projectPath: unknown, taskPath: unknown) =>
-    getEditorState(preferences.preferredEditor, await editorContext(projectPath, taskPath)));
-  ipcMain.handle("editors:set-preferred", async (_event, projectPath: unknown, taskPath: unknown, editor: unknown) => {
-    if (typeof editor !== "string" || !editorIds.has(editor as EditorId)) throw new Error("Unknown editor");
+  ipcMain.handle("applications:get", async (_event, projectPath: unknown, taskPath: unknown) =>
+    getApplicationState(preferences.preferredApplication, await editorContext(projectPath, taskPath)));
+  ipcMain.handle("applications:set-preferred", async (_event, projectPath: unknown, taskPath: unknown, application: unknown) => {
+    if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("Unknown application");
     const configured = await editorContext(projectPath, taskPath);
-    const state = await getEditorState(editor as EditorId, configured);
-    if (!state.available.some(({ id }) => id === editor)) throw new Error("That editor is not available on this computer");
-    preferences = await savePreferredEditor(app.getPath("userData"), editor);
-    return getEditorState(preferences.preferredEditor, configured);
+    const state = await getApplicationState(application as ApplicationId, configured);
+    if (!state.available.some(({ id }) => id === application)) throw new Error("That application is not available on this computer");
+    preferences = await savePreferredApplication(app.getPath("userData"), application);
+    return getApplicationState(preferences.preferredApplication, configured);
   });
   ipcMain.handle("projects:get", projectState);
   ipcMain.handle("projects:add", async (event) => {
@@ -263,10 +263,10 @@ app.whenReady().then(async () => {
     if (typeof filePath !== "string" || !filePath) throw new Error("A changed file is required");
     return getTaskFileDiff(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), filePath);
   });
-  ipcMain.handle("tasks:open-in-editor", async (_event, projectPath: unknown, taskPath: unknown, editor: unknown, filePath: unknown) => {
-    if (typeof editor !== "string" || !editorIds.has(editor as EditorId)) throw new Error("An editor is required");
+  ipcMain.handle("tasks:open-in-application", async (_event, projectPath: unknown, taskPath: unknown, application: unknown, filePath: unknown) => {
+    if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("An application is required");
     if (filePath !== undefined && (typeof filePath !== "string" || !filePath)) throw new Error("A changed file is required");
-    return openTaskPathInEditor(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireTaskPath(taskPath), editor as EditorId, filePath as string | undefined);
+    return openTaskPathInApplication(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireTaskPath(taskPath), application as ApplicationId, filePath as string | undefined);
   });
   ipcMain.handle("tasks:set-model", async (_event, projectPath: unknown, taskPath: unknown, provider: unknown, modelId: unknown) => {
     if (typeof provider !== "string" || typeof modelId !== "string") throw new Error("A provider and model are required");

@@ -2,9 +2,9 @@ import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { EditorId } from "../shared/editors.js";
+import type { ApplicationId } from "../shared/editors.js";
 import type { ChangeStatus, DiffHunk, TaskChanges, TaskFileDiff } from "../shared/projects.js";
-import { getConfiguredEditor, launchEditor } from "./editors.js";
+import { getConfiguredEditor, launchApplication } from "./editors.js";
 import { assertProjectAdmitted } from "./projects.js";
 import { assertRunnableTask } from "./tasks.js";
 
@@ -41,6 +41,22 @@ function resolveChangePath(executionPath: string, value: string) {
     throw new Error("Choose a changed file in this Execution location");
   }
   return target;
+}
+
+async function realpathAllowMissing(value: string): Promise<string> {
+  try { return await realpath(value); } catch (reason) {
+    if ((reason as NodeJS.ErrnoException).code !== "ENOENT") throw reason;
+    try {
+      if ((await lstat(value)).isSymbolicLink()) {
+        return realpathAllowMissing(path.resolve(path.dirname(value), await readlink(value)));
+      }
+    } catch (lstatReason) {
+      if ((lstatReason as NodeJS.ErrnoException).code !== "ENOENT") throw lstatReason;
+    }
+    const parent = path.dirname(value);
+    if (parent === value) throw reason;
+    return path.join(await realpathAllowMissing(parent), path.basename(value));
+  }
 }
 
 function statusFromCode(code: string): ChangeStatus {
@@ -272,20 +288,24 @@ export async function getTaskFileDiff(agentDir: string, projectPath: string, tas
   }
 }
 
-export async function openTaskPathInEditor(userDataDir: string, agentDir: string, projectPath: string, taskPath: string, editor: EditorId, filePath?: string) {
+export async function openTaskPathInApplication(userDataDir: string, agentDir: string, projectPath: string, taskPath: string, application: ApplicationId, filePath?: string) {
   await assertProjectAdmitted(userDataDir, projectPath);
   const { executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
   const canonicalExecutionPath = await realpath(executionPath);
   const requestedTarget = filePath ? resolveChangePath(executionPath, filePath) : executionPath;
-  await lstat(requestedTarget);
-  const target = await realpath(requestedTarget);
+  const details = await lstat(requestedTarget);
+  let canonicalTarget: string;
+  try { canonicalTarget = await realpath(requestedTarget); } catch (reason) {
+    if (!filePath || !details.isSymbolicLink() || (reason as NodeJS.ErrnoException).code !== "ENOENT") throw reason;
+    canonicalTarget = await realpathAllowMissing(path.resolve(path.dirname(requestedTarget), await readlink(requestedTarget)));
+  }
   if (filePath) {
     const change = (await getTaskChanges(agentDir, projectPath, taskPath)).files.find((candidate) => candidate.path === gitPath(filePath));
     if (!change || change.status === "deleted") throw new Error("That file is not a current Git change");
-    const relative = path.relative(canonicalExecutionPath, target);
-    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    const relative = path.relative(canonicalExecutionPath, canonicalTarget);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
       throw new Error("Changed files must stay within the Execution location");
     }
   }
-  await launchEditor(editor, target, canonicalExecutionPath, getConfiguredEditor(agentDir, canonicalExecutionPath));
+  await launchApplication(application, requestedTarget, canonicalExecutionPath, getConfiguredEditor(agentDir, canonicalExecutionPath));
 }

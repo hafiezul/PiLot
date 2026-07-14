@@ -1,7 +1,7 @@
 import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
-import type { EditorId, EditorState } from "../shared/editors";
+import type { ApplicationId, ApplicationState } from "../shared/editors";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
@@ -414,16 +414,16 @@ function VirtualDiff({ diff }: { diff: TaskFileDiff }) {
   </div>;
 }
 
-function EditorOpenControl({ targetLabel, state, disabled = false, onOpen }: {
+function ApplicationOpenControl({ targetLabel, state, disabled = false, onOpen }: {
   targetLabel: string;
-  state?: EditorState;
+  state?: ApplicationState;
   disabled?: boolean;
-  onOpen(editor: EditorId): void;
+  onOpen(application: ApplicationId): void;
 }) {
   const picker = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [activeEditor, setActiveEditor] = useState<EditorId>();
+  const [activeApplication, setActiveApplication] = useState<ApplicationId>();
   const preferred = state?.available.find(({ id }) => id === state.preferred);
   const action = preferred?.kind === "file-manager" ? "Show" : "Open";
   const close = () => {
@@ -434,9 +434,9 @@ function EditorOpenControl({ targetLabel, state, disabled = false, onOpen }: {
     if (!picker.current || !trigger.current || disabled || !state?.available.length) return;
     placePicker(picker.current, trigger.current, 220, true);
     const active = state.preferred ?? state.available[0].id;
-    setActiveEditor(active);
+    setActiveApplication(active);
     if (!picker.current.matches(":popover-open")) picker.current.showPopover();
-    requestAnimationFrame(() => picker.current?.querySelector<HTMLElement>(`[data-editor-id="${active}"]`)?.focus());
+    requestAnimationFrame(() => picker.current?.querySelector<HTMLElement>(`[data-application-id="${active}"]`)?.focus());
   };
   const move = (event: React.KeyboardEvent, direction: number) => {
     const options = [...(picker.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])];
@@ -445,7 +445,7 @@ function EditorOpenControl({ targetLabel, state, disabled = false, onOpen }: {
     event.preventDefault();
   };
   const unavailable = state && !state.available.length;
-  const editors = state?.available ?? [];
+  const applications = state?.available ?? [];
 
   return <div className="editor-open-control" role="group" aria-label={`Open ${targetLabel} externally`}>
     <button type="button" className="editor-open-primary" aria-label={preferred ? `${action} ${targetLabel} in ${preferred.label}` : unavailable ? "No supported applications found" : "Finding installed applications"} disabled={disabled || !preferred} onClick={() => preferred && onOpen(preferred.id)}>
@@ -456,12 +456,12 @@ function EditorOpenControl({ targetLabel, state, disabled = false, onOpen }: {
       if (event.key === "Escape") { event.preventDefault(); close(); }
       if (event.key === "Tab") { picker.current?.hidePopover(); trigger.current?.focus(); }
     }}>
-      {editors.map((editor, index) => <button key={editor.id} type="button" role="menuitemradio" data-editor-id={editor.id} aria-checked={editor.id === state?.preferred} tabIndex={editor.id === activeEditor ? 0 : -1} onFocus={() => setActiveEditor(editor.id)} onClick={() => { onOpen(editor.id); close(); }} onKeyDown={(event) => {
+      {applications.map((application, index) => <button key={application.id} type="button" role="menuitemradio" data-application-id={application.id} aria-checked={application.id === state?.preferred} tabIndex={application.id === activeApplication ? 0 : -1} onFocus={() => setActiveApplication(application.id)} onClick={() => { onOpen(application.id); close(); }} onKeyDown={(event) => {
         if (event.key === "ArrowDown") move(event, 1);
         if (event.key === "ArrowUp") move(event, -1);
         if (event.key === "Home") move(event, -index);
-        if (event.key === "End") move(event, editors.length - 1 - index);
-      }}><span>{editor.label}</span>{editor.id === state?.preferred && <span aria-hidden="true">✓</span>}</button>)}
+        if (event.key === "End") move(event, applications.length - 1 - index);
+      }}><span>{application.label}</span>{application.id === state?.preferred && <span aria-hidden="true">✓</span>}</button>)}
     </div>
   </div>;
 }
@@ -478,24 +478,24 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
   const [diff, setDiff] = useState<TaskFileDiff>();
   const [diffError, setDiffError] = useState("");
   const [openError, setOpenError] = useState("");
-  const [editorError, setEditorError] = useState("");
-  const [editorState, setEditorState] = useState<EditorState>();
+  const [applicationError, setApplicationError] = useState("");
+  const [applicationState, setApplicationState] = useState<ApplicationState>();
   const selected = changes?.files.find(({ path }) => path === selectedPath);
 
   useEffect(() => {
     let cancelled = false;
-    setEditorState(undefined);
-    const loadEditors = () => {
-      setEditorError("");
-      void window.pilot.getEditorState(project.path, task.path).then((state) => {
-        if (!cancelled) setEditorState(state);
+    setApplicationState(undefined);
+    const loadApplications = () => {
+      setApplicationError("");
+      void window.pilot.getApplicationState(project.path, task.path).then((state) => {
+        if (!cancelled) setApplicationState(state);
       }).catch((reason) => {
-        if (!cancelled) { setEditorState(undefined); setEditorError(reason instanceof Error ? reason.message : String(reason)); }
+        if (!cancelled) { setApplicationState(undefined); setApplicationError(reason instanceof Error ? reason.message : String(reason)); }
       });
     };
-    loadEditors();
-    window.addEventListener("focus", loadEditors);
-    return () => { cancelled = true; window.removeEventListener("focus", loadEditors); };
+    loadApplications();
+    window.addEventListener("focus", loadApplications);
+    return () => { cancelled = true; window.removeEventListener("focus", loadApplications); };
   }, [project.path, task.path]);
 
   useEffect(() => {
@@ -517,14 +517,14 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
     return () => { cancelled = true; };
   }, [project.path, task.path, selected?.path, changes?.checkedAt]);
 
-  const open = (editor: EditorId, filePath?: string) => {
+  const open = (application: ApplicationId, filePath?: string) => {
     setOpenError("");
-    const remember = editorState?.storedPreferred !== editor;
-    setEditorState((current) => current ? { ...current, preferred: editor } : current);
-    void window.pilot.openTaskPathInEditor(project.path, task.path, editor, filePath)
+    const remember = applicationState?.storedPreferred !== application;
+    setApplicationState((current) => current ? { ...current, preferred: application } : current);
+    void window.pilot.openTaskPathInApplication(project.path, task.path, application, filePath)
       .catch((reason) => setOpenError(reason instanceof Error ? reason.message : String(reason)));
-    if (remember) void window.pilot.setPreferredEditor(project.path, task.path, editor).then(setEditorState)
-      .catch((reason) => setOpenError(`Could not remember that editor: ${reason instanceof Error ? reason.message : String(reason)}`));
+    if (remember) void window.pilot.setPreferredApplication(project.path, task.path, application).then(setApplicationState)
+      .catch((reason) => setOpenError(`Could not remember that application: ${reason instanceof Error ? reason.message : String(reason)}`));
   };
 
   if (!changes) return loadError
@@ -537,9 +537,9 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
         <strong>{changes.files.length} file{changes.files.length === 1 ? "" : "s"}</strong><span className="additions">+{changes.additions.toLocaleString()}</span><span className="deletions">−{changes.deletions.toLocaleString()}</span>
       </div>
     </header>
-    <div className="execution-editor-row"><code title={changes.executionPath}>{changes.executionPath}</code><EditorOpenControl targetLabel="execution location" state={editorState} onOpen={(editor) => open(editor)} /></div>
-    {editorState?.notice && <p className="editor-discovery-note" role="status">{editorState.notice}</p>}
-    {editorState && !editorState.available.length && <p className="editor-discovery-note" role="status">No supported external application was detected. Install an editor, then return to PiLot.</p>}
+    <div className="execution-editor-row"><code title={changes.executionPath}>{changes.executionPath}</code><ApplicationOpenControl targetLabel="execution location" state={applicationState} onOpen={(application) => open(application)} /></div>
+    {applicationState?.notice && <p className="editor-discovery-note" role="status">{applicationState.notice}</p>}
+    {applicationState && !applicationState.available.length && <p className="editor-discovery-note" role="status">No supported external application was detected. Install an editor, then return to PiLot.</p>}
     {!changes.repository ? <div className="changes-empty"><strong>Git changes unavailable</strong><p>This Execution location is not a Git working tree.</p></div>
       : !changes.files.length ? <div className="changes-empty"><strong>No current changes</strong><p>Git reports a clean working tree.</p></div>
         : <>
@@ -551,7 +551,7 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
             </button></li>)}
           </ul>
           {selected && <section className="file-diff" aria-labelledby="selected-change-title">
-            <header><div><span>{changeStatusLabels[selected.status]}</span><h3 id="selected-change-title">{selected.path}</h3></div><EditorOpenControl targetLabel={selected.path} state={editorState} disabled={selected.status === "deleted"} onOpen={(editor) => open(editor, selected.path)} /></header>
+            <header><div><span>{changeStatusLabels[selected.status]}</span><h3 id="selected-change-title">{selected.path}</h3></div><ApplicationOpenControl targetLabel={selected.path} state={applicationState} disabled={selected.status === "deleted"} onOpen={(application) => open(application, selected.path)} /></header>
             {!diff && !diffError ? <p className="muted" role="status">Loading unified diff…</p>
               : diff?.binary ? <p className="muted">Binary file content is not shown.</p>
                 : diff?.truncated ? <p className="muted">This diff is too large to display. Open the file in your editor to review it.</p>
@@ -561,7 +561,7 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
                   </> : null}
           </section>}
         </>}
-    {(diffError || openError || editorError) && <p className="error changes-error" role="alert">{diffError || openError || editorError}</p>}
+    {(diffError || openError || applicationError) && <p className="error changes-error" role="alert">{diffError || openError || applicationError}</p>}
   </section>;
 }
 

@@ -23,17 +23,17 @@ export const editorDefinitions = [
 
 export const configuredEditorId = "configured" as const;
 export const fileManagerId = "file-manager" as const;
-export type EditorId = typeof editorDefinitions[number]["id"] | typeof configuredEditorId | typeof fileManagerId;
-export const editorIds = new Set<EditorId>([...editorDefinitions.map(({ id }) => id), configuredEditorId, fileManagerId]);
+export type ApplicationId = typeof editorDefinitions[number]["id"] | typeof configuredEditorId | typeof fileManagerId;
+export const applicationIds = new Set<ApplicationId>([...editorDefinitions.map(({ id }) => id), configuredEditorId, fileManagerId]);
 
-export type EditorState = {
-  available: Array<{ id: EditorId; label: string; kind: "editor" | "file-manager" }>;
-  preferred?: EditorId;
-  storedPreferred?: EditorId;
+export type ApplicationState = {
+  available: Array<{ id: ApplicationId; label: string; kind: "editor" | "file-manager" }>;
+  preferred?: ApplicationId;
+  storedPreferred?: ApplicationId;
   notice?: string;
 };
 
-export type EditorsApi = {
-  getEditorState(projectPath: string, taskPath: string): Promise<EditorState>;
-  setPreferredEditor(projectPath: string, taskPath: string, editor: EditorId): Promise<EditorState>;
+export type ApplicationsApi = {
+  getApplicationState(projectPath: string, taskPath: string): Promise<ApplicationState>;
+  setPreferredApplication(projectPath: string, taskPath: string, application: ApplicationId): Promise<ApplicationState>;
 };
