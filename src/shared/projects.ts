@@ -1,8 +1,20 @@
 import type { ApplicationId } from "./editors.js";
 
+export const CHANGE_STATUSES = ["added", "modified", "deleted", "renamed", "copied", "type-changed", "unmerged", "untracked"] as const;
+export type ChangeStatus = typeof CHANGE_STATUSES[number];
+
 export type TaskExecutionLocation =
   | { kind: "local"; path: string }
-  | { kind: "worktree"; path: string; worktreePath: string; ref: string; commit: string };
+  | { kind: "worktree"; path: string; worktreePath: string; ref: string; commit: string; removedAt?: string };
+
+export type TaskWorktreeFile = { path: string; previousPath?: string; status: ChangeStatus; fingerprint: string };
+
+export type TaskWorktreeState = {
+  taskPath: string;
+  head: string;
+  branch?: string;
+  files: TaskWorktreeFile[];
+};
 
 export type TaskSetupStatus = "pending" | "running" | "succeeded" | "failed" | "aborted" | "interrupted" | "bypassed";
 
@@ -258,8 +270,6 @@ export type TaskResourceState = {
   diagnostics: Array<{ severity: "warning" | "error"; message: string; path?: string }>;
 };
 
-export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "type-changed" | "unmerged" | "untracked";
-
 export type ChangedFile = {
   path: string;
   previousPath?: string;
@@ -326,6 +336,10 @@ export type ProjectsApi = {
   cloneTaskHistory(projectPath: string, taskPath: string, request: TaskCreationRequest): Promise<TaskHistoryTaskResult>;
   getTaskChanges(projectPath: string, taskPath: string): Promise<TaskChanges>;
   getTaskFileDiff(projectPath: string, taskPath: string, filePath: string): Promise<TaskFileDiff>;
+  getTaskWorktree(projectPath: string, taskPath: string): Promise<TaskWorktreeState>;
+  createTaskWorktreeBranch(projectPath: string, taskPath: string, branch: string): Promise<TaskWorktreeState>;
+  openTaskWorktreeTerminal(projectPath: string, taskPath: string): Promise<void>;
+  removeTaskWorktree(projectPath: string, taskPath: string, discard: boolean, expectedFiles: TaskWorktreeFile[]): Promise<ProjectsState>;
   openTaskPathInApplication(projectPath: string, taskPath: string, application: ApplicationId, filePath?: string): Promise<void>;
   setTaskModel(projectPath: string, taskPath: string, provider: string, modelId: string): Promise<TaskModelState>;
   setTaskThinking(projectPath: string, taskPath: string, level: ThinkingLevel): Promise<TaskModelState>;

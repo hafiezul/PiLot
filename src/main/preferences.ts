@@ -1,9 +1,9 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { applicationIds, type ApplicationId } from "../shared/editors.js";
+import { applicationIds, terminalIds, type ApplicationId, type TerminalId } from "../shared/editors.js";
 import { appearances, type Appearance, type Preferences } from "../shared/preferences.js";
 
-const defaults: Preferences = { appearance: "system", expandThinking: false };
+const defaults: Preferences = { appearance: "system", expandThinking: false, preferredTerminal: "system" };
 let preferenceWrites = Promise.resolve();
 
 export async function loadPreferences(directory: string): Promise<Preferences> {
@@ -15,6 +15,7 @@ export async function loadPreferences(directory: string): Promise<Preferences> {
     return {
       appearance: appearances.includes(saved.appearance as Appearance) ? saved.appearance as Appearance : defaults.appearance,
       expandThinking: saved.expandThinking === true,
+      preferredTerminal: terminalIds.has(saved.preferredTerminal as TerminalId) ? saved.preferredTerminal as TerminalId : defaults.preferredTerminal,
       ...(preferredApplication ? { preferredApplication } : {}),
     };
   } catch {
@@ -50,4 +51,9 @@ export async function saveExpandThinking(directory: string, expandThinking: unkn
 export async function savePreferredApplication(directory: string, application: unknown): Promise<Preferences> {
   if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("Unknown application preference");
   return updatePreferences(directory, (current) => ({ ...current, preferredApplication: application as ApplicationId }));
+}
+
+export async function savePreferredTerminal(directory: string, terminal: unknown): Promise<Preferences> {
+  if (typeof terminal !== "string" || !terminalIds.has(terminal as TerminalId)) throw new Error("Unknown terminal preference");
+  return updatePreferences(directory, (current) => ({ ...current, preferredTerminal: terminal as TerminalId }));
 }

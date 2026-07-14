@@ -14,7 +14,7 @@ import { builtInTuiCommand } from "../shared/actions.js";
 import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CommandEvidence, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type RetryEvidence, type RunEvidence, type RunEvidenceItem, type RunStatus, type TaskExecutionLocation, type TaskRunState, type TaskSetupState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
 import { loadTaskResources } from "./resources.js";
-import { assertRunnableTask, forkChangedTask as forkTaskSnapshot, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
+import { assertReadableTask, assertRunnableTask, forkChangedTask as forkTaskSnapshot, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
 import { assertTaskCurrent, getTaskContinuity, guardTaskManager, reloadTaskContinuity, watchTask } from "./continuity.js";
 import { cloneActivePath, forkFromPrompt, historyLabel, historyNavigationType, navigateWithoutSummary, taskHistoryState } from "./history.js";
 
@@ -449,6 +449,25 @@ export class RunCoordinator {
     this.activeExecutionLocations.add(executionPath);
   }
 
+  private async revalidateExecutionClaim(
+    projectPath: string,
+    taskPath: string,
+    executionPath: string,
+    validate?: (context: Awaited<ReturnType<typeof assertRunnableTask>>) => void,
+  ) {
+    try {
+      const current = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+      if (current.executionPath !== executionPath) throw new Error("This Task's Execution location changed while starting");
+      this.observe(current.file);
+      assertTaskCurrent(current.file);
+      validate?.(current);
+      return current;
+    } catch (error) {
+      this.activeExecutionLocations.delete(executionPath);
+      throw error;
+    }
+  }
+
   private finishRun(file: string, active: ActiveRun) {
     this.activeTasks.delete(file);
     this.activeExecutionLocations.delete(active.executionPath);
@@ -474,6 +493,19 @@ export class RunCoordinator {
     }
     const saved = this.taskStates.get(file);
     if (saved) this.publish({ ...saved, activeRunId: undefined, externalChange });
+  }
+
+  async withIdleExecution<T>(projectPath: string, taskPath: string, operation: () => Promise<T>) {
+    const { file, executionPath, execution } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    this.observe(file);
+    assertTaskCurrent(file);
+    this.claimExecution(executionPath, execution.kind);
+    try {
+      await this.revalidateExecutionClaim(projectPath, taskPath, executionPath);
+      return await operation();
+    } finally {
+      this.activeExecutionLocations.delete(executionPath);
+    }
   }
 
   private async mutateTaskHistory<T>(projectPath: string, taskPath: string, operation: (context: Awaited<ReturnType<typeof assertRunnableTask>>) => Promise<T>) {
@@ -530,6 +562,16 @@ export class RunCoordinator {
   }
 
   async getTaskHistory(projectPath: string, taskPath: string) {
+    const readable = await assertReadableTask(this.agentDir, projectPath, taskPath);
+    if (readable.task.execution.kind === "worktree" && readable.task.execution.removedAt) {
+      const manager = SessionManager.open(readable.file);
+      const externalChange = this.observe(readable.file);
+      if (externalChange && this.taskHistories.has(readable.file)) return this.taskHistories.get(readable.file)!;
+      assertTaskCurrent(readable.file);
+      const history = await withTaskWrite(readable.file, async () => taskHistoryState(readable.file, manager));
+      this.taskHistories.set(readable.file, history);
+      return history;
+    }
     const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     const manager = SessionManager.open(file);
     const externalChange = this.observe(file);
@@ -645,6 +687,7 @@ export class RunCoordinator {
       externalChanged: false,
     };
     this.claimExecution(executionPath, execution.kind);
+    await this.revalidateExecutionClaim(projectPath, taskPath, executionPath, ({ setup: currentSetup }) => assertSetupReady(currentSetup));
     this.activeTasks.set(file, active);
     this.publish(active.state);
 
@@ -743,6 +786,7 @@ export class RunCoordinator {
       externalChanged: false,
     };
     this.claimExecution(executionPath, execution.kind);
+    await this.revalidateExecutionClaim(projectPath, taskPath, executionPath, ({ setup: currentSetup }) => assertSetupReady(currentSetup));
     this.activeTasks.set(file, active);
     this.publish(active.state);
 
@@ -847,6 +891,7 @@ export class RunCoordinator {
       externalChanged: false,
     };
     this.claimExecution(executionPath, execution.kind);
+    await this.revalidateExecutionClaim(projectPath, taskPath, executionPath, ({ setup: currentSetup }) => assertSetupReady(currentSetup));
     this.activeTasks.set(file, active);
     this.publish(active.state);
 

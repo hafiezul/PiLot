@@ -106,6 +106,9 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .task-page { display: flex; flex-direction: column; width: min(760px, 100%); min-height: 100%; margin: 0 auto; }
 .task-topbar { align-items: center; padding-bottom: 38px; }
 .execution-location { display: block; margin-top: 6px; color: #686864; font-size: 11px; }
+.removed-worktree-summary { max-width: 580px; padding: 22px 0; border-top: 1px solid var(--change-border); border-bottom: 1px solid var(--change-border); }
+.removed-worktree-summary h2 { margin: 0 0 8px; font-size: 16px; }
+.removed-worktree-summary p { max-width: 68ch; margin: 6px 0 0; color: var(--change-muted); font-size: 12px; line-height: 1.55; }
 .worktree-setup { display: grid; gap: 10px; margin-bottom: 18px; padding: 14px 0; border-top: 1px solid #d8d8d4; border-bottom: 1px solid #d8d8d4; }
 .worktree-setup header { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
 .worktree-setup h2 { margin: 0 0 3px; font-size: 14px; }
@@ -387,14 +390,15 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .general-settings, .provider-setup { max-width: 720px; }
 .general-settings > .muted { margin: 0 0 32px; font-size: 13px; }
 .general-settings fieldset { margin: 0; padding: 0; border: 0; }
-.general-settings .thinking-setting { margin-top: 30px; }
+.general-settings .terminal-setting, .general-settings .thinking-setting { margin-top: 30px; }
 .general-settings legend { margin-bottom: 10px; font-size: 12px; font-weight: 650; }
 .general-settings label { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 9px 10px; border-top: 1px solid #dededb; cursor: pointer; }
-.general-settings label:last-child { border-bottom: 1px solid #dededb; }
+.general-settings label:last-child, .general-settings .terminal-setting label:last-of-type { border-bottom: 1px solid #dededb; }
 .general-settings input { width: 16px; height: 16px; margin: 0; accent-color: #1668d4; }
 .general-settings label span { display: grid; gap: 3px; }
 .general-settings label strong { font-size: 13px; }
 .general-settings label small { color: #686864; font-size: 12px; }
+.general-settings .terminal-setting-notice { margin: 9px 10px 0; font-size: 12px; }
 .provider-setup { background: inherit; }
 .setup-heading { display: flex; justify-content: space-between; gap: 24px; align-items: start; margin-bottom: 20px; }
 .setup-controls { display: flex; align-items: center; gap: 10px; }
@@ -454,6 +458,36 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .editor-open-control .editor-picker-popover button:hover, .editor-open-control .editor-picker-popover button:focus-visible { background: var(--change-subtle); }
 .file-diff > header .editor-picker-popover span { color: inherit; font-size: inherit; }
 .editor-discovery-note { flex: none; margin: -4px 16px 12px; color: var(--change-muted); font-size: 10px; line-height: 1.4; }
+.worktree-actions { flex: none; padding: 10px 16px 12px; border-bottom: 1px solid var(--change-border); }
+.worktree-action-row { display: grid; gap: 8px; }
+.worktree-action-row > div, .worktree-branch-form > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.worktree-action-row > div { justify-content: start; }
+.worktree-branch-form > div { justify-content: end; }
+.worktree-branch-status { min-width: 0; overflow: hidden; color: var(--change-muted); font: 10px ui-monospace, "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.worktree-actions button { border: 1px solid var(--change-button-border); border-radius: 5px; padding: 5px 7px; color: inherit; background: var(--change-surface); cursor: pointer; font-size: 10px; }
+.worktree-actions button:hover:not(:disabled) { background: var(--change-subtle); }
+.worktree-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.worktree-actions .worktree-remove-trigger { color: var(--change-delete); }
+.worktree-branch-form { display: grid; gap: 7px; margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--change-border); }
+.worktree-branch-form label { display: grid; gap: 5px; color: var(--change-muted); font-size: 10px; font-weight: 650; }
+.worktree-branch-form input { width: 100%; min-height: 30px; border: 1px solid var(--change-button-border); border-radius: 4px; padding: 5px 7px; color: inherit; background: var(--change-surface); font: 11px ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.worktree-action-note { margin: 8px 0 0; color: var(--change-muted); font-size: 10px; line-height: 1.4; }
+.worktree-action-note.error { color: var(--change-delete); }
+.worktree-removal-dialog { width: min(500px, calc(100% - 32px)); max-height: calc(100% - 48px); margin: auto; padding: 0; border: 1px solid var(--change-border); border-radius: 8px; color: inherit; background: var(--change-surface); overflow: auto; }
+.worktree-removal-dialog::backdrop { background: rgb(20 20 19 / 52%); }
+.worktree-removal-dialog form { display: grid; gap: 16px; padding: 22px; }
+.worktree-removal-dialog h2 { margin: 0 0 6px; font-size: 17px; }
+.worktree-removal-dialog header p, .worktree-removal-dialog > form > p { margin: 0; color: var(--change-muted); font-size: 11px; line-height: 1.5; }
+.worktree-removal-dialog .worktree-removal-warning { color: var(--change-delete); }
+.worktree-removal-files { max-height: 210px; list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--change-border); overflow-y: auto; }
+.worktree-removal-files li { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--change-border); font-size: 10px; }
+.worktree-removal-files span { color: var(--change-delete); font-weight: 650; }
+.worktree-removal-files code { overflow-wrap: anywhere; font-size: 10px; }
+.worktree-removal-dialog .error { margin: 0; color: var(--change-delete); font-size: 11px; }
+.worktree-removal-dialog footer { display: flex; justify-content: end; gap: 7px; padding-top: 14px; border-top: 1px solid var(--change-border); }
+.worktree-removal-dialog footer button { border: 1px solid var(--change-button-border); border-radius: 5px; padding: 6px 10px; color: inherit; background: var(--change-surface); cursor: pointer; }
+.worktree-removal-dialog footer button:disabled { cursor: wait; opacity: .55; }
+.worktree-removal-dialog footer .danger-action { border-color: var(--change-delete); color: var(--change-delete); }
 .changed-file-list { max-height: 180px; flex: none; list-style: none; margin: 0; padding: 4px; border-bottom: 1px solid var(--change-border); overflow-y: auto; overscroll-behavior: contain; }
 .changed-file-list li { margin: 0; }
 .changed-file-list button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; width: 100%; gap: 5px; border: 0; border-radius: 4px; padding: 6px; color: inherit; background: transparent; cursor: pointer; text-align: left; }

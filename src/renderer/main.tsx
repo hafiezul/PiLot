@@ -1,10 +1,10 @@
 import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
-import type { ApplicationId, ApplicationState } from "../shared/editors";
+import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
@@ -522,13 +522,157 @@ function ApplicationOpenControl({ targetLabel, state, disabled = false, onOpen }
   </div>;
 }
 
-function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelect }: {
+function WorktreeRemovalDialog({ project, task, worktree, onClose, onRemoved }: {
+  project: ProjectAccess;
+  task: TaskSummary;
+  worktree: TaskWorktreeState;
+  onClose(): void;
+  onRemoved(state: ProjectsState): void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const removeButton = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const dirty = worktree.files.length > 0;
+  useEffect(() => {
+    dialog.current?.showModal();
+    return () => { if (dialog.current?.open) dialog.current.close(); };
+  }, []);
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const next = await window.pilot.removeTaskWorktree(project.path, task.path, dirty, worktree.files);
+      onClose();
+      onRemoved(next);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setBusy(false);
+      requestAnimationFrame(() => removeButton.current?.focus());
+    }
+  };
+  const action = dirty ? `Discard ${worktree.files.length} file${worktree.files.length === 1 ? "" : "s"} and remove worktree` : "Remove worktree";
+
+  return <dialog ref={dialog} className="worktree-removal-dialog" aria-labelledby={titleId} onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
+    <form method="dialog" onSubmit={(event) => { event.preventDefault(); void remove(); }}>
+      <header><h2 id={titleId}>Remove managed worktree</h2><p>Removing deletes the managed Execution location and archives the Task. Task history remains, but this Task cannot run or be restored after removal.</p></header>
+      {dirty ? <>
+        <p className="worktree-removal-warning"><strong>These uncommitted changes will be permanently discarded.</strong> Review them before continuing.</p>
+        <ul className="worktree-removal-files" aria-label="Files that will be discarded">
+          {worktree.files.map((file) => <li key={`${file.previousPath ?? ""}:${file.path}`}><span>{changeStatusLabels[file.status]}</span><code>{file.previousPath ? `${file.previousPath} → ${file.path}` : file.path}</code></li>)}
+        </ul>
+      </> : <p className="worktree-removal-clean">Git reports a clean working tree. Any named branch and its commits remain in the Project.</p>}
+      <p className="worktree-removal-note">All files inside this managed worktree are deleted, including ignored build or dependency files. Nothing is applied to Local. If detached HEAD contains new commits, create a branch first.</p>
+      {error && <p className="error" role="alert">{error}</p>}
+      <footer><button type="button" autoFocus disabled={busy} onClick={onClose}>Cancel</button><button ref={removeButton} type="submit" className="danger-action" disabled={busy}>{busy ? "Removing…" : action}</button></footer>
+    </form>
+  </dialog>;
+}
+
+function WorktreeActions({ project, task, disabled, onRemoved }: {
+  project: ProjectAccess;
+  task: TaskSummary;
+  disabled: boolean;
+  onRemoved(state: ProjectsState): void;
+}) {
+  const branchTrigger = useRef<HTMLButtonElement>(null);
+  const terminalTrigger = useRef<HTMLButtonElement>(null);
+  const removeTrigger = useRef<HTMLButtonElement>(null);
+  const [state, setState] = useState<TaskWorktreeState>();
+  const [branching, setBranching] = useState(false);
+  const [branch, setBranch] = useState("");
+  const [removing, setRemoving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      setError("");
+      void window.pilot.getTaskWorktree(project.path, task.path).then((next) => { if (!cancelled) setState(next); })
+        .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
+    };
+    setState(undefined);
+    load();
+    window.addEventListener("focus", load);
+    return () => { cancelled = true; window.removeEventListener("focus", load); };
+  }, [project.path, task.path]);
+
+  const createBranch = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const next = await window.pilot.createTaskWorktreeBranch(project.path, task.path, branch);
+      setState(next);
+      setBranching(false);
+      setBranch("");
+      setNotice(`Created branch ${next.branch}`);
+      requestAnimationFrame(() => terminalTrigger.current?.focus());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const openTerminal = async () => {
+    setError("");
+    setNotice("");
+    try { await window.pilot.openTaskWorktreeTerminal(project.path, task.path); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const openRemoval = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      setState(await window.pilot.getTaskWorktree(project.path, task.path));
+      setRemoving(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const closeRemoval = () => {
+    setRemoving(false);
+    requestAnimationFrame(() => removeTrigger.current?.focus());
+  };
+
+  return <section className="worktree-actions" aria-label="Worktree actions">
+    <div className="worktree-action-row">
+      <span className="worktree-branch-status" role="status" aria-label="Branch status">{state ? state.branch ? `On branch ${state.branch}` : `Detached at ${state.head.slice(0, 8)}` : "Reading branch…"}</span>
+      <div>
+        {!state?.branch && !branching && <button ref={branchTrigger} type="button" disabled={disabled || busy || !state} onClick={() => { setBranching(true); setError(""); setNotice(""); }}>Create branch</button>}
+        <button ref={terminalTrigger} type="button" disabled={busy} onClick={() => void openTerminal()}>Open in terminal</button>
+        <button ref={removeTrigger} type="button" className="worktree-remove-trigger" disabled={disabled || busy || !state} onClick={() => void openRemoval()}>Remove worktree</button>
+      </div>
+    </div>
+    {branching && <form className="worktree-branch-form" onSubmit={(event) => { event.preventDefault(); void createBranch(); }}>
+      <label>New branch name<input value={branch} maxLength={255} autoFocus disabled={busy} required onChange={(event) => setBranch(event.target.value)} /></label>
+      <div><button type="submit" disabled={busy || !branch.trim()}>Create branch</button><button type="button" disabled={busy} onClick={() => { setBranching(false); setBranch(""); requestAnimationFrame(() => branchTrigger.current?.focus()); }}>Cancel</button></div>
+    </form>}
+    {disabled && <p className="worktree-action-note">Stop the active Run or resolve external Task changes before changing this Worktree.</p>}
+    {notice && <p className="success worktree-action-note" role="status">{notice}</p>}
+    {error && <p className="error worktree-action-note" role="alert">{error}</p>}
+    {removing && state && <WorktreeRemovalDialog project={project} task={task} worktree={state} onClose={closeRemoval} onRemoved={onRemoved} />}
+  </section>;
+}
+
+function ChangesPanel({ project, task, changes, loadError, selectedPath, disabled, onSelect, onWorktreeRemoved }: {
   project: ProjectAccess;
   task: TaskSummary;
   changes?: TaskChanges;
   loadError: string;
   selectedPath?: string;
+  disabled: boolean;
   onSelect(path: string): void;
+  onWorktreeRemoved(state: ProjectsState): void;
 }) {
   const panel = useRef<HTMLElement>(null);
   const [diff, setDiff] = useState<TaskFileDiff>();
@@ -596,6 +740,7 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
     <div className="execution-editor-row"><code title={changes.executionPath}>{changes.executionPath}</code><ApplicationOpenControl targetLabel="execution location" state={applicationState} onOpen={(application) => open(application)} /></div>
     {applicationState?.notice && <p className="editor-discovery-note" role="status">{applicationState.notice}</p>}
     {applicationState && !applicationState.available.length && <p className="editor-discovery-note" role="status">No supported external application was detected. Install an editor, then return to PiLot.</p>}
+    {task.execution.kind === "worktree" && !task.execution.removedAt && <WorktreeActions project={project} task={task} disabled={disabled} onRemoved={onWorktreeRemoved} />}
     {!changes.repository ? <div className="changes-empty"><strong>Git changes unavailable</strong><p>This Execution location is not a Git working tree.</p></div>
       : !changes.files.length ? <div className="changes-empty"><strong>No current changes</strong><p>Git reports a clean working tree.</p></div>
         : <>
@@ -624,12 +769,13 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
 type FlatHistoryNode = { node: TaskHistoryNode; depth: number; parentId?: string; position: number; setSize: number };
 type HistoryTaskCreationAction = { kind: "clone" } | { kind: "fork"; entryId: string };
 
-function HistoryPanel({ project, task, history, loadError, disabled, onChange, onNavigate, onTaskCreated }: {
+function HistoryPanel({ project, task, history, loadError, disabled, readOnly = false, onChange, onNavigate, onTaskCreated }: {
   project: ProjectAccess;
   task: TaskSummary;
   history?: TaskHistoryState;
   loadError: string;
   disabled: boolean;
+  readOnly?: boolean;
   onChange(next: TaskHistoryState): void;
   onNavigate(editorText?: string): void;
   onTaskCreated(result: TaskHistoryTaskResult): Promise<void>;
@@ -704,8 +850,9 @@ function HistoryPanel({ project, task, history, loadError, disabled, onChange, o
     : <p className="muted history-loading" role="status">Reading Task history…</p>;
 
   return <section className="history-panel" aria-label="Task history inspector" aria-busy={busy}>
-    <header className="history-heading"><div><p className="eyebrow">Pi session tree</p><h2>Task history</h2></div><div><span>{history.pathCount} path{history.pathCount === 1 ? "" : "s"}</span><button type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "clone" })}>Clone active path</button></div></header>
-    {!history.roots.length ? <div className="history-empty"><strong>No history entries yet</strong><p>Submit a prompt to begin this Task's history.</p></div> : <>
+    <header className="history-heading"><div><p className="eyebrow">Pi session tree</p><h2>Task history</h2></div><div><span>{history.pathCount} path{history.pathCount === 1 ? "" : "s"}</span>{readOnly ? <span>Read only</span> : <button type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "clone" })}>Clone active path</button>}</div></header>
+    {readOnly && <p className="history-root-branch" role="note">History remains available after Worktree removal. Editing and navigation actions are unavailable.</p>}
+    {!history.roots.length ? <div className="history-empty"><strong>No history entries yet</strong><p>{readOnly ? "This Task has no recorded Run history." : "Submit a prompt to begin this Task's history."}</p></div> : <>
       {history.roots.length > 1 && <p className="history-root-branch" role="note">Task start · {history.roots.length} branches</p>}
       <div ref={tree} className="history-tree" role="tree" aria-label="Task history">
         {flat.map(({ node, depth, parentId, position, setSize }, index) => <button key={node.id} type="button" role="treeitem" data-current={node.current || undefined} aria-level={depth} aria-posinset={position} aria-setsize={setSize} aria-selected={node.id === selectedId} aria-expanded={node.children.length ? expanded.has(node.id) : undefined} tabIndex={node.id === selectedId ? 0 : -1} style={{ paddingInlineStart: `${8 + (depth - 1) * 17}px` }} onFocus={() => setSelectedId(node.id)} onClick={() => setSelectedId(node.id)} onKeyDown={(event) => {
@@ -726,7 +873,7 @@ function HistoryPanel({ project, task, history, loadError, disabled, onChange, o
           <span className="history-entry-copy"><span><strong>{node.title}</strong>{node.label && <span className="history-label">{node.label}</span>}</span>{node.description && <small>{node.description}</small>}<span className="history-entry-meta"><time dateTime={node.timestamp}>{new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{node.children.length > 1 && <span>{node.children.length} branches</span>}{node.current && <span className="history-current">Current leaf</span>}</span></span>
         </button>)}
       </div>
-      {selected && <section className="history-actions" aria-label={`Actions for ${selected.title}`}>
+      {selected && !readOnly && <section className="history-actions" aria-label={`Actions for ${selected.title}`}>
         {selected.kind === "prompt" && <button className="history-fork" type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "fork", entryId: selected.id })}>Fork from prompt</button>}
         <form onSubmit={(event) => { event.preventDefault(); void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id, label); onChange(next); setNotice("Label saved"); }); }}>
           <label>History label<input aria-label="History label" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} /></label>
@@ -1002,7 +1149,7 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   </div>;
 }
 
-function TaskPage({ project, task, reloadToken, revision, historyDraft, changePaths, onCreate, onFork, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onContinuityChange, onActionStart, onError }: {
+function TaskPage({ project, task, reloadToken, revision, historyDraft, changePaths, onCreate, onFork, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onSetupChange, onContinuityChange, onActionStart, onError }: {
   project: ProjectAccess;
   task: TaskSummary;
   reloadToken: number;
@@ -1016,6 +1163,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   onOpenSettings(): void;
   onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
+  onSetupChange(active: boolean): void;
   onContinuityChange(changed: boolean): void;
   onActionStart(): void;
   onError(reason: unknown, recovery: string): void;
@@ -1201,6 +1349,10 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     onRunChange(active);
     return () => onRunChange(false);
   }, [active, onRunChange]);
+  useEffect(() => {
+    onSetupChange(setupState?.status === "running");
+    return () => onSetupChange(false);
+  }, [setupState?.status, onSetupChange]);
   useEffect(() => {
     onContinuityChange(externallyChanged);
     return () => onContinuityChange(false);
@@ -1454,7 +1606,22 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   </div>;
 }
 
-function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revision, historyDraft, changePaths, onSelectTask, onCreateTask, onForkTask, onOpenAccess, onChange, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onContinuityChange, onActionStart, onError }: {
+function RemovedWorktreeTaskPage({ task, onCreate }: { task: TaskSummary; onCreate(): void }) {
+  const removedAt = task.execution.kind === "worktree" ? task.execution.removedAt : undefined;
+  return <div className="task-page removed-worktree-page">
+    <header className="topbar task-topbar">
+      <div><p className="eyebrow">Archived Task</p><h1 id="removed-task-title" tabIndex={-1}>{task.title}</h1><span className="execution-location">Managed Worktree removed</span></div>
+      <button className="new-task-button" data-action="task.new" onClick={onCreate}>New Task</button>
+    </header>
+    <section className="removed-worktree-summary" aria-labelledby="removed-worktree-title">
+      <h2 id="removed-worktree-title">Task history is still available</h2>
+      <p>The managed Worktree was removed{removedAt ? ` on ${new Date(removedAt).toLocaleString()}` : ""}. This Task cannot run or be restored because its Execution location no longer exists.</p>
+      <p>Review its Pi history in the History inspector. Any named Git branch and commits remain in the Project.</p>
+    </section>
+  </div>;
+}
+
+function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revision, historyDraft, changePaths, onSelectTask, onCreateTask, onForkTask, onOpenAccess, onChange, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onSetupChange, onContinuityChange, onActionStart, onError }: {
   project: ProjectAccess;
   needsAccess: boolean;
   selectedTaskPath?: string;
@@ -1472,6 +1639,7 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revi
   onOpenSettings(): void;
   onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
+  onSetupChange(active: boolean): void;
   onContinuityChange(changed: boolean): void;
   onActionStart(): void;
   onError(reason: unknown, recovery: string): void;
@@ -1479,7 +1647,9 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revi
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   const selectedTask = active.find(({ path }) => path === selectedTaskPath);
-  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} revision={revision} historyDraft={historyDraft} changePaths={changePaths} onCreate={onCreateTask} onFork={onForkTask} onDetails={onDetails} onHistoryChange={onHistoryChange} onOpenSettings={onOpenSettings} onOpenChange={onOpenChange} onRunChange={onRunChange} onContinuityChange={onContinuityChange} onActionStart={onActionStart} onError={onError} />;
+  const removedTask = archived.find(({ path, execution }) => path === selectedTaskPath && execution.kind === "worktree" && execution.removedAt);
+  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} revision={revision} historyDraft={historyDraft} changePaths={changePaths} onCreate={onCreateTask} onFork={onForkTask} onDetails={onDetails} onHistoryChange={onHistoryChange} onOpenSettings={onOpenSettings} onOpenChange={onOpenChange} onRunChange={onRunChange} onSetupChange={onSetupChange} onContinuityChange={onContinuityChange} onActionStart={onActionStart} onError={onError} />;
+  if (removedTask && !needsAccess) return <RemovedWorktreeTaskPage task={removedTask} onCreate={onCreateTask} />;
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
@@ -1498,7 +1668,7 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revi
       </section>
       <section className="task-section" aria-label="Archived tasks">
         <div className="task-section-heading"><h2>Archived Tasks</h2><span>{archived.length}</span></div>
-        {archived.length ? <ul>{archived.map((task) => <li key={task.path}><strong>{task.title}</strong><span>Archived</span><button onClick={() => { onActionStart(); void window.pilot.setTaskArchived(project.path, task.path, false).then(onChange).catch((reason) => onError(reason, "Reload the Project and try restoring the Task again.")); }}>Restore</button></li>)}</ul> : <p className="muted">No archived Tasks</p>}
+        {archived.length ? <ul>{archived.map((task) => <li key={task.path}><strong>{task.title}</strong><span>{task.execution.kind === "worktree" ? task.execution.removedAt ? "Worktree removed" : "Archived · Worktree retained" : "Archived"}</span>{task.execution.kind === "worktree" && task.execution.removedAt ? <button onClick={() => onSelectTask(task.path)}>View history</button> : <button onClick={() => { onActionStart(); void window.pilot.setTaskArchived(project.path, task.path, false).then(onChange).catch((reason) => onError(reason, "Reload the Project and try restoring the Task again.")); }}>Restore</button>}</li>)}</ul> : <p className="muted">No archived Tasks</p>}
       </section>
     </div>}
   </>;
@@ -1511,16 +1681,22 @@ function applyAppearance(appearance: Appearance) {
 function GeneralSettings() {
   const [appearance, setAppearance] = useState<Appearance>();
   const [expandThinking, setExpandThinking] = useState(false);
-  useEffect(() => { void window.pilot.getPreferences().then((value) => {
-    setAppearance(value.appearance);
-    setExpandThinking(value.expandThinking);
-    applyAppearance(value.appearance);
-  }); }, []);
+  const [terminals, setTerminals] = useState<TerminalState>();
+  const [terminalSaving, setTerminalSaving] = useState(false);
+  const [terminalError, setTerminalError] = useState("");
+  useEffect(() => {
+    void window.pilot.getPreferences().then((value) => {
+      setAppearance(value.appearance);
+      setExpandThinking(value.expandThinking);
+      applyAppearance(value.appearance);
+    });
+    void window.pilot.getTerminalState().then(setTerminals).catch((reason) => setTerminalError(reason instanceof Error ? reason.message : String(reason)));
+  }, []);
 
   return <section className="general-settings" aria-labelledby="general-title">
     <p className="eyebrow">Application</p>
     <h2 id="general-title">General</h2>
-    <p className="muted">Choose how PiLot looks and presents Run evidence on this device.</p>
+    <p className="muted">Choose how PiLot looks, presents Run evidence, and opens external tools on this device.</p>
     <fieldset disabled={!appearance}>
       <legend>Appearance</legend>
       {(["system", "light", "dark"] as const).map((value) => <label key={value}>
@@ -1531,6 +1707,24 @@ function GeneralSettings() {
         }} />
         <span><strong>{value[0].toUpperCase() + value.slice(1)}</strong><small>{value === "system" ? "Follow your operating system" : `Always use ${value} appearance`}</small></span>
       </label>)}
+    </fieldset>
+    <fieldset className="terminal-setting" disabled={!terminals || terminalSaving}>
+      <legend>External terminal</legend>
+      {terminals?.available.map((terminal) => <label key={terminal.id}>
+        <input type="radio" name="terminal" value={terminal.id} checked={terminals.preferred === terminal.id} onChange={() => {
+          const previous = terminals;
+          setTerminalError("");
+          setTerminalSaving(true);
+          setTerminals({ ...terminals, preferred: terminal.id, storedPreferred: terminal.id, notice: undefined });
+          void window.pilot.setPreferredTerminal(terminal.id).then(setTerminals).catch((reason) => {
+            setTerminals(previous);
+            setTerminalError(reason instanceof Error ? reason.message : String(reason));
+          }).finally(() => setTerminalSaving(false));
+        }} />
+        <span><strong>{terminal.label}</strong><small>{terminal.id === "system" ? "Use the host-platform default" : `Open Worktrees in ${terminal.label}`}</small></span>
+      </label>)}
+      {terminals?.notice && <p className="muted terminal-setting-notice" role="note">{terminals.notice}</p>}
+      {terminalError && <p className="error terminal-setting-notice" role="alert">Could not update the terminal preference: {terminalError}</p>}
     </fieldset>
     <fieldset className="thinking-setting">
       <legend>Run evidence</legend>
@@ -1701,6 +1895,7 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const [runActive, setRunActive] = useState(false);
+  const [setupActive, setSetupActive] = useState(false);
   const [taskExternallyChanged, setTaskExternallyChanged] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [compactLayout, setCompactLayout] = useState(() => matchMedia("(max-width: 1040px)").matches);
@@ -1784,20 +1979,22 @@ function App() {
     setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery });
   }, []);
   const handleRunChange = useCallback((active: boolean) => setRunActive(active), []);
+  const handleSetupChange = useCallback((active: boolean) => setSetupActive(active), []);
   const handleContinuityChange = useCallback((changed: boolean) => setTaskExternallyChanged(changed), []);
 
   const selectedProject = projects?.selected;
   const selectedTask = selectedProject?.tasks.find(({ path }) => path === selectedTaskPath);
+  const removedWorktreeAt = selectedTask?.execution.kind === "worktree" ? selectedTask.execution.removedAt : undefined;
   const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
   const workspaceAvailable = !showSettings;
-  const taskAvailable = Boolean(workspaceAvailable && selectedTask && !needsProjectAccess);
+  const taskAvailable = Boolean(workspaceAvailable && selectedTask && !removedWorktreeAt && !needsProjectAccess);
   useEffect(() => {
     let cancelled = false;
     let timer = 0;
     setTaskChanges(undefined);
     setChangesError("");
     setSelectedChangePath(undefined);
-    if (!selectedProject || !selectedTask || needsProjectAccess) return;
+    if (!selectedProject || !selectedTask || removedWorktreeAt || needsProjectAccess) return;
     const refreshChanges = async () => {
       try {
         const next = await window.pilot.getTaskChanges(selectedProject.path, selectedTask.path);
@@ -1815,7 +2012,7 @@ function App() {
     };
     void refreshChanges();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [selectedProject?.path, selectedTask?.path, needsProjectAccess]);
+  }, [selectedProject?.path, selectedTask?.path, removedWorktreeAt, needsProjectAccess]);
   useEffect(() => {
     let cancelled = false;
     setTaskHistory(undefined);
@@ -1827,14 +2024,14 @@ function App() {
       if (!cancelled) setHistoryError(reason instanceof Error ? reason.message : String(reason));
     });
     return () => { cancelled = true; };
-  }, [selectedProject?.path, selectedTask?.path, needsProjectAccess, taskRevision]);
+  }, [selectedProject?.path, selectedTask?.path, removedWorktreeAt, needsProjectAccess, taskRevision]);
   const unavailable = (reason: string) => ({ enabled: false, reason });
   const availability: ActionAvailability = {
     "project.add": workspaceAvailable ? { enabled: true } : unavailable("Return to the command center to add a Project"),
     "task.new": taskAvailable || Boolean(workspaceAvailable && selectedProject && !needsProjectAccess) ? { enabled: true } : unavailable("Select a Project with access enabled"),
     "task.exportJsonl": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
     "task.exportHtml": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
-    "task.archive": taskAvailable && !runActive && !taskExternallyChanged ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : runActive ? "Stop the active Run first" : "Select a Task"),
+    "task.archive": taskAvailable && !runActive && !setupActive && !taskExternallyChanged ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : setupActive ? "Stop Worktree setup first" : runActive ? "Stop the active Run first" : "Select a Task"),
     "task.chooseModel": taskAvailable && !runActive && !taskExternallyChanged && Boolean(taskDetails?.selected) ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : runActive ? "Stop the active Run first" : "Select a Task with an available model"),
     "task.chooseThinking": taskAvailable && !runActive && !taskExternallyChanged && (taskDetails?.thinkingLevels.length ?? 0) > 1 ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : runActive ? "Stop the active Run first" : "No alternative thinking levels"),
     "resources.reload": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
@@ -1969,7 +2166,20 @@ function App() {
             revision={taskRevision}
             historyDraft={historyDraft?.taskPath === selectedTaskPath ? historyDraft : undefined}
             changePaths={taskChanges?.files.flatMap(({ path, previousPath }) => previousPath ? [path, previousPath] : [path]) ?? []}
-            onSelectTask={(path) => { setTaskDetails(undefined); setSelectedTaskPath(path); }}
+            onSelectTask={(path) => {
+              setTaskDetails(undefined);
+              setSelectedTaskPath(path);
+              const task = selectedProject.tasks.find((candidate) => candidate.path === path);
+              if (task?.execution.kind === "worktree" && task.execution.removedAt) {
+                detailsReturnFocus.current = null;
+                setInspectorView("history");
+                setShowDetails(true);
+                requestAnimationFrame(() => {
+                  detailsReturnFocus.current = document.getElementById("removed-task-title");
+                  document.getElementById("inspector-history-tab")?.focus();
+                });
+              }
+            }}
             onCreateTask={() => void createSelectedTask()}
             onForkTask={(task) => { void window.pilot.getProjects().then((next) => {
               setProjects(next);
@@ -1984,6 +2194,7 @@ function App() {
             onOpenSettings={openProviderSettings}
             onOpenChange={openChange}
             onRunChange={handleRunChange}
+            onSetupChange={handleSetupChange}
             onContinuityChange={handleContinuityChange}
             onActionStart={clearActionError}
             onError={reportActionError}
@@ -2031,7 +2242,16 @@ function App() {
               <p className="eyebrow">Project</p>
               <h2>{selectedProject.name}</h2>
               <p className="muted inspector-note">Complete the open access decision to continue.</p>
-            </> : selectedTask && taskDetails ? <section className="task-details" aria-label="Task details">
+            </> : selectedTask && removedWorktreeAt ? <section className="task-details" aria-label="Removed Task details">
+              <p className="eyebrow">Archived Task</p>
+              <h2>{selectedTask.title}</h2>
+              <p className="muted inspector-note">Its managed Worktree was removed on {new Date(removedWorktreeAt).toLocaleString()}.</p>
+              <dl>
+                <div><dt>Lifecycle</dt><dd>Archived</dd></div>
+                <div><dt>Execution location</dt><dd>Worktree removed</dd></div>
+                <div><dt>Run access</dt><dd>Unavailable</dd></div>
+              </dl>
+            </section> : selectedTask && taskDetails ? <section className="task-details" aria-label="Task details">
               <p className="eyebrow">Task details</p>
               <h2>{selectedTask.title}</h2>
               <dl>
@@ -2060,12 +2280,18 @@ function App() {
               </dl>
             </>}
           </div> : inspectorView === "changes" ? <div id="inspector-changes-panel" className="inspector-body changes-inspector-body" role="tabpanel" aria-labelledby="inspector-changes-tab">
-            {selectedProject && selectedTask && !needsProjectAccess
-              ? <ChangesPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} changes={taskChanges} loadError={changesError} selectedPath={selectedChangePath} onSelect={setSelectedChangePath} />
+            {selectedProject && selectedTask && !removedWorktreeAt && !needsProjectAccess
+              ? <ChangesPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} changes={taskChanges} loadError={changesError} selectedPath={selectedChangePath} disabled={runActive || setupActive || taskExternallyChanged} onSelect={setSelectedChangePath} onWorktreeRemoved={(next) => {
+                setProjects(next);
+                setSelectedTaskPath(undefined);
+                setTaskDetails(undefined);
+                setTaskChanges(undefined);
+                requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-action="task.new"]')?.focus());
+              }} />
               : <div className="changes-empty"><strong>Select a Task</strong><p>Choose an active Task to review its Git changes.</p></div>}
           </div> : <div id="inspector-history-panel" className="inspector-body history-inspector-body" role="tabpanel" aria-labelledby="inspector-history-tab">
             {selectedProject && selectedTask && !needsProjectAccess
-              ? <HistoryPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} history={taskHistory} loadError={historyError} disabled={runActive || taskExternallyChanged} onChange={setTaskHistory} onNavigate={(editorText) => {
+              ? <HistoryPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} history={taskHistory} loadError={historyError} disabled={runActive || setupActive || taskExternallyChanged} readOnly={Boolean(removedWorktreeAt)} onChange={setTaskHistory} onNavigate={(editorText) => {
                 setTaskDetails(undefined);
                 setHistoryDraft((current) => ({ taskPath: selectedTask.path, text: editorText ?? "", version: (current?.version ?? 0) + 1 }));
                 setTaskRevision((value) => value + 1);
@@ -2076,7 +2302,7 @@ function App() {
                 setHistoryDraft((current) => ({ taskPath: result.task.path, text: result.draft ?? "", version: (current?.version ?? 0) + 1 }));
                 setTaskRevision((value) => value + 1);
               }} />
-              : <div className="history-empty"><strong>Select a Task</strong><p>Choose an active Task to inspect its Pi history.</p></div>}
+              : <div className="history-empty"><strong>Select a Task</strong><p>Choose a Task to inspect its Pi history.</p></div>}
           </div>}
         </aside>
       </div>

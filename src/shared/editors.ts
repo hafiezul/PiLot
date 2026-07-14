@@ -26,6 +26,28 @@ export const fileManagerId = "file-manager" as const;
 export type ApplicationId = typeof editorDefinitions[number]["id"] | typeof configuredEditorId | typeof fileManagerId;
 export const applicationIds = new Set<ApplicationId>([...editorDefinitions.map(({ id }) => id), configuredEditorId, fileManagerId]);
 
+export const terminalDefinitions = [
+  { id: "system", label: "System default" },
+  { id: "iterm", label: "iTerm" },
+  { id: "warp", label: "Warp" },
+  { id: "ghostty", label: "Ghostty" },
+  { id: "windows-terminal", label: "Windows Terminal" },
+  { id: "powershell", label: "PowerShell" },
+  { id: "gnome-terminal", label: "GNOME Terminal" },
+  { id: "konsole", label: "Konsole" },
+  { id: "kitty", label: "kitty" },
+  { id: "wezterm", label: "WezTerm" },
+  { id: "alacritty", label: "Alacritty" },
+] as const;
+export type TerminalId = typeof terminalDefinitions[number]["id"];
+export const terminalIds = new Set<TerminalId>(terminalDefinitions.map(({ id }) => id));
+export type TerminalState = {
+  available: Array<{ id: TerminalId; label: string }>;
+  preferred: TerminalId;
+  storedPreferred: TerminalId;
+  notice?: string;
+};
+
 export type ApplicationState = {
   available: Array<{ id: ApplicationId; label: string; kind: "editor" | "file-manager" }>;
   preferred?: ApplicationId;

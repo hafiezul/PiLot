@@ -1,9 +1,11 @@
 import { AuthStorage, CURRENT_SESSION_VERSION, estimateTokens, ModelRegistry, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
-import { mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ProjectDiagnostic, TaskExecutionLocation, TaskModelState, TaskSetupState, TaskSetupStatus, TaskSummary, ThinkingLevel } from "../shared/projects.js";
 import { BUILT_IN_PROVIDER_IDS } from "../shared/providers.js";
 import { guardTaskManager, taskSnapshot } from "./continuity.js";
@@ -13,6 +15,16 @@ const maximumTasks = 500;
 const setupStatuses = new Set<TaskSetupStatus>(["pending", "running", "succeeded", "failed", "aborted", "interrupted", "bypassed"]);
 
 type Header = { type?: string; version?: number; id?: string; cwd?: string; timestamp?: unknown };
+type WorktreeRemovalJournal = {
+  version: 1;
+  taskPath: string;
+  projectPath: string;
+  worktreePath: string;
+  removedAt: string;
+  previousLifecycle: "active" | "archived";
+  operationStartedAt?: string;
+};
+
 type TaskMetadata = {
   title?: string;
   lifecycle?: "active" | "archived";
@@ -78,8 +90,16 @@ function worktreeExecution(value: unknown): Extract<TaskExecutionLocation, { kin
   if (!value || typeof value !== "object") return;
   const data = value as Record<string, unknown>;
   if (data.kind !== "worktree" || typeof data.path !== "string" || typeof data.worktreePath !== "string"
-    || typeof data.ref !== "string" || typeof data.commit !== "string") return;
-  return { kind: "worktree", path: data.path, worktreePath: data.worktreePath, ref: data.ref, commit: data.commit };
+    || typeof data.ref !== "string" || typeof data.commit !== "string"
+    || (data.removedAt !== undefined && (typeof data.removedAt !== "string" || !Number.isFinite(Date.parse(data.removedAt))))) return;
+  return {
+    kind: "worktree",
+    path: data.path,
+    worktreePath: data.worktreePath,
+    ref: data.ref,
+    commit: data.commit,
+    ...(typeof data.removedAt === "string" ? { removedAt: data.removedAt } : {}),
+  };
 }
 
 function appendMetadata(file: string, data: ResolvedTaskMetadata) {
@@ -250,20 +270,170 @@ export async function createLocalTask(agentDir: string, projectPath: string) {
   return createTaskAtExecution(agentDir, project, { kind: "local", path: project });
 }
 
-export async function assertRunnableTask(agentDir: string, projectPath: string, taskPath: string) {
-  const file = path.resolve(taskPath);
+function assertOwnedTaskPath(agentDir: string, file: string) {
   const relative = path.relative(path.resolve(agentDir, "sessions"), file);
   if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error("This Task does not belong to the admitted Project");
   }
+}
+
+async function readOwnedTask(agentDir: string, projectPath: string, taskPath: string) {
+  const file = path.resolve(taskPath);
+  assertOwnedTaskPath(agentDir, file);
   const project = await normalize(projectPath);
-  const task = await readTask(file, project);
-  if (task.incompatible) throw new Error("Update PiLot before running this newer Task");
-  if (task.malformed) throw new Error("Repair this Task's unreadable history before running it");
-  if (!task.task || !task.header) throw new Error("This Task does not belong to the admitted Project");
-  const execution = task.task.execution;
+  return { file, project, result: await readTask(file, project) };
+}
+
+async function readMutableTask(agentDir: string, projectPath: string, taskPath: string, purpose: string, missingMessage: string) {
+  const context = await readOwnedTask(agentDir, projectPath, taskPath);
+  const task = context.result;
+  if (task.malformed) throw new Error(`Repair this Task's unreadable history before ${purpose}`);
+  if (!task.task || !task.header || !task.metadata) throw new Error(missingMessage);
+  const version = task.header.version ?? 1;
+  if (version < 2 || version > CURRENT_SESSION_VERSION) throw new Error(`Update this Task's Pi format before ${purpose}`);
+  return { ...context, task: task.task, metadata: task.metadata };
+}
+
+function removalJournal(value: unknown): WorktreeRemovalJournal | undefined {
+  if (!value || typeof value !== "object") return;
+  const data = value as Partial<WorktreeRemovalJournal>;
+  if (data.version !== 1 || typeof data.taskPath !== "string" || typeof data.projectPath !== "string"
+    || typeof data.worktreePath !== "string" || typeof data.removedAt !== "string" || !Number.isFinite(Date.parse(data.removedAt))
+    || (data.previousLifecycle !== "active" && data.previousLifecycle !== "archived")
+    || (data.operationStartedAt !== undefined && (typeof data.operationStartedAt !== "string" || !Number.isFinite(Date.parse(data.operationStartedAt))))) return;
+  return data as WorktreeRemovalJournal;
+}
+
+function removalJournalDirectory(userData: string) {
+  return path.join(userData, "pending-worktree-removals");
+}
+
+async function flushFile(file: string) {
+  const handle = await open(file, "r");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function flushDirectory(directory: string) {
+  if (process.platform === "win32") return;
+  const handle = await open(directory, "r");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function writeRemovalJournal(file: string, journal: WorktreeRemovalJournal) {
+  const temporary = `${file}.tmp`;
+  let handle;
+  try {
+    handle = await open(temporary, "wx");
+    await handle.writeFile(JSON.stringify(journal));
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, file);
+    await flushDirectory(path.dirname(file));
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function createRemovalJournal(userData: string, journal: WorktreeRemovalJournal) {
+  const directory = removalJournalDirectory(userData);
+  const target = path.join(directory, `${randomUUID()}.json`);
+  await mkdir(directory, { recursive: true });
+  await flushDirectory(path.dirname(directory));
+  await writeRemovalJournal(target, journal);
+  return target;
+}
+
+async function removeRemovalJournal(file: string) {
+  await rm(file, { force: true });
+  await flushDirectory(path.dirname(file));
+}
+
+async function worktreeExists(file: string) {
+  try {
+    await stat(file);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function reconcileRemovalJournal(userData: string, agentDir: string, journal: WorktreeRemovalJournal, recovering = false) {
+  const root = await realpath(path.join(userData, "worktrees"));
+  let exists = await worktreeExists(journal.worktreePath);
+  if (recovering && exists && journal.operationStartedAt) {
+    for (let attempt = 0; attempt < 300 && exists; attempt++) {
+      await delay(100);
+      exists = await worktreeExists(journal.worktreePath);
+    }
+    if (exists && Date.now() - Date.parse(journal.operationStartedAt) < 5 * 60_000) {
+      throw new Error("The interrupted Git Worktree removal may still be finishing");
+    }
+  }
+  const target = exists ? await realpath(journal.worktreePath) : path.resolve(journal.worktreePath);
+  const relative = path.relative(root, target);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("Pending Worktree cleanup points outside PiLot-managed storage");
+  }
+  const task = await readMutableTask(agentDir, journal.projectPath, journal.taskPath, "recovering Worktree cleanup", "Pending Worktree cleanup does not identify a Task");
+  if (task.task.execution.kind !== "worktree" || path.resolve(task.task.execution.worktreePath) !== path.resolve(journal.worktreePath)) {
+    throw new Error("Pending Worktree cleanup no longer matches its Task");
+  }
+  const marked = task.task.execution.removedAt === journal.removedAt;
+  if (exists && marked) {
+    const execution = { ...task.task.execution };
+    delete execution.removedAt;
+    appendMetadata(task.file, { ...task.metadata, lifecycle: journal.previousLifecycle, execution });
+    await flushFile(task.file);
+  } else if (!exists && (!marked || task.metadata.lifecycle !== "archived")) {
+    const execution = { ...task.task.execution, removedAt: journal.removedAt };
+    appendMetadata(task.file, { ...task.metadata, lifecycle: "archived", execution });
+    await flushFile(task.file);
+  }
+}
+
+export async function recoverTaskWorktreeRemovals(userData: string, agentDir: string) {
+  const directory = removalJournalDirectory(userData);
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const file = path.join(directory, entry.name);
+    if (entry.isFile() && entry.name.endsWith(".tmp")) {
+      await rm(file, { force: true }).catch(() => undefined);
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    try {
+      const journal = removalJournal(JSON.parse(await readFile(file, "utf8")));
+      if (!journal) throw new Error("Pending Worktree cleanup journal is invalid");
+      await withTaskWrite(path.resolve(journal.taskPath), () => reconcileRemovalJournal(userData, agentDir, journal, true));
+      await removeRemovalJournal(file);
+    } catch (error) {
+      console.error(`Could not recover pending Worktree cleanup ${entry.name}:`, error);
+    }
+  }
+}
+
+export async function assertReadableTask(agentDir: string, projectPath: string, taskPath: string) {
+  const { file, project, result } = await readOwnedTask(agentDir, projectPath, taskPath);
+  if (result.incompatible) throw new Error("Update PiLot before reading this newer Task");
+  if (result.malformed) throw new Error("Repair this Task's unreadable history before reading it");
+  if (!result.task || !result.header) throw new Error("This Task does not belong to the admitted Project");
+  return { file, project, task: result.task, header: result.header, metadata: result.metadata };
+}
+
+export async function assertRunnableTask(agentDir: string, projectPath: string, taskPath: string) {
+  const context = await assertReadableTask(agentDir, projectPath, taskPath);
+  const { file, project, task, header } = context;
+  const execution = task.execution;
+  if (execution.kind === "worktree" && execution.removedAt) {
+    throw new Error("This managed Worktree was removed; its Task history remains archived");
+  }
+  if (task.lifecycle !== "active") throw new Error("Restore this archived Task before running it");
   const executionPath = await normalize(execution.path);
-  if (await normalize(task.header.cwd!) !== executionPath) throw new Error("This Task's Execution location does not match its Pi history");
+  if (await normalize(header.cwd!) !== executionPath) throw new Error("This Task's Execution location does not match its Pi history");
   if (execution.kind === "local") {
     if (executionPath !== project) throw new Error("This Local Task does not belong to the admitted Project");
   } else {
@@ -279,7 +449,7 @@ export async function assertRunnableTask(agentDir: string, projectPath: string, 
       throw new Error("This managed Worktree is unavailable or no longer belongs to the Project");
     }
   }
-  return { file, project, executionPath, execution, setup: task.metadata?.setup };
+  return { file, project, executionPath, execution, setup: context.metadata?.setup };
 }
 
 export async function getTaskSetupState(agentDir: string, projectPath: string, taskPath: string): Promise<TaskSetupState | undefined> {
@@ -580,18 +750,60 @@ export function getTaskSessionSelection(manager: SessionManager, models: ModelRe
 export function setTaskLifecycle(agentDir: string, projectPath: string, taskPath: string, lifecycle: "active" | "archived") {
   const file = path.resolve(taskPath);
   return withTaskWrite(file, async () => {
-    const relative = path.relative(path.resolve(agentDir, "sessions"), file);
-    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-      throw new Error("This Task does not belong to the admitted Project");
+    const task = await readMutableTask(agentDir, projectPath, file, "changing its lifecycle", "This Task does not belong to the admitted Project");
+    if (lifecycle === "active" && task.task.execution.kind === "worktree" && task.task.execution.removedAt) {
+      throw new Error("A Task whose managed Worktree was removed cannot be restored");
     }
-    const task = await readTask(file, await normalize(projectPath));
-    if (!task.task) throw new Error("This Task does not belong to the admitted Project");
-    if (task.malformed) throw new Error("Repair this Task's unreadable history before changing its lifecycle");
-    const version = task.header?.version ?? 1;
-    if (version < 2 || version > CURRENT_SESSION_VERSION) {
-      throw new Error("Update this Task's Pi format before changing its lifecycle");
+    appendMetadata(file, { ...task.metadata, title: task.task.title, lifecycle });
+  });
+}
+
+export function withTaskWorktreeRemoval<T>(
+  userData: string,
+  agentDir: string,
+  projectPath: string,
+  taskPath: string,
+  removedAt: string,
+  operation: (markStarted: () => Promise<void>) => Promise<T>,
+) {
+  const file = path.resolve(taskPath);
+  return withTaskWrite(file, async () => {
+    const task = await readMutableTask(agentDir, projectPath, file, "removing its Worktree", "This Task does not use a managed Worktree");
+    if (task.task.execution.kind !== "worktree") throw new Error("This Task does not use a managed Worktree");
+    const previous = { ...task.metadata, title: task.task.title };
+    const journal: WorktreeRemovalJournal = {
+      version: 1,
+      taskPath: file,
+      projectPath: task.project,
+      worktreePath: task.task.execution.worktreePath,
+      removedAt,
+      previousLifecycle: previous.lifecycle,
+    };
+    const journalFile = await createRemovalJournal(userData, journal);
+    try {
+      appendMetadata(file, {
+        ...previous,
+        lifecycle: "archived",
+        execution: { ...task.task.execution, removedAt },
+      });
+      await flushFile(file);
+      const markStarted = async () => {
+        if (journal.operationStartedAt) return;
+        journal.operationStartedAt = new Date().toISOString();
+        await writeRemovalJournal(journalFile, journal);
+      };
+      const result = await operation(markStarted);
+      await removeRemovalJournal(journalFile).catch(() => undefined);
+      return result;
+    } catch (error) {
+      try {
+        await reconcileRemovalJournal(userData, agentDir, journal);
+        await removeRemovalJournal(journalFile);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "Worktree removal failed and Task metadata could not be reconciled");
+      }
+      throw error;
     }
-    appendMetadata(file, { ...task.metadata!, title: task.task.title, lifecycle });
   });
 }
 
@@ -603,10 +815,6 @@ export async function forkChangedTask(
   setupCommand?: string,
 ) {
   const file = path.resolve(taskPath);
-  const relative = path.relative(path.resolve(agentDir, "sessions"), file);
-  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error("This Task does not belong to the admitted Project");
-  }
   const { project, executionPath } = await assertRunnableTask(agentDir, projectPath, file);
   const source = taskSnapshot(file).toString("utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
   const sourceHeader = source[0] as Header | undefined;

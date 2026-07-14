@@ -5,7 +5,7 @@ import { access, lstat, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { shell } from "electron";
-import { configuredEditorId, editorDefinitions, fileManagerId, type ApplicationId, type ApplicationState } from "../shared/editors.js";
+import { configuredEditorId, editorDefinitions, fileManagerId, terminalDefinitions, terminalIds, type ApplicationId, type ApplicationState, type TerminalId, type TerminalState } from "../shared/editors.js";
 
 export type ConfiguredEditor = { command: string; label: string; baseDirectory?: string };
 type ResolvedApplication = { id: ApplicationId; label: string; command: string; args: string[]; fileManager?: boolean };
@@ -191,9 +191,9 @@ export async function getApplicationState(preferred?: ApplicationId, configured?
   };
 }
 
-function launchDetached(command: string, args: string[], cwd: string, env = process.env) {
+function launchDetached(command: string, args: string[], cwd: string, env = process.env, windowsHide = true) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { cwd, detached: true, env, shell: false, stdio: "ignore", windowsHide: true });
+    const child = spawn(command, args, { cwd, detached: true, env, shell: false, stdio: "ignore", windowsHide });
     child.once("error", reject);
     child.once("spawn", () => { child.unref(); resolve(); });
   });
@@ -208,6 +208,100 @@ async function launchWindowsScript(command: string, args: string[], cwd: string)
   });
   const invocation = `""%PILOT_EDITOR_COMMAND%" ${references.join(" ")}"`;
   await launchDetached(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/v:off", "/c", invocation], cwd, env);
+}
+
+type ResolvedTerminal = { id: TerminalId; label: string; command: string; args: string[]; env?: NodeJS.ProcessEnv; windowsHide?: boolean };
+
+function terminalLabel(id: TerminalId) {
+  return terminalDefinitions.find((terminal) => terminal.id === id)!.label;
+}
+
+async function resolveTerminal(id: TerminalId, cwd: string): Promise<ResolvedTerminal | undefined> {
+  const testId = process.env.PILOT_TEST_TERMINAL_ID;
+  const testCommand = process.env.PILOT_TEST_PROJECT_DIR && process.env.PILOT_TEST_TERMINAL_COMMAND;
+  if (testCommand && testId === id && terminalIds.has(id)) return { id, label: terminalLabel(id), command: testCommand, args: [] };
+  if (id === "system") return;
+
+  if (process.platform === "darwin") {
+    const applications: Partial<Record<TerminalId, string>> = {
+      iterm: "iTerm", warp: "Warp", ghostty: "Ghostty", kitty: "kitty", wezterm: "WezTerm", alacritty: "Alacritty",
+    };
+    const application = applications[id];
+    if (!application || !await isApplicationBundle(`/Applications/${application}.app`) && !await isApplicationBundle(path.join(homedir(), "Applications", `${application}.app`))) return;
+    return { id, label: terminalLabel(id), command: "/usr/bin/open", args: ["-a", application, cwd] };
+  }
+
+  if (process.platform === "win32") {
+    if (id === "windows-terminal") {
+      const command = await findExecutable("wt.exe");
+      if (command) return { id, label: terminalLabel(id), command, args: ["-d", cwd] };
+    }
+    if (id === "powershell") {
+      const command = await findExecutable("powershell.exe");
+      if (command) return {
+        id,
+        label: terminalLabel(id),
+        command,
+        args: ["-NoExit", "-Command", "Set-Location -LiteralPath $env:PILOT_TERMINAL_CWD"],
+        env: { ...process.env, PILOT_TERMINAL_CWD: cwd },
+        windowsHide: false,
+      };
+    }
+    return;
+  }
+
+  const commands: Partial<Record<TerminalId, { command: string; args: string[] }>> = {
+    "gnome-terminal": { command: "gnome-terminal", args: [`--working-directory=${cwd}`] },
+    konsole: { command: "konsole", args: ["--workdir", cwd] },
+    kitty: { command: "kitty", args: ["--directory", cwd] },
+    wezterm: { command: "wezterm", args: ["start", "--cwd", cwd] },
+    alacritty: { command: "alacritty", args: ["--working-directory", cwd] },
+  };
+  const candidate = commands[id];
+  if (!candidate) return;
+  const command = await findExecutable(candidate.command);
+  return command ? { id, label: terminalLabel(id), command, args: candidate.args } : undefined;
+}
+
+export async function getTerminalState(preferred: TerminalId = "system"): Promise<TerminalState> {
+  const systemLabel = process.platform === "darwin" ? "System default (Terminal)" : process.platform === "win32" ? "System default (Windows Terminal)" : "System default";
+  const detected = (await Promise.all(terminalDefinitions.filter(({ id }) => id !== "system").map(({ id }) => resolveTerminal(id, homedir()))))
+    .filter((terminal): terminal is ResolvedTerminal => Boolean(terminal));
+  const available = [{ id: "system" as const, label: systemLabel }, ...detected.map(({ id, label }) => ({ id, label }))];
+  const effective = available.some(({ id }) => id === preferred) ? preferred : "system";
+  return {
+    available,
+    preferred: effective,
+    storedPreferred: preferred,
+    ...(effective !== preferred ? { notice: `${terminalLabel(preferred)} is not available. PiLot will use ${systemLabel}.` } : {}),
+  };
+}
+
+export async function launchTerminal(cwd: string, terminal: TerminalId = "system") {
+  const resolved = terminal === "system" ? undefined : await resolveTerminal(terminal, cwd);
+  const effective = resolved ? terminal : "system";
+  const testCommand = process.env.PILOT_TEST_PROJECT_DIR && process.env.PILOT_TEST_TERMINAL_COMMAND;
+  if (testCommand) {
+    const expected = process.env.PILOT_TEST_TERMINAL_ID;
+    if (expected && effective !== expected) throw new Error(`Expected terminal ${expected}, received ${effective}`);
+    if (process.platform === "win32" && /\.(?:bat|cmd)$/i.test(testCommand)) return launchWindowsScript(testCommand, [], cwd);
+    return launchDetached(testCommand, [], cwd);
+  }
+  if (resolved) return launchDetached(resolved.command, resolved.args, cwd, resolved.env, resolved.windowsHide);
+  if (process.platform === "darwin") return launchDetached("/usr/bin/open", ["-a", "Terminal", cwd], cwd);
+  if (process.platform === "win32") {
+    try { return await launchDetached("wt.exe", ["-d", cwd], cwd); }
+    catch {
+      return launchDetached("powershell.exe", ["-NoExit", "-Command", "Set-Location -LiteralPath $env:PILOT_TERMINAL_CWD"], cwd, {
+        ...process.env,
+        PILOT_TERMINAL_CWD: cwd,
+      }, false);
+    }
+  }
+  for (const command of ["x-terminal-emulator", "gnome-terminal", "konsole"]) {
+    try { return await launchDetached(command, [], cwd); } catch { /* try the next installed terminal */ }
+  }
+  throw new Error("No supported terminal application was found");
 }
 
 export async function launchApplication(application: ApplicationId, target: string, cwd: string, configured?: ConfiguredEditor) {

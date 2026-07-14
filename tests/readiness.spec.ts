@@ -858,14 +858,304 @@ test("creates a managed Worktree Task from a committed ref", async () => {
       let conflict = "";
       try { await pilot.runTaskSetup(projectPath, taskPath); }
       catch (reason) { conflict = reason instanceof Error ? reason.message : String(reason); }
+      let branchConflict = "";
+      try { await pilot.createTaskWorktreeBranch(projectPath, taskPath, "must-not-branch"); }
+      catch (reason) { branchConflict = reason instanceof Error ? reason.message : String(reason); }
+      let archiveConflict = "";
+      try { await pilot.setTaskArchived(projectPath, taskPath, true); }
+      catch (reason) { archiveConflict = reason instanceof Error ? reason.message : String(reason); }
       await pilot.abortTaskSetup(taskPath);
       await first;
-      return { conflict, status: (await pilot.getTaskSetup(projectPath, taskPath))?.status };
+      return { conflict, branchConflict, archiveConflict, status: (await pilot.getTaskSetup(projectPath, taskPath))?.status };
     }, { projectPath: project, taskPath: abortedTask.path });
-    expect(concurrentSetup).toEqual({ conflict: expect.stringContaining("already running"), status: "aborted" });
+    expect(concurrentSetup).toEqual({
+      conflict: expect.stringContaining("already running"),
+      branchConflict: expect.stringContaining("running in this Worktree"),
+      archiveConflict: expect.stringContaining("running in this Worktree"),
+      status: "aborted",
+    });
   } finally {
     await close(app);
     await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("finishes and removes managed Worktree Tasks explicitly", async () => {
+  test.setTimeout(90_000);
+  const environment = await fixture();
+  const repository = await realpath(environment.project);
+  const projectDirectory = path.join(repository, "packages", "app");
+  await mkdir(projectDirectory, { recursive: true });
+  const project = await realpath(projectDirectory);
+  const tools = path.join(environment.root, "tools");
+  const editorLog = path.join(environment.root, "editor.log");
+  const terminalLog = path.join(environment.root, "terminal.log");
+  const removalPause = path.join(environment.root, "pause-worktree-removal");
+  const editor = path.join(tools, process.platform === "win32" ? "code.cmd" : "code");
+  const terminal = path.join(tools, process.platform === "win32" ? "test-terminal.cmd" : "test-terminal");
+  await mkdir(tools, { recursive: true });
+  await writeFile(editor, process.platform === "win32"
+    ? `@echo off\r\n>"%PILOT_EDITOR_LOG%" echo %~1\r\n`
+    : `#!/bin/sh\nprintf '%s\\n' "$1" > "$PILOT_EDITOR_LOG"\n`);
+  await writeFile(terminal, process.platform === "win32"
+    ? `@echo off\r\n>"%PILOT_TERMINAL_LOG%" echo %CD%\r\n`
+    : `#!/bin/sh\nprintf '%s\\n' "$PWD" > "$PILOT_TERMINAL_LOG"\n`);
+  if (process.platform !== "win32") await Promise.all([chmod(editor, 0o755), chmod(terminal, 0o755)]);
+  await execute("git", ["init"], { cwd: repository });
+  await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: repository });
+  await execute("git", ["config", "user.name", "PiLot Test"], { cwd: repository });
+  const submoduleSource = path.join(environment.root, "submodule-source");
+  await mkdir(submoduleSource);
+  await execute("git", ["init"], { cwd: submoduleSource });
+  await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: submoduleSource });
+  await execute("git", ["config", "user.name", "PiLot Test"], { cwd: submoduleSource });
+  await writeFile(path.join(submoduleSource, "submodule.txt"), "clean submodule\n");
+  await execute("git", ["add", "."], { cwd: submoduleSource });
+  await execute("git", ["commit", "-m", "submodule fixture"], { cwd: submoduleSource });
+  await execute("git", ["-c", "protocol.file.allow=always", "submodule", "add", submoduleSource, "dependency"], { cwd: repository });
+  await Promise.all([
+    writeFile(path.join(project, "tracked.txt"), "committed\n"),
+    writeFile(path.join(project, "hidden.txt"), "committed hidden\n"),
+    writeFile(path.join(project, "literal-*.txt"), "committed literal\n"),
+    writeFile(path.join(project, "literal-safe.txt"), "committed sibling\n"),
+    writeFile(path.join(project, "mode-only.sh"), "#!/bin/sh\necho mode\n"),
+    writeFile(path.join(project, "skip-deleted.txt"), "committed skip-worktree file\n"),
+  ]);
+  await execute("git", ["add", "."], { cwd: repository });
+  await execute("git", ["commit", "-m", "fixture base"], { cwd: repository });
+  const baseCommit = (await execute("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
+  const toolPath = `${tools}${path.delimiter}${process.env.PATH ?? process.env.Path ?? ""}`;
+  const appEnvironment = {
+    PILOT_TEST_PROJECT_DIR: project,
+    PILOT_TEST_TERMINAL_COMMAND: terminal,
+    PILOT_TEST_TERMINAL_ID: "wezterm",
+    PILOT_TEST_WORKTREE_REMOVAL_PAUSE_FILE: removalPause,
+    PILOT_EDITOR_LOG: editorLog,
+    PILOT_TERMINAL_LOG: terminalLog,
+    PATH: toolPath,
+    ...(process.platform === "win32" ? { Path: toolPath } : {}),
+  };
+  let app = await launch(environment.agentDir, false, appEnvironment);
+
+  const createWorktree = async () => {
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const create = app.window.getByRole("dialog", { name: "Create Task" });
+    await create.getByRole("radio", { name: "Worktree" }).check();
+    await create.getByRole("combobox", { name: "Branch or commit" }).fill(baseCommit);
+    await create.getByRole("button", { name: "Create Worktree Task" }).click();
+    await expect(create).toHaveCount(0);
+    await expect.poll(() => app.window.evaluate(async () => {
+      const state = await (window as any).pilot.getProjects();
+      return Boolean(state.selected.tasks.find((task: any) => task.lifecycle === "active" && task.execution.kind === "worktree"));
+    })).toBe(true);
+    return app.window.evaluate(async () => {
+      const state = await (window as any).pilot.getProjects();
+      return state.selected.tasks.find((task: any) => task.lifecycle === "active" && task.execution.kind === "worktree");
+    });
+  };
+
+  try {
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    const settings = app.window.getByRole("main", { name: "Settings" });
+    await settings.getByRole("radio", { name: /WezTerm/ }).check();
+    await expect(settings.getByRole("radio", { name: /WezTerm/ })).toBeChecked();
+    await app.window.getByRole("button", { name: "Back to command center" }).click();
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    const cleanTask = await createWorktree();
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await inspector.getByRole("tab", { name: /Changes/ }).click();
+    const changes = inspector.getByRole("tabpanel", { name: /Changes/ });
+    const worktree = changes.getByRole("region", { name: "Worktree actions" });
+    await expect(worktree.getByRole("status", { name: "Branch status" })).toContainText("Detached");
+    await worktree.getByRole("button", { name: "Create branch" }).click();
+    await worktree.getByRole("textbox", { name: "New branch name" }).fill("safe-finish");
+    await worktree.getByRole("button", { name: "Create branch" }).click();
+    await expect(worktree.getByRole("status", { name: "Branch status" })).toHaveText("On branch safe-finish");
+    expect((await execute("git", ["symbolic-ref", "--short", "HEAD"], { cwd: cleanTask.execution.path })).stdout.trim()).toBe("safe-finish");
+
+    await changes.getByRole("button", { name: "Choose application for execution location" }).click();
+    await changes.getByRole("menu", { name: "Applications" }).getByRole("menuitemradio", { name: "VS Code" }).click();
+    await expect.poll(() => readFile(editorLog, "utf8").then((value) => value.trim(), () => "")).toBe(cleanTask.execution.path);
+    await worktree.getByRole("button", { name: "Open in terminal" }).click();
+    await expect.poll(() => readFile(terminalLog, "utf8").then((value) => value.trim(), () => "")).toBe(cleanTask.execution.path);
+
+    await writeFile(path.join(cleanTask.execution.path, "kept-on-branch.txt"), "kept\n");
+    await execute("git", ["add", "."], { cwd: cleanTask.execution.path });
+    await execute("git", ["commit", "-m", "keep worktree result"], { cwd: cleanTask.execution.path });
+    await expect(changes).toContainText("No current changes");
+
+    await app.window.getByRole("button", { name: "Command Palette" }).click();
+    const palette = app.window.getByRole("dialog", { name: "Command Palette" });
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("Archive Task");
+    await palette.getByRole("option", { name: /Archive Task/ }).click();
+    await expect(app.window.getByRole("region", { name: "Archived tasks" })).toContainText("Worktree retained");
+    expect((await execute("git", ["worktree", "list", "--porcelain"], { cwd: repository })).stdout).toContain(cleanTask.execution.worktreePath);
+
+    const removableTask = await createWorktree();
+    await writeFile(path.join(removableTask.execution.path, "anchored.txt"), "anchored\n");
+    await execute("git", ["add", "."], { cwd: removableTask.execution.path });
+    await execute("git", ["commit", "-m", "detached result"], { cwd: removableTask.execution.path });
+    await execute("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init"], { cwd: removableTask.execution.worktreePath });
+    await inspector.getByRole("tab", { name: /Changes/ }).click();
+    const cleanChanges = inspector.getByRole("tabpanel", { name: /Changes/ });
+    await cleanChanges.getByRole("button", { name: "Remove worktree" }).click();
+    let cleanRemoval = app.window.getByRole("dialog", { name: "Remove managed worktree" });
+    await expect(cleanRemoval).toContainText("Task history remains, but this Task cannot run or be restored after removal");
+    await cleanRemoval.getByRole("button", { name: "Remove worktree" }).click();
+    await expect(cleanRemoval.getByRole("alert")).toContainText("Create a branch before removing this Worktree");
+    await cleanRemoval.getByRole("button", { name: "Cancel" }).click();
+    const removableActions = cleanChanges.getByRole("region", { name: "Worktree actions" });
+    await removableActions.getByRole("button", { name: "Create branch" }).click();
+    await removableActions.getByRole("textbox", { name: "New branch name" }).fill("anchored-cleanup");
+    await removableActions.getByRole("button", { name: "Create branch" }).click();
+    await expect(removableActions.getByRole("status", { name: "Branch status" })).toHaveText("On branch anchored-cleanup");
+    await removableActions.getByRole("button", { name: "Remove worktree" }).click();
+    cleanRemoval = app.window.getByRole("dialog", { name: "Remove managed worktree" });
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      await chmod(removableTask.path, 0o444);
+      await cleanRemoval.getByRole("button", { name: "Remove worktree" }).click();
+      await expect(cleanRemoval.getByRole("alert")).toContainText(/EACCES|permission denied/i);
+      expect((await execute("git", ["worktree", "list", "--porcelain"], { cwd: repository })).stdout).toContain(removableTask.execution.worktreePath);
+      const unchanged = await app.window.evaluate(async (taskPath) => (await (window as any).pilot.getProjects()).selected.tasks.find((task: any) => task.path === taskPath), removableTask.path);
+      expect(unchanged).toMatchObject({ lifecycle: "active", execution: { kind: "worktree" } });
+      expect(unchanged.execution.removedAt).toBeUndefined();
+      await chmod(removableTask.path, 0o644);
+    }
+    await execute("git", ["worktree", "lock", removableTask.execution.worktreePath], { cwd: repository });
+    await cleanRemoval.getByRole("button", { name: "Remove worktree" }).click();
+    await expect(cleanRemoval.getByRole("alert")).toContainText(/locked/i);
+    await expect(cleanRemoval.getByRole("button", { name: "Remove worktree" })).toBeFocused();
+    const rolledBack = await app.window.evaluate(async (taskPath) => (await (window as any).pilot.getProjects()).selected.tasks.find((task: any) => task.path === taskPath), removableTask.path);
+    expect(rolledBack).toMatchObject({ lifecycle: "active", execution: { kind: "worktree" } });
+    expect(rolledBack.execution.removedAt).toBeUndefined();
+    await execute("git", ["worktree", "unlock", removableTask.execution.worktreePath], { cwd: repository });
+    await cleanRemoval.getByRole("button", { name: "Remove worktree" }).click();
+    const removedTask = app.window.getByRole("region", { name: "Archived tasks" }).locator("li").filter({ hasText: "Worktree removed" });
+    await expect(removedTask).toBeVisible();
+    await expect(removedTask.getByRole("button", { name: "Restore" })).toHaveCount(0);
+    await removedTask.getByRole("button", { name: "View history" }).click();
+    await expect(app.window.getByRole("heading", { name: "Task history is still available" })).toBeVisible();
+    const removedInspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await expect(removedInspector.getByRole("tab", { name: /History/ })).toBeFocused();
+    const removedHistory = removedInspector.getByRole("tabpanel", { name: /History/ });
+    await expect(removedHistory).toContainText("Read only");
+    await expect(removedHistory.getByRole("button", { name: "Clone active path" })).toHaveCount(0);
+    const restoreError = await app.window.evaluate(async ({ projectPath, taskPath }) => {
+      try {
+        await (window as any).pilot.setTaskArchived(projectPath, taskPath, false);
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    }, { projectPath: project, taskPath: removableTask.path });
+    expect(restoreError).toContain("cannot be restored");
+    await expect(readFile(path.join(removableTask.execution.path, "tracked.txt"), "utf8")).rejects.toThrow();
+    expect((await execute("git", ["show", "safe-finish:packages/app/kept-on-branch.txt"], { cwd: repository })).stdout).toBe("kept\n");
+    expect((await execute("git", ["show", "anchored-cleanup:packages/app/anchored.txt"], { cwd: repository })).stdout).toBe("anchored\n");
+    const listedWorktrees = (await execute("git", ["worktree", "list", "--porcelain"], { cwd: repository })).stdout;
+    expect(listedWorktrees).toContain(cleanTask.execution.worktreePath);
+    expect(listedWorktrees).not.toContain(removableTask.execution.worktreePath);
+    await expect(readFile(path.join(project, "kept-on-branch.txt"), "utf8")).rejects.toThrow();
+
+    const dirtyTask = await createWorktree();
+    await inspector.getByRole("tab", { name: /Changes/ }).click();
+    const dirtyChanges = inspector.getByRole("tabpanel", { name: /Changes/ });
+    await execute("git", ["update-index", "--assume-unchanged", "packages/app/hidden.txt"], { cwd: dirtyTask.execution.worktreePath });
+    const discardCount = process.platform === "win32" ? 7 : 8;
+    if (process.platform !== "win32") {
+      await execute("git", ["update-index", "--assume-unchanged", "packages/app/mode-only.sh"], { cwd: dirtyTask.execution.worktreePath });
+      await chmod(path.join(dirtyTask.execution.path, "mode-only.sh"), 0o755);
+    }
+    await execute("git", ["update-index", "--skip-worktree", "packages/app/skip-deleted.txt"], { cwd: dirtyTask.execution.worktreePath });
+    await rm(path.join(dirtyTask.execution.path, "skip-deleted.txt"));
+    const nestedRepository = path.join(dirtyTask.execution.worktreePath, "nested-repository");
+    await mkdir(nestedRepository);
+    await execute("git", ["init"], { cwd: nestedRepository });
+    await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: nestedRepository });
+    await execute("git", ["config", "user.name", "PiLot Test"], { cwd: nestedRepository });
+    await writeFile(path.join(nestedRepository, "nested.txt"), "reviewed nested content\n");
+    await execute("git", ["add", "."], { cwd: nestedRepository });
+    await execute("git", ["commit", "-m", "nested fixture"], { cwd: nestedRepository });
+    await Promise.all([
+      writeFile(path.join(dirtyTask.execution.path, "tracked.txt"), "discard me\n"),
+      writeFile(path.join(dirtyTask.execution.path, "hidden.txt"), "hidden from ordinary Git status\n"),
+      writeFile(path.join(dirtyTask.execution.path, "literal-*.txt"), "literal pathspec\n"),
+      writeFile(path.join(dirtyTask.execution.path, "scratch.txt"), "discard me too\n"),
+      writeFile(path.join(dirtyTask.execution.worktreePath, "root-only.txt"), "outside the admitted Project\n"),
+    ]);
+    const dirtyFiles = dirtyChanges.getByRole("list", { name: "Changed files" });
+    await expect(dirtyFiles.getByRole("button", { name: /Modified tracked\.txt/ })).toBeVisible();
+    await expect(dirtyFiles.getByRole("button", { name: /Untracked scratch\.txt/ })).toBeVisible();
+    await dirtyChanges.getByRole("button", { name: "Remove worktree" }).click();
+    const dirtyRemoval = app.window.getByRole("dialog", { name: "Remove managed worktree" });
+    await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("tracked.txt");
+    await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("scratch.txt");
+    await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("root-only.txt");
+    await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("hidden.txt");
+    await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("literal-*.txt");
+    await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("nested-repository");
+    if (process.platform !== "win32") await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("mode-only.sh");
+    await expect(dirtyRemoval.getByRole("list", { name: "Files that will be discarded" })).toContainText("skip-deleted.txt");
+    const blocked = await app.window.evaluate(async ({ projectPath, taskPath }) => {
+      try {
+        const worktree = await (window as any).pilot.getTaskWorktree(projectPath, taskPath);
+        await (window as any).pilot.removeTaskWorktree(projectPath, taskPath, false, worktree.files);
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    }, { projectPath: project, taskPath: dirtyTask.path });
+    expect(blocked).toContain("uncommitted changes");
+    await writeFile(path.join(dirtyTask.execution.path, "tracked.txt"), "changed after review\n");
+    await dirtyRemoval.getByRole("button", { name: `Discard ${discardCount} files and remove worktree` }).click();
+    await expect(dirtyRemoval.getByRole("alert")).toContainText("Worktree changes changed");
+    expect(await readFile(path.join(dirtyTask.execution.path, "tracked.txt"), "utf8")).toBe("changed after review\n");
+    await dirtyRemoval.getByRole("button", { name: "Cancel" }).click();
+    await dirtyChanges.getByRole("button", { name: "Remove worktree" }).click();
+    const nestedDirtyRemoval = app.window.getByRole("dialog", { name: "Remove managed worktree" });
+    await expect(nestedDirtyRemoval).toBeVisible();
+    await writeFile(path.join(nestedRepository, "nested.txt"), "changed after directory review\n");
+    await nestedDirtyRemoval.getByRole("button", { name: `Discard ${discardCount} files and remove worktree` }).click();
+    await expect(nestedDirtyRemoval.getByRole("alert")).toContainText("Worktree changes changed");
+    expect(await readFile(path.join(nestedRepository, "nested.txt"), "utf8")).toBe("changed after directory review\n");
+    await nestedDirtyRemoval.getByRole("button", { name: "Cancel" }).click();
+    await dirtyChanges.getByRole("button", { name: "Remove worktree" }).click();
+    const refreshedDirtyRemoval = app.window.getByRole("dialog", { name: "Remove managed worktree" });
+    await refreshedDirtyRemoval.getByRole("button", { name: `Discard ${discardCount} files and remove worktree` }).focus();
+    await app.window.keyboard.press("Enter");
+    await expect(refreshedDirtyRemoval).toHaveCount(0);
+    await expect(readFile(path.join(dirtyTask.execution.path, "scratch.txt"), "utf8")).rejects.toThrow();
+    expect(await readFile(path.join(project, "tracked.txt"), "utf8")).toBe("committed\n");
+    expect(await readFile(path.join(project, "hidden.txt"), "utf8")).toBe("committed hidden\n");
+    expect(await readFile(path.join(project, "literal-safe.txt"), "utf8")).toBe("committed sibling\n");
+    expect((await execute("git", ["worktree", "list", "--porcelain"], { cwd: repository })).stdout).not.toContain(dirtyTask.execution.worktreePath);
+
+    const interruptedRemovalTask = await createWorktree();
+    await writeFile(removalPause, "10000");
+    await app.window.evaluate(({ projectPath, taskPath }) => {
+      void (window as any).pilot.removeTaskWorktree(projectPath, taskPath, false, []).catch(() => undefined);
+    }, { projectPath: project, taskPath: interruptedRemovalTask.path });
+    await expect.poll(async () => {
+      const entries = (await readFile(interruptedRemovalTask.path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      return Boolean(entries.filter((entry) => entry.customType === "pilot.task").at(-1)?.data.execution?.removedAt);
+    }).toBe(true);
+    const pendingJournal = path.join(environment.agentDir, "pilot-user-data", "pending-worktree-removals", (await readdir(path.join(environment.agentDir, "pilot-user-data", "pending-worktree-removals"))).find((name) => name.endsWith(".json"))!);
+    expect(JSON.parse(await readFile(pendingJournal, "utf8")).operationStartedAt).toBeUndefined();
+    await terminate(app);
+    await rm(removalPause, { force: true });
+    app = await launch(environment.agentDir, false, appEnvironment);
+    await expect.poll(async () => {
+      const state = await app.window.evaluate(() => (window as any).pilot.getProjects());
+      return state.selected?.tasks.find((task: any) => task.path === interruptedRemovalTask.path);
+    }).toMatchObject({ lifecycle: "active", execution: { kind: "worktree" } });
+    const recoveredTask = await app.window.evaluate(async (taskPath) => (await (window as any).pilot.getProjects()).selected.tasks.find((task: any) => task.path === taskPath), interruptedRemovalTask.path);
+    expect(recoveredTask.execution.removedAt).toBeUndefined();
+    expect((await execute("git", ["worktree", "list", "--porcelain"], { cwd: repository })).stdout).toContain(interruptedRemovalTask.execution.worktreePath);
+    expect((await readdir(path.join(environment.agentDir, "pilot-user-data", "pending-worktree-removals")).catch(() => [])).filter((name) => name.endsWith(".json"))).toEqual([]);
+  } finally {
+    await close(app);
     await rm(environment.root, { recursive: true, force: true });
   }
 });
@@ -2313,7 +2603,7 @@ test("applies and persists PiLot appearance preferences", async () => {
   try {
     await first.window.getByRole("button", { name: "Settings" }).click();
     const settings = first.window.getByRole("main", { name: "Settings" });
-    await expect(settings.getByRole("radio", { name: "System" })).toBeChecked();
+    await expect(settings.getByRole("group", { name: "Appearance" }).getByRole("radio", { name: "System" })).toBeChecked();
     await settings.getByRole("radio", { name: "Dark" }).check();
     await expect.poll(() => first.window.evaluate(() => getComputedStyle(document.documentElement).color)).toBe("rgb(232, 232, 229)");
     await expect(first.window.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page");
@@ -2331,7 +2621,7 @@ test("applies and persists PiLot appearance preferences", async () => {
   try {
     await second.window.getByRole("button", { name: "Settings" }).click();
     await expect(second.window.getByRole("radio", { name: "Dark" })).toBeChecked();
-    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark", expandThinking: false });
+    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark", expandThinking: false, preferredTerminal: "system" });
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8").catch(() => "{}"))).toEqual({});
   } finally {
     await close(second);

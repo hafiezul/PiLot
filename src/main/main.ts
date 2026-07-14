@@ -4,20 +4,20 @@ import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPreferences, saveAppearance, saveExpandThinking, savePreferredApplication } from "./preferences.js";
+import { loadPreferences, saveAppearance, saveExpandThinking, savePreferredApplication, savePreferredTerminal } from "./preferences.js";
 import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectsState, getTaskCreation, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { RunCoordinator } from "./runs.js";
-import { assertRunnableTask, getTaskModelState, setTaskModel, setTaskThinking } from "./tasks.js";
+import { assertRunnableTask, getTaskModelState, recoverTaskWorktreeRemovals, setTaskModel, setTaskThinking } from "./tasks.js";
 import { getTaskResources } from "./resources.js";
 import { getStartupState } from "./readiness.js";
 import { getTaskChanges, getTaskFileDiff, openTaskPathInApplication } from "./changes.js";
-import { getApplicationState, getConfiguredEditor } from "./editors.js";
-import { WorktreeSetupCoordinator } from "./worktrees.js";
+import { getApplicationState, getConfiguredEditor, getTerminalState } from "./editors.js";
+import { createTaskWorktreeBranch, getTaskWorktreeState, openTaskWorktreeTerminal, removeManagedWorktree, WorktreeSetupCoordinator } from "./worktrees.js";
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
 import { applicationIds, type ApplicationId } from "../shared/editors.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
-import type { ImageAttachment, TaskCreationRequest, ThinkingLevel } from "../shared/projects.js";
+import { CHANGE_STATUSES, type ChangeStatus, type ImageAttachment, type TaskCreationRequest, type TaskWorktreeFile, type ThinkingLevel } from "../shared/projects.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
@@ -25,10 +25,11 @@ const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === 
   : undefined;
 const debuggingPort = process.argv.find((argument) => argument.startsWith("--pilot-debug-port="))?.split("=")[1];
 const testWindowHidden = process.argv.includes("--pilot-test-hidden");
+const changeStatuses = new Set<ChangeStatus>(CHANGE_STATUSES);
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
 
-let preferences: Preferences = { appearance: "system", expandThinking: false };
+let preferences: Preferences = { appearance: "system", expandThinking: false, preferredTerminal: "system" };
 const actionMenuItems = new Map<DesktopActionId, Electron.MenuItem>();
 
 function invokeRendererAction(id: DesktopActionId, target?: Electron.BaseWindow) {
@@ -151,6 +152,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   preferences = await loadPreferences(app.getPath("userData"));
+  await recoverTaskWorktreeRemovals(app.getPath("userData"), getAgentDir());
   nativeTheme.themeSource = preferences.appearance;
   nativeTheme.on("updated", updateWindowChrome);
 
@@ -179,6 +181,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("preferences:set-expand-thinking", async (_event, expand: unknown) => {
     preferences = await saveExpandThinking(app.getPath("userData"), expand);
     return preferences;
+  });
+  ipcMain.handle("terminals:get", () => getTerminalState(preferences.preferredTerminal));
+  ipcMain.handle("terminals:set-preferred", async (_event, terminal: unknown) => {
+    preferences = await savePreferredTerminal(app.getPath("userData"), terminal);
+    return getTerminalState(preferences.preferredTerminal);
   });
   ipcMain.handle("providers:get", getProviderState);
   ipcMain.handle("providers:set-key", (_event, provider: string, key: string) => setApiKey(provider, key));
@@ -224,6 +231,12 @@ app.whenReady().then(async () => {
     const { executionPath } = await assertRunnableTask(getAgentDir(), project, task);
     return getConfiguredEditor(getAgentDir(), executionPath, project);
   };
+  const worktreeContext = async (projectPath: unknown, taskPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    const task = requireTaskPath(taskPath);
+    await assertProjectAdmitted(app.getPath("userData"), project);
+    return { project, task };
+  };
   ipcMain.handle("applications:get", async (_event, projectPath: unknown, taskPath: unknown) =>
     getApplicationState(preferences.preferredApplication, await editorContext(projectPath, taskPath)));
   ipcMain.handle("applications:set-preferred", async (_event, projectPath: unknown, taskPath: unknown, application: unknown) => {
@@ -260,14 +273,17 @@ app.whenReady().then(async () => {
     setups.get(requireProjectPath(projectPath), requireTaskPath(taskPath)));
   ipcMain.handle("tasks:run-setup", async (_event, projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
+    const task = requireTaskPath(taskPath);
     await assertExecutionAllowed(app.getPath("userData"), project);
-    return setups.run(project, requireTaskPath(taskPath));
+    if ((await setups.get(project, task))?.status === "running") throw new Error("Setup is already running for this Task");
+    return runs.withIdleExecution(project, task, () => setups.run(project, task));
   });
   ipcMain.handle("tasks:abort-setup", async (_event, taskPath: unknown) => setups.abort(requireTaskPath(taskPath)));
   ipcMain.handle("tasks:bypass-setup", async (_event, projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
+    const task = requireTaskPath(taskPath);
     await assertExecutionAllowed(app.getPath("userData"), project);
-    return setups.bypass(project, requireTaskPath(taskPath));
+    return runs.withIdleExecution(project, task, () => setups.bypass(project, task));
   });
   ipcMain.handle("tasks:reload", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.reloadTask(requireProjectPath(projectPath), requireTaskPath(taskPath)));
@@ -309,6 +325,38 @@ app.whenReady().then(async () => {
   ipcMain.handle("tasks:get-file-diff", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {
     if (typeof filePath !== "string" || !filePath) throw new Error("A changed file is required");
     return getTaskFileDiff(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), filePath);
+  });
+  ipcMain.handle("tasks:get-worktree", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const { project, task } = await worktreeContext(projectPath, taskPath);
+    return getTaskWorktreeState(getAgentDir(), project, task);
+  });
+  ipcMain.handle("tasks:create-worktree-branch", async (_event, projectPath: unknown, taskPath: unknown, branch: unknown) => {
+    if (typeof branch !== "string") throw new Error("A branch name is required");
+    const { project, task } = await worktreeContext(projectPath, taskPath);
+    return runs.withIdleExecution(project, task, () =>
+      createTaskWorktreeBranch(app.getPath("userData"), getAgentDir(), project, task, branch));
+  });
+  ipcMain.handle("tasks:open-worktree-terminal", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const { project, task } = await worktreeContext(projectPath, taskPath);
+    return openTaskWorktreeTerminal(getAgentDir(), project, task, preferences.preferredTerminal);
+  });
+  ipcMain.handle("tasks:remove-worktree", async (_event, projectPath: unknown, taskPath: unknown, discard: unknown, expectedFiles: unknown) => {
+    if (typeof discard !== "boolean" || !Array.isArray(expectedFiles)
+      || expectedFiles.some((file) => !file || typeof file !== "object" || typeof (file as TaskWorktreeFile).path !== "string" || !(file as TaskWorktreeFile).path
+        || typeof (file as TaskWorktreeFile).fingerprint !== "string" || !/^[a-f0-9]{64}$/.test((file as TaskWorktreeFile).fingerprint)
+        || !changeStatuses.has((file as TaskWorktreeFile).status)
+        || ((file as TaskWorktreeFile).previousPath !== undefined && (typeof (file as TaskWorktreeFile).previousPath !== "string" || !(file as TaskWorktreeFile).previousPath)))) {
+      throw new Error("Review the affected files before removing this Worktree");
+    }
+    const files = expectedFiles as TaskWorktreeFile[];
+    if (new Set(files.map(({ path: filePath, previousPath, status }) => JSON.stringify([status, previousPath ?? null, filePath]))).size !== files.length) {
+      throw new Error("Review each affected file once before removing this Worktree");
+    }
+    const { project, task } = await worktreeContext(projectPath, taskPath);
+    return runs.withIdleExecution(project, task, async () => {
+      await removeManagedWorktree(app.getPath("userData"), getAgentDir(), project, task, discard, files);
+      return projectState();
+    });
   });
   ipcMain.handle("tasks:open-in-application", async (_event, projectPath: unknown, taskPath: unknown, application: unknown, filePath: unknown) => {
     if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("An application is required");
@@ -381,7 +429,10 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("projects:set-task-archived", async (_event, projectPath: unknown, taskPath: unknown, archived: unknown) => {
     if (typeof archived !== "boolean") throw new Error("A Task lifecycle is required");
-    return setTaskArchived(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), archived);
+    const project = requireProjectPath(projectPath);
+    const task = requireTaskPath(taskPath);
+    const update = () => setTaskArchived(app.getPath("userData"), getAgentDir(), project, task, archived);
+    return archived ? runs.withIdleExecution(project, task, update) : update();
   });
   ipcMain.handle("projects:set-resource-trust", async (_event, projectPath: unknown, trusted: unknown) => {
     if (typeof trusted !== "boolean") throw new Error("A trust decision is required");
