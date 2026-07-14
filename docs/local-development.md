@@ -63,6 +63,8 @@ npm run build      # Type-check and compile the app
 npm test           # Build, launch Electron, and run Playwright tests
 ```
 
+Playwright runs keep the Electron window hidden by default. Use `npm test -- --headed` to show it while debugging.
+
 The tests create temporary Pi and PiLot data, use fixture credentials, run serially, and remove their data afterward. They do not require your canonical `~/.pi/agent` environment.
 
 Generated output is written to `dist/` and Playwright failures to `test-results/`; both are ignored by Git.

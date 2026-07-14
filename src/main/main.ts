@@ -23,6 +23,7 @@ const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === 
   ? "http://127.0.0.1:5173"
   : undefined;
 const debuggingPort = process.argv.find((argument) => argument.startsWith("--pilot-debug-port="))?.split("=")[1];
+const testWindowHidden = process.argv.includes("--pilot-test-hidden");
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
 
@@ -141,7 +142,7 @@ function createWindow() {
     },
   });
 
-  window.once("ready-to-show", () => window.show());
+  if (!testWindowHidden) window.once("ready-to-show", () => window.show());
   void (developmentRenderer
     ? window.loadURL(developmentRenderer)
     : window.loadFile(path.join(directory, "../../renderer/index.html")));

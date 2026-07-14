@@ -63,7 +63,11 @@ async function launch(
   const env = withoutAuth
     ? Object.fromEntries(Object.entries(process.env).filter(([name]) => !/(_API_KEY|_TOKEN|_CREDENTIALS?)$/.test(name)))
     : process.env;
-  const child = spawn(electronPath, [appPath, `--pilot-debug-port=${port}`], {
+  const child = spawn(electronPath, [
+    appPath,
+    `--pilot-debug-port=${port}`,
+    ...(test.info().project.use.headless === false ? [] : ["--pilot-test-hidden"]),
+  ], {
     env: { ...env, PILOT_USER_DATA_DIR: path.join(agentDir, "pilot-user-data"), ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
     stdio: "ignore",
   });
