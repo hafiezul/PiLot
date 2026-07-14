@@ -228,7 +228,7 @@ function CommandBlock({ item }: { item: CommandEvidence }) {
 }
 
 function ToolBlock({ item, changePaths, onOpenChange }: { item: ToolEvidence; changePaths: string[]; onOpenChange(path: string): void }) {
-  const status = item.status === "succeeded" ? "Succeeded" : item.status === "failed" ? "Failed" : "Running";
+  const status = item.status === "succeeded" ? "Succeeded" : item.status === "failed" ? "Failed" : item.status === "interrupted" ? "Interrupted" : "Running";
   return <div className="tool-record">
     <details key={`${item.id}-${item.status}`} className={`tool-evidence ${item.status}`} aria-label={`${item.name} tool, ${item.status}`} open={item.status !== "succeeded" || undefined}>
       <summary><span>{item.summary}</span><span>{status}</span></summary>
@@ -926,7 +926,7 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   </div>;
 }
 
-function TaskPage({ project, task, reloadToken, revision, historyDraft, changePaths, onCreate, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
+function TaskPage({ project, task, reloadToken, revision, historyDraft, changePaths, onCreate, onFork, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onContinuityChange, onActionStart, onError }: {
   project: ProjectAccess;
   task: TaskSummary;
   reloadToken: number;
@@ -934,11 +934,13 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   historyDraft?: { text: string; version: number };
   changePaths: string[];
   onCreate(): void;
+  onFork(task: TaskSummary): void;
   onDetails(next: TaskModelState): void;
   onHistoryChange(): void;
   onOpenSettings(): void;
   onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
+  onContinuityChange(changed: boolean): void;
   onActionStart(): void;
   onError(reason: unknown, recovery: string): void;
 }) {
@@ -1084,10 +1086,16 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
 
   const activeRun = timeline?.runs.find(({ id }) => id === timeline.activeRunId);
   const active = Boolean(activeRun);
+  const externallyChanged = Boolean(timeline?.externalChange);
+  const interrupted = !externallyChanged && timeline?.runs.at(-1)?.status === "interrupted";
   useEffect(() => {
     onRunChange(active);
     return () => onRunChange(false);
   }, [active, onRunChange]);
+  useEffect(() => {
+    onContinuityChange(externallyChanged);
+    return () => onContinuityChange(false);
+  }, [externallyChanged, onContinuityChange]);
   const live = activeRun?.input.kind === "prompt";
   const liveReady = live && activeRun.status === "running";
   const beforeCursor = draft.slice(0, cursor);
@@ -1140,7 +1148,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   };
   const submit = (mode?: LiveInputMode) => {
     const input = draft.trim();
-    if (!input || (active && (!liveReady || !mode))) return;
+    if (!input || externallyChanged || (active && (!liveReady || !mode))) return;
     setError("");
     setDraft("");
     const hiddenCommand = !active && input.startsWith("!!");
@@ -1167,12 +1175,31 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       <button className="new-task-button" data-action="task.new" onClick={onCreate}>New Task</button>
     </header>
     <section className="run-timeline" aria-label="Run timeline">
-      <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active} onClick={() => {
+      <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active || externallyChanged} onClick={() => {
         setError("");
         onActionStart();
         void window.pilot.compactTask(project.path, task.path).then(async () => { await refreshDetails(); onHistoryChange(); }).catch((reason) => onError(reason, "Add more Task history or check provider access, then try compacting again."));
       }} data-action="run.compact">Compact context</button></div></div>
+      {externallyChanged && <section className="continuity-alert" role="alert" aria-labelledby="continuity-alert-title">
+        <div><strong id="continuity-alert-title">Task changed outside PiLot</strong><p>PiLot paused Task history writes to protect both paths. Review the Run timeline and Changes before continuing.</p></div>
+        <div className="continuity-actions">
+          <button type="button" disabled={active} onClick={() => {
+            setError("");
+            void window.pilot.reloadTask(project.path, task.path).then(async (next) => {
+              setTimeline(next);
+              await refreshDetails();
+              onHistoryChange();
+              setActionNotice("External Task history reloaded");
+            }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+          }}>Reload Task</button>
+          <button type="button" disabled={active} onClick={() => {
+            setError("");
+            void window.pilot.forkChangedTask(project.path, task.path).then(onFork).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+          }}>Fork Task</button>
+        </div>
+      </section>}
       {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
+      {interrupted && <section className="interrupted-recovery" role="status" aria-label="Interrupted Run recovery"><strong>Run interrupted</strong><p>PiLot did not retry the interrupted input. Review the timeline and Changes before continuing.</p></section>}
       {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
@@ -1180,13 +1207,13 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       {showJumpLatest && <button type="button" className="jump-latest" aria-label="Jump to latest Run evidence" title="Jump to latest" onClick={jumpToLatest}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 6.25 3.25 3.25 3.25-3.25" /></svg>
       </button>}
-      <form className="task-composer" aria-label="Task composer" onDragEnter={(event) => {
-      if (active || !event.dataTransfer.types.includes("Files")) return;
+      <form className="task-composer" aria-label="Task composer" aria-disabled={externallyChanged || undefined} onDragEnter={(event) => {
+      if (active || externallyChanged || !event.dataTransfer.types.includes("Files")) return;
       event.preventDefault();
       imageDragDepth.current += 1;
       setImageDragActive(true);
     }} onDragOver={(event) => {
-      if (event.dataTransfer.types.includes("Files") && !active) event.preventDefault();
+      if (event.dataTransfer.types.includes("Files") && !active && !externallyChanged) event.preventDefault();
     }} onDragLeave={(event) => {
       if (!imageDragActive) return;
       event.preventDefault();
@@ -1195,12 +1222,12 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     }} onDrop={(event) => {
       imageDragDepth.current = 0;
       setImageDragActive(false);
-      if (active || !event.dataTransfer.files.length) return;
+      if (active || externallyChanged || !event.dataTransfer.files.length) return;
       event.preventDefault();
       void attachFiles([...event.dataTransfer.files]);
     }} onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
       {imageDragActive && <div className="image-drop-feedback" aria-hidden="true"><span>＋</span> Drop images to attach</div>}
-      <label htmlFor="task-prompt">{live ? "Guide the active Run" : "Prompt or inline command"}</label>
+      <label htmlFor="task-prompt">{externallyChanged ? "Prompts paused — choose Reload or Fork" : live ? "Guide the active Run" : "Prompt or inline command"}</label>
       {resources?.diagnostics.length ? <section className="resource-diagnostics" aria-label="Pi resource diagnostics">
         {resources.diagnostics.map((diagnostic, index) => <p key={`${diagnostic.path ?? "resource"}-${index}`} className={diagnostic.severity}><strong>Pi resource {diagnostic.severity}:</strong> {diagnostic.message}{diagnostic.path && <code>{diagnostic.path}</code>}</p>)}
       </section> : null}
@@ -1210,13 +1237,13 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
         <label><input type="radio" name="live-input-mode" checked={liveMode === "followUp"} onChange={() => setLiveMode("followUp")} />Follow-up <small>after this Run settles</small></label>
       </fieldset>}
       <div className="composer-editor">
-        <textarea ref={promptInput} id="task-prompt" data-action="view.focusPrompt" role="combobox" aria-label="Prompt" aria-autocomplete="list" aria-expanded={showCompletions} aria-controls={completionListId} aria-activedescendant={showCompletions ? `${completionListId}-${completionIndex}` : undefined} value={draft} disabled={active && !live} onChange={(event) => {
+        <textarea ref={promptInput} id="task-prompt" data-action="view.focusPrompt" role="combobox" aria-label="Prompt" aria-autocomplete="list" aria-expanded={showCompletions} aria-controls={completionListId} aria-activedescendant={showCompletions ? `${completionListId}-${completionIndex}` : undefined} value={draft} disabled={externallyChanged || (active && !live)} onChange={(event) => {
           setDraft(event.target.value);
           setCursor(event.target.selectionStart);
           setDismissedCompletion("");
         }} onSelect={(event) => setCursor(event.currentTarget.selectionStart)} onPaste={(event) => {
           const files = [...event.clipboardData.files];
-          if (!active && files.length) {
+          if (!active && !externallyChanged && files.length) {
             event.preventDefault();
             void attachFiles(files);
           }
@@ -1265,15 +1292,15 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       </div>}
       <div className="composer-controls">
         <div className="composer-leading-controls">
-          <TaskModelControls project={project} task={task} state={modelState} disabled={active} onChange={(next) => { updateModelState(next); onHistoryChange(); }} onOpenSettings={onOpenSettings} onActionStart={onActionStart} onError={onError} />
+          <TaskModelControls project={project} task={task} state={modelState} disabled={active || externallyChanged} onChange={(next) => { updateModelState(next); onHistoryChange(); }} onOpenSettings={onOpenSettings} onActionStart={onActionStart} onError={onError} />
         </div>
         <div className="composer-submit-controls">
           {!active && <>
-            <input ref={imagePicker} className="visually-hidden" type="file" aria-label="Choose images" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => {
+            <input ref={imagePicker} className="visually-hidden" type="file" aria-label="Choose images" accept="image/png,image/jpeg,image/gif,image/webp" multiple disabled={externallyChanged} onChange={(event) => {
               void attachFiles([...(event.currentTarget.files ?? [])]);
               event.currentTarget.value = "";
             }} />
-            <button type="button" className="attachment-trigger" aria-label={attachingImages ? "Preparing images" : "Attach images"} aria-describedby={imageHelpId} aria-busy={attachingImages} title="Attach images — PNG, JPEG, GIF, or WebP, up to 20 MB" disabled={attachingImages} onClick={() => imagePicker.current?.click()}>
+            <button type="button" className="attachment-trigger" aria-label={attachingImages ? "Preparing images" : "Attach images"} aria-describedby={imageHelpId} aria-busy={attachingImages} title="Attach images — PNG, JPEG, GIF, or WebP, up to 20 MB" disabled={attachingImages || externallyChanged} onClick={() => imagePicker.current?.click()}>
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.3 8.8 9.7 4.4a2.1 2.1 0 0 1 3 3l-5.5 5.5a3.5 3.5 0 0 1-5-5l5.6-5.5" /></svg>
             </button>
             <span id={imageHelpId} className="visually-hidden">Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each</span>
@@ -1282,7 +1309,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
             ? <button type="button" data-action="run.stop" className="composer-action stop-action" aria-label="Stop Run" title="Stop Run" onClick={() => { onActionStart(); void window.pilot.abortTask(task.path).catch((reason) => onError(reason, "The Run may already be settled. Reload the Task if its status looks stale.")); }}>
               <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="6" height="6" rx="1" /></svg>
             </button>
-            : <button type="submit" className="composer-action send-action" aria-label="Send" title="Send" disabled={!draft.trim() || (active && !liveReady)}>
+            : <button type="submit" className="composer-action send-action" aria-label="Send" title="Send" disabled={externallyChanged || !draft.trim() || (active && !liveReady)}>
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12V4M4.75 7.25 8 4l3.25 3.25" /></svg>
             </button>}
 
@@ -1293,7 +1320,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   </div>;
 }
 
-function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revision, historyDraft, changePaths, onSelectTask, onCreateTask, onOpenAccess, onChange, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onActionStart, onError }: {
+function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revision, historyDraft, changePaths, onSelectTask, onCreateTask, onForkTask, onOpenAccess, onChange, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onContinuityChange, onActionStart, onError }: {
   project: ProjectAccess;
   needsAccess: boolean;
   selectedTaskPath?: string;
@@ -1303,6 +1330,7 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revi
   changePaths: string[];
   onSelectTask(path: string): void;
   onCreateTask(): void;
+  onForkTask(task: TaskSummary): void;
   onOpenAccess(): void;
   onChange(state: ProjectsState): void;
   onDetails(state: TaskModelState): void;
@@ -1310,13 +1338,14 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revi
   onOpenSettings(): void;
   onOpenChange(path: string): void;
   onRunChange(active: boolean): void;
+  onContinuityChange(changed: boolean): void;
   onActionStart(): void;
   onError(reason: unknown, recovery: string): void;
 }) {
   const active = project.tasks.filter(({ lifecycle }) => lifecycle === "active");
   const archived = project.tasks.filter(({ lifecycle }) => lifecycle === "archived");
   const selectedTask = active.find(({ path }) => path === selectedTaskPath);
-  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} revision={revision} historyDraft={historyDraft} changePaths={changePaths} onCreate={onCreateTask} onDetails={onDetails} onHistoryChange={onHistoryChange} onOpenSettings={onOpenSettings} onOpenChange={onOpenChange} onRunChange={onRunChange} onActionStart={onActionStart} onError={onError} />;
+  if (selectedTask && !needsAccess) return <TaskPage project={project} task={selectedTask} reloadToken={reloadToken} revision={revision} historyDraft={historyDraft} changePaths={changePaths} onCreate={onCreateTask} onFork={onForkTask} onDetails={onDetails} onHistoryChange={onHistoryChange} onOpenSettings={onOpenSettings} onOpenChange={onOpenChange} onRunChange={onRunChange} onContinuityChange={onContinuityChange} onActionStart={onActionStart} onError={onError} />;
   return <>
     <header className="topbar project-topbar">
       <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
@@ -1537,6 +1566,7 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const [runActive, setRunActive] = useState(false);
+  const [taskExternallyChanged, setTaskExternallyChanged] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [compactLayout, setCompactLayout] = useState(() => matchMedia("(max-width: 1040px)").matches);
   const [actionError, setActionError] = useState<ActionFailure>();
@@ -1600,6 +1630,7 @@ function App() {
     setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery });
   }, []);
   const handleRunChange = useCallback((active: boolean) => setRunActive(active), []);
+  const handleContinuityChange = useCallback((changed: boolean) => setTaskExternallyChanged(changed), []);
 
   const selectedProject = projects?.selected;
   const selectedTask = selectedProject?.tasks.find(({ path }) => path === selectedTaskPath);
@@ -1649,13 +1680,13 @@ function App() {
     "task.new": taskAvailable || Boolean(workspaceAvailable && selectedProject && !needsProjectAccess) ? { enabled: true } : unavailable("Select a Project with access enabled"),
     "task.exportJsonl": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
     "task.exportHtml": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
-    "task.archive": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
-    "task.chooseModel": taskAvailable && !runActive && Boolean(taskDetails?.selected) ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task with an available model"),
-    "task.chooseThinking": taskAvailable && !runActive && (taskDetails?.thinkingLevels.length ?? 0) > 1 ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "No alternative thinking levels"),
+    "task.archive": taskAvailable && !runActive && !taskExternallyChanged ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : runActive ? "Stop the active Run first" : "Select a Task"),
+    "task.chooseModel": taskAvailable && !runActive && !taskExternallyChanged && Boolean(taskDetails?.selected) ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : runActive ? "Stop the active Run first" : "Select a Task with an available model"),
+    "task.chooseThinking": taskAvailable && !runActive && !taskExternallyChanged && (taskDetails?.thinkingLevels.length ?? 0) > 1 ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : runActive ? "Stop the active Run first" : "No alternative thinking levels"),
     "resources.reload": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
-    "run.compact": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "A Run is active" : "Select a Task"),
+    "run.compact": taskAvailable && !runActive && !taskExternallyChanged ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : runActive ? "A Run is active" : "Select a Task"),
     "run.stop": runActive ? { enabled: true } : unavailable("No Run is active"),
-    "view.focusPrompt": taskAvailable ? { enabled: true } : unavailable("Select a Task"),
+    "view.focusPrompt": taskAvailable && !taskExternallyChanged ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : "Select a Task"),
     "view.details": workspaceAvailable ? { enabled: true, label: compactLayout ? showDetails ? "Hide Details" : "Show Details" : "Focus Details" } : unavailable("Return to the command center"),
     "view.settings": showSettings ? { enabled: false, hidden: true, reason: "Settings are open" } : { enabled: true },
     "view.commandPalette": { enabled: true },
@@ -1786,6 +1817,12 @@ function App() {
             changePaths={taskChanges?.files.flatMap(({ path, previousPath }) => previousPath ? [path, previousPath] : [path]) ?? []}
             onSelectTask={(path) => { setTaskDetails(undefined); setSelectedTaskPath(path); }}
             onCreateTask={() => void createSelectedTask()}
+            onForkTask={(task) => { void window.pilot.getProjects().then((next) => {
+              setProjects(next);
+              setTaskDetails(undefined);
+              setSelectedTaskPath(task.path);
+              setTaskRevision((value) => value + 1);
+            }); }}
             onOpenAccess={() => setShowProjectAccess(true)}
             onChange={setProjects}
             onDetails={setTaskDetails}
@@ -1793,6 +1830,7 @@ function App() {
             onOpenSettings={openProviderSettings}
             onOpenChange={openChange}
             onRunChange={handleRunChange}
+            onContinuityChange={handleContinuityChange}
             onActionStart={clearActionError}
             onError={reportActionError}
           /> : <>
@@ -1872,7 +1910,7 @@ function App() {
               : <div className="changes-empty"><strong>Select a Task</strong><p>Choose an active Task to review its Git changes.</p></div>}
           </div> : <div id="inspector-history-panel" className="inspector-body history-inspector-body" role="tabpanel" aria-labelledby="inspector-history-tab">
             {selectedProject && selectedTask && !needsProjectAccess
-              ? <HistoryPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} history={taskHistory} loadError={historyError} disabled={runActive} onChange={setTaskHistory} onNavigate={(editorText) => {
+              ? <HistoryPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} history={taskHistory} loadError={historyError} disabled={runActive || taskExternallyChanged} onChange={setTaskHistory} onNavigate={(editorText) => {
                 setTaskDetails(undefined);
                 setHistoryDraft((current) => ({ taskPath: selectedTask.path, text: editorText ?? "", version: (current?.version ?? 0) + 1 }));
                 setTaskRevision((value) => value + 1);

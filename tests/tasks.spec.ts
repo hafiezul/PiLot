@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { discoverTasks, getProjectSessionDirectory, setTaskLifecycle } from "../dist/main/main/tasks.js";
@@ -36,7 +36,7 @@ test("serializes Task bookkeeping without changing activity order", async () => 
   await writeFile(target, [
     header("target", project),
     message("target-message", targetActivity, "Target task"),
-  ].map(JSON.stringify).join("\n") + "\n");
+  ].map(JSON.stringify).join("\n"));
   await writeFile(newer, [
     header("newer", project),
     message("newer-message", newerActivity, "Newer task"),
@@ -58,6 +58,11 @@ test("serializes Task bookkeeping without changing activity order", async () => 
     let metadata = (await entries(target)).filter((entry) => entry.customType === "pilot.task");
     expect(metadata).toHaveLength(1);
     expect(metadata[0]).toMatchObject({ parentId: "target-message", data: { lifecycle: "active" } });
+    const external = {
+      type: "custom", customType: "fixture.external", id: "external-append", parentId: metadata[0].id,
+      timestamp: "2026-01-05T00:00:00.000Z", data: { writer: "cli" },
+    };
+    await appendFile(target, `${JSON.stringify(external)}\n`);
 
     await Promise.all([
       setTaskLifecycle(agentDir, project, target, "archived"),
@@ -69,7 +74,7 @@ test("serializes Task bookkeeping without changing activity order", async () => 
     expect(metadata.map((entry) => entry.data.lifecycle)).toEqual(["active", "archived", "active"]);
     expect(metadata.map((entry) => entry.parentId)).toEqual([
       "target-message",
-      metadata[0].id,
+      external.id,
       metadata[1].id,
     ]);
     const refreshed = await discoverTasks(agentDir, project);

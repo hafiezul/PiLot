@@ -1,11 +1,11 @@
 import { AuthStorage, CURRENT_SESSION_VERSION, estimateTokens, ModelRegistry, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { appendFile, mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { randomUUID } from "node:crypto";
 import type { ProjectDiagnostic, TaskModelState, TaskSummary, ThinkingLevel } from "../shared/projects.js";
 import { BUILT_IN_PROVIDER_IDS } from "../shared/providers.js";
+import { guardTaskManager, taskSnapshot } from "./continuity.js";
 
 const metadataType = "pilot.task";
 const maximumTasks = 500;
@@ -13,7 +13,7 @@ const maximumTasks = 500;
 type Header = { type?: string; version?: number; id?: string; cwd?: string; timestamp?: unknown };
 type TaskMetadata = { title?: string; lifecycle?: "active" | "archived" };
 type Inspection = { task?: TaskSummary; incompatible?: boolean; malformed?: boolean; enrichmentFailed?: boolean };
-type TaskRead = Inspection & { header?: Header; parentId?: string | null; hasMetadata?: boolean };
+type TaskRead = Inspection & { header?: Header; hasMetadata?: boolean };
 
 const taskWrites = new Map<string, Promise<void>>();
 
@@ -55,25 +55,8 @@ async function normalize(value: string) {
   return realpath(value).catch(() => path.resolve(value));
 }
 
-async function appendMetadata(file: string, parentId: string | null, data: Required<TaskMetadata>) {
-  const handle = await open(file, "r");
-  try {
-    const { size } = await handle.stat();
-    const last = Buffer.alloc(1);
-    if (size) await handle.read(last, 0, 1, size - 1);
-    const prefix = size && last[0] !== 10 ? "\n" : "";
-    const entry = {
-      type: "custom",
-      customType: metadataType,
-      data: { version: 1, ...data },
-      id: randomUUID(),
-      parentId,
-      timestamp: new Date().toISOString(),
-    };
-    await appendFile(file, `${prefix}${JSON.stringify(entry)}\n`);
-  } finally {
-    await handle.close();
-  }
+function appendMetadata(file: string, data: Required<TaskMetadata>) {
+  guardTaskManager(file, SessionManager.open(file)).appendCustomEntry(metadataType, { version: 1, ...data });
 }
 
 async function readHeader(file: string): Promise<Header | undefined> {
@@ -97,7 +80,6 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
   let firstMessage = "";
   let sessionName = "";
   let metadata: TaskMetadata | undefined;
-  let lastId: string | null = null;
   let lastActivity: number | undefined;
 
   try {
@@ -119,7 +101,6 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
         if ((header.version ?? 1) > CURRENT_SESSION_VERSION) return { incompatible: true };
         continue;
       }
-      if (typeof entry.id === "string") lastId = entry.id;
       if (entry.type === "session_info") sessionName = typeof entry.name === "string" ? entry.name : "";
       if (entry.type === "custom" && entry.customType === metadataType && entry.data && typeof entry.data === "object") {
         const data = entry.data as TaskMetadata;
@@ -149,7 +130,6 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
       task: { id: header.id!, path: file, title, lifecycle, modified: new Date(modified).toISOString() },
       malformed,
       header,
-      parentId: lastId,
       hasMetadata: metadata !== undefined,
     };
   } catch {
@@ -167,7 +147,11 @@ async function inspect(file: string, projectPath: string): Promise<Inspection> {
       const live = await readTask(file, projectPath);
       if (!live.task || live.hasMetadata || live.malformed
         || (live.header?.version ?? 1) !== CURRENT_SESSION_VERSION) return live;
-      await appendMetadata(file, live.parentId ?? null, { title: live.task.title, lifecycle: live.task.lifecycle });
+      const manager = guardTaskManager(file, SessionManager.open(file));
+      if (manager.getEntries().some((entry) => entry.type === "custom" && entry.customType === metadataType)) {
+        return readTask(file, projectPath);
+      }
+      manager.appendCustomEntry(metadataType, { version: 1, title: live.task.title, lifecycle: live.task.lifecycle });
       return live;
     });
   } catch {
@@ -435,7 +419,7 @@ export async function getTaskModelState(agentDir: string, projectPath: string, t
 export async function setTaskModel(agentDir: string, projectPath: string, taskPath: string, provider: string, modelId: string) {
   const { file, project } = await assertRunnableTask(agentDir, projectPath, taskPath);
   return withTaskWrite(file, async () => {
-    const manager = SessionManager.open(file);
+    const manager = guardTaskManager(file, SessionManager.open(file));
     const before = taskModelState(file, project, agentDir, manager);
     const { models } = modelServices(agentDir, project);
     const model = models.getAvailable().find((candidate) => candidate.provider === provider && candidate.id === modelId);
@@ -452,7 +436,7 @@ export async function setTaskThinking(agentDir: string, projectPath: string, tas
   if (!allThinkingLevels.includes(requested)) throw new Error("Choose a valid thinking level");
   const { file, project } = await assertRunnableTask(agentDir, projectPath, taskPath);
   return withTaskWrite(file, async () => {
-    const manager = SessionManager.open(file);
+    const manager = guardTaskManager(file, SessionManager.open(file));
     const before = taskModelState(file, project, agentDir, manager);
     if (!before.selected) throw new Error("Connect a provider before choosing a thinking level");
     const { models } = modelServices(agentDir, project);
@@ -491,6 +475,31 @@ export function setTaskLifecycle(agentDir: string, projectPath: string, taskPath
     if (version < 2 || version > CURRENT_SESSION_VERSION) {
       throw new Error("Update this Task's Pi format before changing its lifecycle");
     }
-    await appendMetadata(file, task.parentId ?? null, { title: task.task.title, lifecycle });
+    appendMetadata(file, { title: task.task.title, lifecycle });
   });
+}
+
+export async function forkChangedTask(agentDir: string, projectPath: string, taskPath: string) {
+  const file = path.resolve(taskPath);
+  const relative = path.relative(path.resolve(agentDir, "sessions"), file);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("This Task does not belong to the admitted Project");
+  }
+  const project = await normalize(projectPath);
+  const source = taskSnapshot(file).toString("utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  const sourceHeader = source[0] as Header | undefined;
+  if (!sourceHeader || sourceHeader.type !== "session" || typeof sourceHeader.id !== "string" || typeof sourceHeader.cwd !== "string"
+    || await normalize(sourceHeader.cwd) !== project || (sourceHeader.version ?? 1) !== CURRENT_SESSION_VERSION) {
+    throw new Error("The last PiLot path cannot be forked safely");
+  }
+
+  const created = SessionManager.create(project, path.dirname(file), { parentSession: file });
+  const output = created.getSessionFile();
+  const header = created.getHeader();
+  if (!output || !header) throw new Error("Pi could not fork this Task");
+  await writeFile(output, `${[header, ...source.slice(1)].map((entry) => JSON.stringify(entry)).join("\n")}\n`, { flag: "wx" });
+  const copied = await readTask(output, project);
+  if (!copied.task || copied.malformed) throw new Error("The last PiLot path cannot be forked safely");
+  SessionManager.open(output).appendCustomEntry(metadataType, { version: 1, title: copied.task.title, lifecycle: "active" });
+  return { ...copied.task, id: header.id, path: output, lifecycle: "active" as const, modified: header.timestamp };
 }

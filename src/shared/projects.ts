@@ -83,7 +83,7 @@ export type ToolEvidence = {
   output: string;
   details?: string;
   changedFiles?: string[];
-  status: "running" | "succeeded" | "failed";
+  status: "running" | "succeeded" | "failed" | "interrupted";
   outputTruncated?: boolean;
   fullOutputPath?: string;
 };
@@ -93,7 +93,7 @@ export type CommandEvidence = {
   kind: "command";
   command: string;
   output: string;
-  status: "running" | "succeeded" | "failed" | "aborted";
+  status: "running" | "succeeded" | "failed" | "aborted" | "interrupted";
   includeInContext: boolean;
   outputTruncated?: boolean;
   fullOutputPath?: string;
@@ -147,6 +147,7 @@ export type TaskRunState = {
   taskPath: string;
   runs: RunEvidence[];
   activeRunId?: string;
+  externalChange?: true;
   queues?: {
     steering: string[];
     followUp: string[];
@@ -279,6 +280,8 @@ export type ProjectsApi = {
   removeProject(path: string): Promise<ProjectsState>;
   createTask(projectPath: string): Promise<TaskSummary>;
   getTaskRun(projectPath: string, taskPath: string): Promise<TaskRunState>;
+  reloadTask(projectPath: string, taskPath: string): Promise<TaskRunState>;
+  forkChangedTask(projectPath: string, taskPath: string): Promise<TaskSummary>;
   getTaskModel(projectPath: string, taskPath: string): Promise<TaskModelState>;
   getTaskResources(projectPath: string, taskPath: string): Promise<TaskResourceState>;
   getTaskHistory(projectPath: string, taskPath: string): Promise<TaskHistoryState>;

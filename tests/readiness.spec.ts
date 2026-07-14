@@ -141,6 +141,13 @@ async function close(app: { browser: Browser; process: ChildProcess }) {
   await exit;
 }
 
+async function terminate(app: { browser: Browser; process: ChildProcess }) {
+  const exit = app.process.exitCode === null ? once(app.process, "exit") : undefined;
+  if (app.process.exitCode === null) app.process.kill("SIGKILL");
+  await exit;
+  await app.browser.close().catch(() => undefined);
+}
+
 async function openCurrentTaskPathError(page: Page, filePath: string, application = "vscode") {
   return page.evaluate(async ({ target, applicationId }) => {
     const pilot = (window as any).pilot;
@@ -306,7 +313,7 @@ async function deterministicProvider(root: string) {
         response.end("data: [DONE]\n\n");
         return;
       }
-      if (body.includes("abort model")) {
+      if (latestUser.includes("abort model")) {
         chunk({ index: 0, delta: { role: "assistant", content: "Still streaming" }, finish_reason: null });
         const timer = setTimeout(() => response.end("data: [DONE]\n\n"), 5_000);
         response.once("close", () => {
@@ -315,11 +322,13 @@ async function deterministicProvider(root: string) {
         });
         return;
       }
-      if (body.includes("abort tool")) {
+      if (latestUser === "crash after file write" || latestUser.includes("abort tool")) {
         chunk({ index: 0, delta: { role: "assistant", tool_calls: [{
           index: 0, id: "fixture-tool", type: "function", function: {
             name: "bash",
-            arguments: JSON.stringify({ command: `printf started > ${JSON.stringify(started)}; sleep 5; printf finished > ${JSON.stringify(finished)}` }),
+            arguments: JSON.stringify({ command: latestUser === "crash after file write"
+              ? "printf interrupted > crash.txt; sleep 5"
+              : `printf started > ${JSON.stringify(started)}; sleep 5; printf finished > ${JSON.stringify(finished)}` }),
           },
         }] }, finish_reason: null });
         chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
@@ -735,7 +744,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     const firstEntries = (await readFile(firstFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(firstEntries[0]).toMatchObject({ type: "session", version: 3, cwd: project });
     expect(firstEntries.filter((entry) => entry.type === "message").map((entry) => entry.message.role)).toEqual(["user", "assistant"]);
-    expect(firstEntries.find((entry) => entry.customType === "pilot.run")?.data.outcome).toBe("settled");
+    expect(firstEntries.filter((entry) => entry.customType === "pilot.run").at(-1)?.data.outcome).toBe("settled");
     expect(firstEntries.filter((entry) => entry.type === "custom_message")).toHaveLength(0);
     const context = SessionManager.open(firstFile).buildSessionContext();
     expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
@@ -781,8 +790,240 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     expect(files.filter((file) => file.endsWith(".jsonl"))).toHaveLength(4);
     const outcomes = await Promise.all(files.filter((file) => file.endsWith(".jsonl")).map(async (file) =>
       (await readFile(path.join(directory, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
-        .find((entry) => entry.customType === "pilot.run")?.data.outcome));
+        .filter((entry) => entry.customType === "pilot.run").at(-1)?.data.outcome));
     expect(outcomes.sort()).toEqual(["aborted", "aborted", "aborted", "settled"]);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("pauses externally changed Tasks until Reload or Fork", async () => {
+  test.setTimeout(60_000);
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const provider = await deterministicProvider(environment.root);
+  await execute("git", ["init"], { cwd: project });
+  await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: project });
+  await execute("git", ["config", "user.name", "PiLot Test"], { cwd: project });
+  await writeFile(path.join(project, "README.md"), "# Fixture\n");
+  await execute("git", ["add", "."], { cwd: project });
+  await execute("git", ["commit", "-m", "fixture"], { cwd: project });
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+    defaultProvider: "fixture",
+    defaultModel: "fixture-model",
+  }));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    const prompt = composer.getByRole("combobox", { name: "Prompt" });
+    const timeline = app.window.getByRole("region", { name: "Run timeline" });
+    await prompt.fill("establish PiLot history");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+
+    const directory = sessionDirectory(environment.agentDir, project);
+    const file = path.join(directory, (await readdir(directory)).find((value) => value.endsWith(".jsonl"))!);
+    const externalId = SessionManager.open(file).appendCustomEntry("fixture.external", { writer: "cli" });
+    const continuity = app.window.getByRole("alert", { name: "Task changed outside PiLot" });
+    await expect(continuity).toContainText("Review the Run timeline and Changes before continuing");
+    await expect(continuity.getByRole("button", { name: "Reload Task" })).toBeVisible();
+    await expect(continuity.getByRole("button", { name: "Fork Task" })).toBeVisible();
+    await expect(prompt).toBeDisabled();
+    const blocked = await app.window.evaluate(async ({ projectPath, taskPath }) => {
+      try {
+        await (window as any).pilot.submitPrompt(projectPath, taskPath, "must stay blocked");
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    }, { projectPath: project, taskPath: file });
+    expect(blocked).toContain("changed outside PiLot");
+
+    await writeFile(path.join(project, "external.txt"), "inspect me\n");
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const changesTab = inspector.getByRole("tab", { name: /Changes/ });
+    await expect(changesTab).toHaveAccessibleName("Changes, 1 changed file");
+    await changesTab.click();
+    await expect(inspector.getByRole("button", { name: /Untracked external\.txt/ })).toBeVisible();
+    await expect(timeline).toContainText("Streaming from PiLot.");
+
+    await continuity.getByRole("button", { name: "Reload Task" }).click();
+    await expect(continuity).toHaveCount(0);
+    await expect(prompt).toBeEnabled();
+    await prompt.fill("continue after reload");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+    const reloadedEntries = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const externalIndex = reloadedEntries.findIndex(({ id }) => id === externalId);
+    const resumedMarker = reloadedEntries.slice(externalIndex + 1).find((entry) => entry.customType === "pilot.run" && entry.data?.outcome === "running");
+    expect(resumedMarker).toMatchObject({ parentId: externalId, data: { inputKind: "prompt", input: "continue after reload" } });
+    expect(reloadedEntries.find((entry) => entry.type === "message" && entry.parentId === resumedMarker.id)?.message.role).toBe("user");
+
+    await prompt.fill("run abort tool");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(timeline.getByRole("article").last().locator('details[aria-label="bash tool, running"]')).toBeVisible();
+    const secondExternalId = SessionManager.open(file).appendCustomEntry("fixture.external", { writer: "cli-during-run" });
+    await expect(continuity).toBeVisible();
+    await expect(timeline.getByRole("article").last()).toContainText("Interrupted");
+    await expect(timeline.getByRole("article").last().locator('details[aria-label="bash tool, interrupted"]')).toContainText("Interrupted");
+    await expect(continuity.getByRole("button", { name: "Fork Task" })).toBeEnabled();
+    const blockedEntries = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(blockedEntries.at(-1)?.id).toBe(secondExternalId);
+    await continuity.getByRole("button", { name: "Fork Task" }).click();
+    await expect(continuity).toHaveCount(0);
+    await expect(prompt).toBeEnabled();
+    await expect.poll(async () => {
+      const files = (await readdir(directory)).filter((value) => value.endsWith(".jsonl"));
+      for (const value of files) {
+        const candidate = path.join(directory, value);
+        if (candidate === file) continue;
+        const body = await readFile(candidate, "utf8");
+        const header = JSON.parse(body.split("\n", 1)[0]);
+        if (header.parentSession === file) return { candidate, body };
+      }
+      return undefined;
+    }).toBeTruthy();
+    const child = await childSession(directory, file);
+    expect(child).not.toBe("");
+    expect(await readFile(child, "utf8")).not.toContain(secondExternalId);
+    await prompt.fill("continue on fork");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("opens a compatible legacy Task without reporting its migration as external", async () => {
+  const environment = await fixture(2);
+  const file = path.join(environment.agentDir, "sessions", "fixture", "task.jsonl");
+  await writeFile(file, `${JSON.stringify({
+    type: "message",
+    id: "legacy-prompt",
+    parentId: null,
+    timestamp: historyTimestamp(1),
+    message: { role: "user", content: "Legacy Task", timestamp: Date.parse(historyTimestamp(1)) },
+  })}\n`, { flag: "a" });
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("region", { name: "Active tasks" }).getByRole("button", { name: "Legacy Task" }).click();
+    await expect(app.window.getByRole("form", { name: "Task composer" }).getByRole("combobox", { name: "Prompt" })).toBeEnabled();
+    const continuity = app.window.getByRole("alert", { name: "Task changed outside PiLot" });
+    await expect(continuity).toHaveCount(0);
+    await expect.poll(async () => JSON.parse((await readFile(file, "utf8")).split("\n", 1)[0]).version).toBe(3);
+
+    const legacyAgain = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    legacyAgain[0].version = 2;
+    await writeFile(file, `${legacyAgain.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+    await expect(continuity).toBeVisible();
+    await continuity.getByRole("button", { name: "Reload Task" }).click();
+    await expect(continuity).toHaveCount(0);
+    await expect(app.window.getByRole("form", { name: "Task composer" }).getByRole("combobox", { name: "Prompt" })).toBeEnabled();
+    await expect.poll(async () => JSON.parse((await readFile(file, "utf8")).split("\n", 1)[0]).version).toBe(3);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("reopens a process-terminated Run as Interrupted without replay", async () => {
+  test.setTimeout(60_000);
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const provider = await deterministicProvider(environment.root);
+  await execute("git", ["init"], { cwd: project });
+  await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: project });
+  await execute("git", ["config", "user.name", "PiLot Test"], { cwd: project });
+  await writeFile(path.join(project, "README.md"), "# Fixture\n");
+  await execute("git", ["add", "."], { cwd: project });
+  await execute("git", ["commit", "-m", "fixture"], { cwd: project });
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+    defaultProvider: "fixture",
+    defaultModel: "fixture-model",
+  }));
+  let app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    let composer = app.window.getByRole("form", { name: "Task composer" });
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("abort model");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" })).toContainText("Still streaming");
+    let requestsBeforeRestart = provider.requests.length;
+    await terminate(app);
+
+    app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
+    await app.window.locator(".task-section").first().locator(".task-title-button").first().click();
+    let timeline = app.window.getByRole("region", { name: "Run timeline" });
+    await expect(timeline.getByRole("article").last()).toContainText("Interrupted");
+    await expect(timeline.getByRole("article").last()).toContainText("abort model");
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(provider.requests).toHaveLength(requestsBeforeRestart);
+
+    composer = app.window.getByRole("form", { name: "Task composer" });
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("crash after file write");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.locator('details[aria-label="bash tool, running"]')).toBeVisible();
+    await expect.poll(() => readFile(path.join(project, "crash.txt"), "utf8").catch(() => "")).toBe("interrupted");
+    requestsBeforeRestart = provider.requests.length;
+    await terminate(app);
+
+    app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
+    await app.window.locator(".task-section").first().locator(".task-title-button").first().click();
+    timeline = app.window.getByRole("region", { name: "Run timeline" });
+    const interrupted = timeline.getByRole("article").last();
+    await expect(interrupted).toContainText("Interrupted");
+    await expect(interrupted).toContainText("crash after file write");
+    await expect(interrupted.locator('details[aria-label="bash tool, interrupted"]')).toContainText("Interrupted");
+    await expect(app.window.getByRole("status", { name: "Interrupted Run recovery" })).toContainText("PiLot did not retry the interrupted input. Review the timeline and Changes before continuing.");
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(provider.requests).toHaveLength(requestsBeforeRestart);
+
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const changesTab = inspector.getByRole("tab", { name: /Changes/ });
+    await expect(changesTab).toHaveAccessibleName("Changes, 1 changed file");
+    await changesTab.click();
+    await expect(inspector.getByRole("button", { name: /Untracked crash\.txt/ })).toBeVisible();
+
+    const recoveredComposer = app.window.getByRole("form", { name: "Task composer" });
+    await expect(recoveredComposer.getByRole("combobox", { name: "Prompt" })).toBeEnabled();
+    await recoveredComposer.getByRole("combobox", { name: "Prompt" }).fill("continue after interruption");
+    await recoveredComposer.getByRole("button", { name: "Send" }).click();
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+    expect(provider.requests.length).toBeGreaterThan(requestsBeforeRestart);
   } finally {
     await close(app);
     await provider.close();

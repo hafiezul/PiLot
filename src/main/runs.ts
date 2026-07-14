@@ -11,10 +11,11 @@ import { randomUUID } from "node:crypto";
 import { copyFile } from "node:fs/promises";
 import path from "node:path";
 import { builtInTuiCommand } from "../shared/actions.js";
-import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type RetryEvidence, type RunEvidence, type RunEvidenceItem, type RunStatus, type TaskRunState } from "../shared/projects.js";
+import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CommandEvidence, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type RetryEvidence, type RunEvidence, type RunEvidenceItem, type RunStatus, type TaskRunState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
 import { loadTaskResources } from "./resources.js";
-import { assertRunnableTask, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
+import { assertRunnableTask, forkChangedTask as forkTaskSnapshot, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
+import { assertTaskCurrent, getTaskContinuity, guardTaskManager, reloadTaskContinuity, watchTask } from "./continuity.js";
 import { cloneActivePath, forkFromPrompt, historyLabel, historyNavigationType, navigateWithoutSummary, taskHistoryState } from "./history.js";
 
 const runMetadataType = "pilot.run";
@@ -45,6 +46,7 @@ type ActiveRun = {
   compactionSequence: number;
   activeCompactionId?: string;
   manager?: SessionManager;
+  externalChanged: boolean;
 };
 
 type ResultView = {
@@ -128,6 +130,40 @@ function currentRun(active: ActiveRun) {
   return active.state.runs.find(({ id }) => id === active.runId)!;
 }
 
+function hasExternalChange(active: ActiveRun) {
+  const externalChange = getTaskContinuity(active.state.taskPath);
+  if (!externalChange) return active.externalChanged;
+  active.externalChanged = true;
+  active.state = { ...active.state, externalChange };
+  return true;
+}
+
+function runStatus(active: ActiveRun, status: RunStatus): RunStatus {
+  return hasExternalChange(active) ? "interrupted" : status;
+}
+
+function persistRunOutcome(active: ActiveRun) {
+  if (!active.accepted || hasExternalChange(active)) return;
+  const run = currentRun(active);
+  const failure = [...run.items].reverse().find((item) => item.kind === "notice" && item.tone === "error");
+  active.manager?.appendCustomEntry(runMetadataType, {
+    version: 1,
+    runId: active.runId,
+    outcome: run.status,
+    ...(failure?.kind === "notice" && failure.detail ? { error: failure.detail } : {}),
+  });
+}
+
+function interruptRun(run: RunEvidence): RunEvidence {
+  return {
+    ...run,
+    status: "interrupted",
+    items: run.items.map((item) => item.kind === "tool" && item.status === "running"
+      ? { ...item, status: "interrupted" }
+      : item.kind === "command" && item.status === "running" ? { ...item, status: "interrupted" } : item),
+  };
+}
+
 function updateRun(active: ActiveRun, update: (run: RunEvidence) => RunEvidence) {
   active.state = {
     ...active.state,
@@ -153,6 +189,7 @@ function addNotice(active: ActiveRun, id: string, tone: "attention" | "error", t
 }
 
 function persistRetry(active: ActiveRun, retry: RetryEvidence) {
+  if (hasExternalChange(active)) return;
   active.manager?.appendCustomEntry(retryMetadataType, {
     version: 1,
     attempt: retry.attempt,
@@ -198,6 +235,9 @@ function compactionEvidence(id: string, data: Record<string, unknown>): Compacti
 
 function savedState(taskPath: string, manager: SessionManager, executionPath: string): TaskRunState {
   const runs: RunEvidence[] = [];
+  const started = new Set<string>();
+  const completed = new Set<string>();
+  const awaitingInput = new Set<string>();
   let current: RunEvidence | undefined;
 
   for (const entry of manager.getBranch()) {
@@ -218,37 +258,47 @@ function savedState(taskPath: string, manager: SessionManager, executionPath: st
         isError?: boolean;
         stopReason?: string;
         errorMessage?: string;
-        timestamp?: number;
       };
       if (message.role === "user") {
-        current = {
-          id: entry.id,
-          status: "preparing",
-          startedAt: entry.timestamp,
-          input: { kind: "prompt", text: contentText(message.content) },
-          items: [],
-        };
-        runs.push(current);
+        if (current?.input.kind === "prompt" && awaitingInput.delete(current.id)) {
+          current.input = { kind: "prompt", text: contentText(message.content) };
+        } else {
+          current = {
+            id: entry.id,
+            status: "preparing",
+            startedAt: entry.timestamp,
+            input: { kind: "prompt", text: contentText(message.content) },
+            items: [],
+          };
+          runs.push(current);
+        }
       } else if (message.role === "bashExecution" && typeof message.command === "string") {
         const status = message.cancelled ? "aborted" : message.exitCode && message.exitCode !== 0 ? "failed" : "settled";
         const view = boundedOutput(message.output ?? "");
-        current = {
+        const item: CommandEvidence = {
           id: entry.id,
-          status,
-          startedAt: entry.timestamp,
-          input: { kind: "command", text: message.command, includeInContext: !message.excludeFromContext },
-          items: [{
-            id: entry.id,
-            kind: "command",
-            command: message.command,
-            output: view.output,
-            status: message.cancelled ? "aborted" : message.exitCode && message.exitCode !== 0 ? "failed" : "succeeded",
-            includeInContext: !message.excludeFromContext,
-            outputTruncated: view.outputTruncated || message.truncated,
-            fullOutputPath: message.fullOutputPath,
-          }],
+          kind: "command",
+          command: message.command,
+          output: view.output,
+          status: message.cancelled ? "aborted" : message.exitCode && message.exitCode !== 0 ? "failed" : "succeeded",
+          includeInContext: !message.excludeFromContext,
+          outputTruncated: view.outputTruncated || message.truncated,
+          fullOutputPath: message.fullOutputPath,
         };
-        runs.push(current);
+        if (current?.input.kind === "command" && awaitingInput.delete(current.id)) {
+          current.status = status;
+          current.input = { kind: "command", text: message.command, includeInContext: !message.excludeFromContext };
+          current.items = [item];
+        } else {
+          current = {
+            id: entry.id,
+            status,
+            startedAt: entry.timestamp,
+            input: { kind: "command", text: message.command, includeInContext: !message.excludeFromContext },
+            items: [item],
+          };
+          runs.push(current);
+        }
       } else if (message.role === "assistant" && current) {
         const text = contentText(message.content);
         const thinking = contentText(message.content, "thinking");
@@ -291,18 +341,45 @@ function savedState(taskPath: string, manager: SessionManager, executionPath: st
     if (entry.type !== "custom" || !entry.data || typeof entry.data !== "object") continue;
     const data = entry.data as Record<string, unknown>;
     if (entry.customType === runMetadataType) {
-      if (data.inputKind === "compaction" && typeof data.runId === "string" && !runs.some(({ id }) => id === data.runId)) {
+      const runId = typeof data.runId === "string" ? data.runId : undefined;
+      const inputKind = data.inputKind;
+      if (runId && (inputKind === "prompt" || inputKind === "command" || inputKind === "compaction") && !runs.some(({ id }) => id === runId)) {
+        const input = typeof data.input === "string" ? data.input : inputKind === "compaction" ? "Compact context" : "Interrupted input";
         current = {
-          id: data.runId,
-          status: "compacting",
+          id: runId,
+          status: inputKind === "compaction" ? "compacting" : inputKind === "command" ? "running" : "preparing",
           startedAt: typeof data.startedAt === "string" ? data.startedAt : entry.timestamp,
-          input: { kind: "compaction", text: "Compact context" },
-          items: [],
+          input: inputKind === "command"
+            ? { kind: "command", text: input, includeInContext: data.includeInContext !== false }
+            : { kind: inputKind, text: input },
+          items: inputKind === "command" ? [{
+            id: `${runId}-command`,
+            kind: "command",
+            command: input,
+            output: "",
+            status: "running",
+            includeInContext: data.includeInContext !== false,
+          }] : [],
         };
         runs.push(current);
+        started.add(runId);
+        if (inputKind !== "compaction") awaitingInput.add(runId);
       }
       const outcome = String(data.outcome);
-      if (current && ["settled", "failed", "aborted", "interrupted"].includes(outcome)) current.status = outcome as RunStatus;
+      const target = runId ? runs.find(({ id }) => id === runId) : current;
+      if (target && ["settled", "failed", "aborted", "interrupted"].includes(outcome)) {
+        target.status = outcome as RunStatus;
+        completed.add(target.id);
+        if (typeof data.error === "string" && !target.items.some((item) => item.kind === "notice" && item.detail === data.error)) {
+          target.items.push({
+            id: `${entry.id}-failure`,
+            kind: "notice",
+            tone: "error",
+            title: target.input.kind === "compaction" ? "Compaction failed" : "Run failed",
+            detail: data.error,
+          });
+        }
+      }
       continue;
     }
     if (entry.customType === retryMetadataType && current) {
@@ -314,9 +391,12 @@ function savedState(taskPath: string, manager: SessionManager, executionPath: st
     }
   }
 
-  for (const run of runs) {
-    if (run.status !== "preparing") continue;
-    run.status = run.items.some((item) => item.kind === "assistant" || item.kind === "tool") ? "settled" : "interrupted";
+  for (const [index, run] of runs.entries()) {
+    if (started.has(run.id) && !completed.has(run.id)) {
+      runs[index] = interruptRun(run);
+    } else if (run.status === "preparing") {
+      run.status = run.items.some((item) => item.kind === "assistant" || item.kind === "tool") ? "settled" : "interrupted";
+    }
   }
   return { taskPath, runs };
 }
@@ -324,6 +404,9 @@ function savedState(taskPath: string, manager: SessionManager, executionPath: st
 export class LocalRunCoordinator {
   private activeTasks = new Map<string, ActiveRun>();
   private activeProjects = new Set<string>();
+  private observedTasks = new Set<string>();
+  private taskStates = new Map<string, TaskRunState>();
+  private taskHistories = new Map<string, ReturnType<typeof taskHistoryState>>();
 
   constructor(
     private userData: string,
@@ -331,8 +414,52 @@ export class LocalRunCoordinator {
     private emit: (state: TaskRunState) => void,
   ) {}
 
+  private publish(state: TaskRunState) {
+    this.taskStates.set(path.resolve(state.taskPath), state);
+    this.emit(state);
+  }
+
+  private observe(file: string) {
+    const resolved = path.resolve(file);
+    if (!this.observedTasks.has(resolved)) {
+      this.observedTasks.add(resolved);
+      watchTask(resolved, () => this.handleExternalChange(resolved));
+    }
+    return getTaskContinuity(resolved);
+  }
+
+  private finishRun(file: string, project: string, active: ActiveRun) {
+    this.activeTasks.delete(file);
+    this.activeProjects.delete(project);
+    if (!active.externalChanged && active.manager) this.taskHistories.set(file, taskHistoryState(file, active.manager));
+    this.publish({ ...active.state, activeRunId: undefined });
+  }
+
+  private handleExternalChange(file: string) {
+    const externalChange = getTaskContinuity(file);
+    if (!externalChange) return;
+    const active = this.activeTasks.get(file);
+    if (active) {
+      active.externalChanged = true;
+      active.state = { ...active.state, externalChange };
+      updateRun(active, interruptRun);
+      active.session?.clearQueue();
+      active.session?.abortRetry();
+      active.session?.abortBash();
+      active.session?.abortCompaction();
+      void active.session?.abort().catch(() => undefined);
+      this.publish(active.state);
+      return;
+    }
+    const saved = this.taskStates.get(file);
+    if (saved) this.publish({ ...saved, activeRunId: undefined, externalChange });
+  }
+
   private async mutateTaskHistory<T>(projectPath: string, taskPath: string, operation: (context: { file: string; project: string; executionPath: string }) => Promise<T>) {
     const context = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    SessionManager.open(context.file);
+    this.observe(context.file);
+    assertTaskCurrent(context.file);
     if (this.activeProjects.has(context.project)) throw new Error("Stop the active Run before changing Task history");
     this.activeProjects.add(context.project);
     try {
@@ -346,37 +473,85 @@ export class LocalRunCoordinator {
     const active = this.activeTasks.get(path.resolve(taskPath));
     if (active) return active.state;
     const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
-    return withTaskWrite(file, async () => savedState(file, SessionManager.open(file), executionPath));
+    const manager = SessionManager.open(file);
+    const externalChange = this.observe(file);
+    const cached = this.taskStates.get(file);
+    if (externalChange && cached) return { ...cached, activeRunId: undefined, externalChange };
+    assertTaskCurrent(file);
+    return withTaskWrite(file, async () => {
+      const state = savedState(file, manager, executionPath);
+      const changed = getTaskContinuity(file);
+      const next = changed ? { ...state, externalChange: changed } : state;
+      this.taskStates.set(file, next);
+      return next;
+    });
+  }
+
+  async reloadTask(projectPath: string, taskPath: string) {
+    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    if (this.activeTasks.has(file)) throw new Error("Wait for the interrupted Run to stop before reloading this Task");
+    return withTaskWrite(file, async () => {
+      const manager = SessionManager.open(file);
+      reloadTaskContinuity(file);
+      const state = savedState(file, manager, executionPath);
+      this.taskStates.set(file, state);
+      this.taskHistories.set(file, taskHistoryState(file, manager));
+      this.publish(state);
+      return state;
+    });
+  }
+
+  async forkChangedTask(projectPath: string, taskPath: string) {
+    await assertExecutionAllowed(this.userData, projectPath);
+    const file = path.resolve(taskPath);
+    if (this.activeTasks.has(file)) throw new Error("Wait for the interrupted Run to stop before forking this Task");
+    return withTaskWrite(file, () => forkTaskSnapshot(this.agentDir, projectPath, file));
   }
 
   async getTaskHistory(projectPath: string, taskPath: string) {
-    const { file } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const manager = SessionManager.open(file);
+    const externalChange = this.observe(file);
+    if (!this.taskStates.has(file)) {
+      const state = savedState(file, manager, executionPath);
+      const next = externalChange ? { ...state, externalChange } : state;
+      this.taskStates.set(file, next);
+      if (externalChange) this.publish(next);
+    }
+    if (externalChange && this.taskHistories.has(file)) return this.taskHistories.get(file)!;
+    assertTaskCurrent(file);
     const active = this.activeTasks.get(file);
-    if (active?.manager) return taskHistoryState(file, active.manager);
-    if (active) return taskHistoryState(file, SessionManager.open(file));
-    return withTaskWrite(file, async () => taskHistoryState(file, SessionManager.open(file)));
+    const history = active?.manager
+      ? taskHistoryState(file, active.manager)
+      : active
+        ? taskHistoryState(file, manager)
+        : await withTaskWrite(file, async () => taskHistoryState(file, manager));
+    this.taskHistories.set(file, history);
+    return history;
   }
 
   async setTaskHistoryLabel(projectPath: string, taskPath: string, entryId: string, value?: string) {
     const label = historyLabel(value);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file }) => {
-      const manager = SessionManager.open(file);
+      const manager = guardTaskManager(file, SessionManager.open(file));
       if (!manager.getEntry(entryId)) throw new Error("Choose an available history entry");
       manager.appendLabelChange(entryId, label);
-      return taskHistoryState(file, manager);
+      const history = taskHistoryState(file, manager);
+      this.taskHistories.set(file, history);
+      return history;
     });
   }
 
   async forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string) {
     await assertExecutionAllowed(this.userData, projectPath);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project }) =>
-      forkFromPrompt(file, project, SessionManager.open(file), entryId));
+      forkFromPrompt(file, project, guardTaskManager(file, SessionManager.open(file)), entryId));
   }
 
   async cloneTaskHistory(projectPath: string, taskPath: string) {
     await assertExecutionAllowed(this.userData, projectPath);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project }) =>
-      cloneActivePath(file, project, SessionManager.open(file)));
+      cloneActivePath(file, project, guardTaskManager(file, SessionManager.open(file))));
   }
 
   async navigateTaskHistory(projectPath: string, taskPath: string, entryId: string, summarize: boolean, customInstructions?: string) {
@@ -385,9 +560,11 @@ export class LocalRunCoordinator {
     if (summarize) await assertExecutionAllowed(this.userData, projectPath);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file, executionPath }) => {
       if (!summarize) {
-        const manager = SessionManager.open(file);
+        const manager = guardTaskManager(file, SessionManager.open(file));
         const editorText = navigateWithoutSummary(manager, entryId);
-        return { history: taskHistoryState(file, manager), ...(editorText === undefined ? {} : { editorText }) };
+        const history = taskHistoryState(file, manager);
+        this.taskHistories.set(file, history);
+        return { history, ...(editorText === undefined ? {} : { editorText }) };
       }
 
       const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
@@ -399,7 +576,9 @@ export class LocalRunCoordinator {
         const result = await session.navigateTree(entryId, { summarize: true, ...(instructions ? { customInstructions: instructions } : {}) });
         if (result.cancelled) throw new Error(result.aborted ? "Branch summarization was stopped" : "History navigation was cancelled");
         if (!result.summaryEntry) manager.appendCustomEntry(historyNavigationType, { version: 1, targetId: entryId });
-        return { history: taskHistoryState(file, manager), ...(result.editorText === undefined ? {} : { editorText: result.editorText }) };
+        const history = taskHistoryState(file, manager);
+        this.taskHistories.set(file, history);
+        return { history, ...(result.editorText === undefined ? {} : { editorText: result.editorText }) };
       } finally {
         session.dispose();
       }
@@ -412,6 +591,9 @@ export class LocalRunCoordinator {
     assertDesktopPrompt(text);
     await assertExecutionAllowed(this.userData, projectPath);
     const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const manager = SessionManager.open(file);
+    this.observe(file);
+    assertTaskCurrent(file);
     const preparedImages = await prepareImages(images);
     if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
 
@@ -427,7 +609,7 @@ export class LocalRunCoordinator {
       input: { kind: "prompt", text },
       items: [],
     };
-    const saved = savedState(file, SessionManager.open(file), executionPath);
+    const saved = savedState(file, manager, executionPath);
     const active: ActiveRun = {
       project,
       executionPath,
@@ -438,10 +620,11 @@ export class LocalRunCoordinator {
       settled: false,
       assistantSequence: 0,
       compactionSequence: 0,
+      externalChanged: false,
     };
     this.activeProjects.add(project);
     this.activeTasks.set(file, active);
-    this.emit(active.state);
+    this.publish(active.state);
 
     try {
       await withTaskWrite(file, async () => {
@@ -451,24 +634,35 @@ export class LocalRunCoordinator {
         const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
         await session.bindExtensions({ onError: (error) => {
           addNotice(active, `resource-${randomUUID()}`, "attention", "Pi resource unavailable", error.error);
-          this.emit(active.state);
+          this.publish(active.state);
         } });
         try {
           if (active.abortRequested) {
-            updateRun(active, (value) => ({ ...value, status: "aborted" }));
+            updateRun(active, (value) => ({ ...value, status: runStatus(active, "aborted") }));
           } else {
-            await session.prompt(text, { images: preparedImages, preflightResult: (accepted) => { active.accepted = accepted; } });
+            await session.prompt(text, { images: preparedImages, preflightResult: (accepted) => {
+              if (!accepted || active.accepted) return;
+              manager.appendCustomEntry(runMetadataType, {
+                version: 1,
+                runId: run.id,
+                inputKind: "prompt",
+                input: text,
+                startedAt: run.startedAt,
+                outcome: "running",
+              });
+              active.accepted = true;
+            } });
             if (!active.settled) updateRun(active, (value) => ({
               ...value,
-              status: active.abortRequested ? "aborted" : active.lastError ? "failed" : "settled",
+              status: runStatus(active, active.abortRequested ? "aborted" : active.lastError ? "failed" : "settled"),
             }));
           }
-          if (active.accepted) manager.appendCustomEntry(runMetadataType, { version: 1, outcome: currentRun(active).status });
+          persistRunOutcome(active);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
-          if (!active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Run failed", detail);
-          if (active.accepted) manager.appendCustomEntry(runMetadataType, { version: 1, outcome: currentRun(active).status });
+          updateRun(active, (value) => ({ ...value, status: runStatus(active, active.abortRequested ? "aborted" : "failed") }));
+          if (!hasExternalChange(active) && !active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Run failed", detail);
+          persistRunOutcome(active);
         } finally {
           unsubscribe();
           session.dispose();
@@ -476,12 +670,10 @@ export class LocalRunCoordinator {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
-      if (!active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Run failed", detail);
+      updateRun(active, (value) => ({ ...value, status: runStatus(active, active.abortRequested ? "aborted" : "failed") }));
+      if (!hasExternalChange(active) && !active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Run failed", detail);
     } finally {
-      this.activeTasks.delete(file);
-      this.activeProjects.delete(project);
-      this.emit({ ...active.state, activeRunId: undefined });
+      this.finishRun(file, project, active);
     }
   }
 
@@ -489,7 +681,9 @@ export class LocalRunCoordinator {
     const text = prompt.trim();
     if (!text) throw new Error("Enter a prompt");
     assertDesktopPrompt(text);
-    const active = this.activeTasks.get(path.resolve(taskPath));
+    const file = path.resolve(taskPath);
+    assertTaskCurrent(file);
+    const active = this.activeTasks.get(file);
     if (!active || currentRun(active).input.kind !== "prompt") throw new Error("This Task has no active agent Run");
     if (!active.session || !active.session.isStreaming || active.abortRequested) throw new Error("The Run is not ready for live input");
     await (mode === "steer" ? active.session.steer(text) : active.session.followUp(text));
@@ -500,6 +694,9 @@ export class LocalRunCoordinator {
     if (!text) throw new Error("Enter a command");
     await assertExecutionAllowed(this.userData, projectPath);
     const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const manager = SessionManager.open(file);
+    this.observe(file);
+    assertTaskCurrent(file);
     if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
 
     const run: RunEvidence = {
@@ -509,7 +706,7 @@ export class LocalRunCoordinator {
       input: { kind: "command", text, includeInContext },
       items: [{ id: "command", kind: "command", command: text, output: "", status: "running", includeInContext }],
     };
-    const saved = savedState(file, SessionManager.open(file), executionPath);
+    const saved = savedState(file, manager, executionPath);
     const active: ActiveRun = {
       project,
       executionPath,
@@ -520,10 +717,11 @@ export class LocalRunCoordinator {
       settled: false,
       assistantSequence: 0,
       compactionSequence: 0,
+      externalChanged: false,
     };
     this.activeProjects.add(project);
     this.activeTasks.set(file, active);
-    this.emit(active.state);
+    this.publish(active.state);
 
     try {
       await withTaskWrite(file, async () => {
@@ -531,6 +729,16 @@ export class LocalRunCoordinator {
         const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
         const { session, manager } = await this.createSession(executionPath, file, auth, models);
         active.session = session;
+        active.manager = manager;
+        manager.appendCustomEntry(runMetadataType, {
+          version: 1,
+          runId: run.id,
+          inputKind: "command",
+          input: text,
+          includeInContext,
+          startedAt: run.startedAt,
+          outcome: "running",
+        });
         try {
           const result = await session.executeBash(text, (chunk) => {
             replaceItem(active, "command", (item) => {
@@ -538,7 +746,7 @@ export class LocalRunCoordinator {
               const view = boundedOutput(item.output + chunk);
               return { ...item, ...view };
             });
-            this.emit(active.state);
+            this.publish(active.state);
           }, { excludeFromContext: !includeInContext });
           replaceItem(active, "command", (item) => item.kind === "command" ? {
             ...item,
@@ -549,13 +757,13 @@ export class LocalRunCoordinator {
           } : item);
           updateRun(active, (value) => ({
             ...value,
-            status: result.cancelled ? "aborted" : result.exitCode && result.exitCode !== 0 ? "failed" : "settled",
+            status: runStatus(active, result.cancelled ? "aborted" : result.exitCode && result.exitCode !== 0 ? "failed" : "settled"),
           }));
-          manager.appendCustomEntry(runMetadataType, { version: 1, outcome: currentRun(active).status });
+          persistRunOutcome(active);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           const output = currentRun(active).items.find((item) => item.kind === "command")?.output ?? "";
-          session.recordBashResult(text, {
+          if (!hasExternalChange(active)) session.recordBashResult(text, {
             output: [output, active.abortRequested ? "Command aborted" : detail].filter(Boolean).join("\n"),
             exitCode: undefined,
             cancelled: active.abortRequested,
@@ -563,29 +771,30 @@ export class LocalRunCoordinator {
           }, { excludeFromContext: !includeInContext });
           replaceItem(active, "command", (item) => item.kind === "command" ? {
             ...item,
-            output: [item.output, active.abortRequested ? "Command aborted" : detail].filter(Boolean).join("\n"),
-            status: active.abortRequested ? "aborted" : "failed",
+            output: hasExternalChange(active) ? item.output : [item.output, active.abortRequested ? "Command aborted" : detail].filter(Boolean).join("\n"),
+            status: hasExternalChange(active) ? item.status : active.abortRequested ? "aborted" : "failed",
           } : item);
-          updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
-          manager.appendCustomEntry(runMetadataType, { version: 1, outcome: currentRun(active).status });
+          updateRun(active, (value) => ({ ...value, status: runStatus(active, active.abortRequested ? "aborted" : "failed") }));
+          persistRunOutcome(active);
         } finally {
           session.dispose();
         }
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      replaceItem(active, "command", (item) => item.kind === "command" ? { ...item, output: detail, status: "failed" } : item);
-      updateRun(active, (value) => ({ ...value, status: "failed" }));
+      if (!hasExternalChange(active)) replaceItem(active, "command", (item) => item.kind === "command" ? { ...item, output: detail, status: "failed" } : item);
+      updateRun(active, (value) => ({ ...value, status: runStatus(active, "failed") }));
     } finally {
-      this.activeTasks.delete(file);
-      this.activeProjects.delete(project);
-      this.emit({ ...active.state, activeRunId: undefined });
+      this.finishRun(file, project, active);
     }
   }
 
   async compactTask(projectPath: string, taskPath: string) {
     await assertExecutionAllowed(this.userData, projectPath);
     const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const manager = SessionManager.open(file);
+    this.observe(file);
+    assertTaskCurrent(file);
     if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
 
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
@@ -600,7 +809,7 @@ export class LocalRunCoordinator {
       input: { kind: "compaction", text: "Compact context" },
       items: [],
     };
-    const saved = savedState(file, SessionManager.open(file), executionPath);
+    const saved = savedState(file, manager, executionPath);
     const active: ActiveRun = {
       project,
       executionPath,
@@ -611,10 +820,11 @@ export class LocalRunCoordinator {
       settled: false,
       assistantSequence: 0,
       compactionSequence: 0,
+      externalChanged: false,
     };
     this.activeProjects.add(project);
     this.activeTasks.set(file, active);
-    this.emit(active.state);
+    this.publish(active.state);
 
     try {
       await withTaskWrite(file, async () => {
@@ -626,8 +836,9 @@ export class LocalRunCoordinator {
           version: 1,
           runId: run.id,
           inputKind: "compaction",
+          input: "Compact context",
           startedAt: run.startedAt,
-          outcome: "compacting",
+          outcome: "running",
         });
         try {
           const branch = manager.getBranch();
@@ -637,27 +848,25 @@ export class LocalRunCoordinator {
             throw new Error("Already compacted; add more Task history before compacting again");
           }
           await session.compact();
-          updateRun(active, (value) => ({ ...value, status: "settled" }));
+          updateRun(active, (value) => ({ ...value, status: runStatus(active, "settled") }));
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
-          if (!currentRun(active).items.some((item) => item.kind === "compaction" && item.status === "failed")) {
+          updateRun(active, (value) => ({ ...value, status: runStatus(active, active.abortRequested ? "aborted" : "failed") }));
+          if (!hasExternalChange(active) && !currentRun(active).items.some((item) => item.kind === "compaction" && item.status === "failed")) {
             addNotice(active, `${run.id}-failure`, "error", "Compaction failed", detail);
           }
         } finally {
-          manager.appendCustomEntry(runMetadataType, { version: 1, outcome: currentRun(active).status });
+          persistRunOutcome(active);
           unsubscribe();
           session.dispose();
         }
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      updateRun(active, (value) => ({ ...value, status: active.abortRequested ? "aborted" : "failed" }));
-      if (!active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Compaction failed", detail);
+      updateRun(active, (value) => ({ ...value, status: runStatus(active, active.abortRequested ? "aborted" : "failed") }));
+      if (!hasExternalChange(active) && !active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Compaction failed", detail);
     } finally {
-      this.activeTasks.delete(file);
-      this.activeProjects.delete(project);
-      this.emit({ ...active.state, activeRunId: undefined });
+      this.finishRun(file, project, active);
     }
   }
 
@@ -690,14 +899,14 @@ export class LocalRunCoordinator {
     const recoveredInput = queued ? [...queued.steering, ...queued.followUp].join("\n\n") : "";
     if (recoveredInput) {
       active.state = { ...active.state, recoveredInput };
-      this.emit(active.state);
+      this.publish(active.state);
       active.state = { ...active.state, recoveredInput: undefined };
     }
     active.session?.abortRetry();
     active.session?.abortBash();
     active.session?.abortCompaction();
     await active.session?.abort();
-    updateRun(active, (run) => ({ ...run, status: "aborted" }));
+    updateRun(active, (run) => ({ ...run, status: runStatus(active, "aborted") }));
   }
 
   async abortAll() {
@@ -706,7 +915,7 @@ export class LocalRunCoordinator {
 
   private async createSession(executionPath: string, file: string, auth: AuthStorage, models: ModelRegistry) {
     const { loader: resources, settings } = await loadTaskResources(this.agentDir, executionPath);
-    const manager = SessionManager.open(file);
+    const manager = guardTaskManager(file, SessionManager.open(file));
     const { session } = await createAgentSession({
       cwd: executionPath,
       agentDir: this.agentDir,
@@ -733,9 +942,14 @@ export class LocalRunCoordinator {
   }
 
   private handleEvent(active: ActiveRun, event: AgentSessionEvent) {
+    if (hasExternalChange(active)) {
+      updateRun(active, interruptRun);
+      this.publish(active.state);
+      return;
+    }
     switch (event.type) {
       case "agent_start":
-        updateRun(active, (run) => ({ ...run, status: "running" }));
+        updateRun(active, (run) => ({ ...run, status: runStatus(active, "running") }));
         break;
       case "message_start":
         if (event.message.role !== "assistant") return;
@@ -761,12 +975,12 @@ export class LocalRunCoordinator {
         active.settled = true;
         const hasLifecycleFailure = currentRun(active).items.some((item) =>
           (item.kind === "retry" || item.kind === "compaction") && item.status === "failed");
-        if (active.lastError && !hasLifecycleFailure) {
+        if (!hasExternalChange(active) && active.lastError && !hasLifecycleFailure) {
           addNotice(active, `${active.runId}-provider`, "error", "Provider failed", active.lastError);
         }
         updateRun(active, (run) => ({
           ...run,
-          status: active.abortRequested ? "aborted" : active.lastError ? "failed" : "settled",
+          status: runStatus(active, active.abortRequested ? "aborted" : active.lastError ? "failed" : "settled"),
         }));
         break;
       }
@@ -819,7 +1033,7 @@ export class LocalRunCoordinator {
           error: event.errorMessage,
           status: "waiting",
         });
-        updateRun(active, (run) => ({ ...run, status: "retrying" }));
+        updateRun(active, (run) => ({ ...run, status: runStatus(active, "retrying") }));
         break;
       }
       case "auto_retry_end": {
@@ -843,7 +1057,7 @@ export class LocalRunCoordinator {
         const id = `compaction-${event.reason}-${active.compactionSequence++}`;
         active.activeCompactionId = id;
         appendItem(active, { id, kind: "compaction", reason: event.reason, status: "running" });
-        updateRun(active, (run) => ({ ...run, status: "compacting" }));
+        updateRun(active, (run) => ({ ...run, status: runStatus(active, "compacting") }));
         break;
       }
       case "compaction_end": {
@@ -868,9 +1082,9 @@ export class LocalRunCoordinator {
         if (status === "failed") active.lastError = event.errorMessage ?? "Compaction failed";
         if (event.reason !== "manual") updateRun(active, (run) => ({
           ...run,
-          status: status === "failed" ? "failed" : event.willRetry ? "running" : run.status,
+          status: runStatus(active, status === "failed" ? "failed" : event.willRetry ? "running" : run.status),
         }));
-        active.manager?.appendCustomEntry(compactionMetadataType, {
+        if (!hasExternalChange(active)) active.manager?.appendCustomEntry(compactionMetadataType, {
           version: 1,
           reason: item.reason,
           status: item.status,
@@ -884,6 +1098,6 @@ export class LocalRunCoordinator {
       default:
         return;
     }
-    this.emit(active.state);
+    this.publish(active.state);
   }
 }

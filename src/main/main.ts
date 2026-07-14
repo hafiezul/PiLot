@@ -239,6 +239,10 @@ app.whenReady().then(async () => {
     createTask(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
   ipcMain.handle("tasks:get-run", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskRun(requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:reload", async (_event, projectPath: unknown, taskPath: unknown) =>
+    runs.reloadTask(requireProjectPath(projectPath), requireTaskPath(taskPath)));
+  ipcMain.handle("tasks:fork-changed", async (_event, projectPath: unknown, taskPath: unknown) =>
+    runs.forkChangedTask(requireProjectPath(projectPath), requireTaskPath(taskPath)));
   ipcMain.handle("tasks:get-model", async (_event, projectPath: unknown, taskPath: unknown) =>
     getTaskModelState(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) =>
