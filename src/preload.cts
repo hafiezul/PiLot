@@ -16,6 +16,7 @@ const api: PiLotApi = {
   getPreferences: () => ipcRenderer.invoke("preferences:get"),
   setAppearance: (appearance) => ipcRenderer.invoke("preferences:set-appearance", appearance),
   setExpandThinking: (expand) => ipcRenderer.invoke("preferences:set-expand-thinking", expand),
+  setGlobalRunCap: (limit) => ipcRenderer.invoke("preferences:set-global-run-cap", limit),
   getTerminalState: () => ipcRenderer.invoke("terminals:get"),
   setPreferredTerminal: (terminal) => ipcRenderer.invoke("terminals:set-preferred", terminal),
   getApplicationState: (projectPath, taskPath) => ipcRenderer.invoke("applications:get", projectPath, taskPath),

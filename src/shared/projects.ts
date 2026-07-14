@@ -35,6 +35,7 @@ export type TaskSummary = {
   modified: string;
   execution: TaskExecutionLocation;
   setup?: Omit<TaskSetupState, "taskPath">;
+  runStatus?: RunStatus;
 };
 
 export type TaskCreationState = {
@@ -77,7 +78,7 @@ export type ProjectsState = {
   selected?: ProjectAccess;
 };
 
-export type RunStatus = "preparing" | "running" | "retrying" | "compacting" | "settled" | "failed" | "aborted" | "interrupted";
+export type RunStatus = "queued" | "preparing" | "running" | "retrying" | "compacting" | "settled" | "failed" | "aborted" | "interrupted";
 export type LiveInputMode = "steer" | "followUp";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -134,7 +135,7 @@ export type CommandEvidence = {
   kind: "command";
   command: string;
   output: string;
-  status: "running" | "succeeded" | "failed" | "aborted" | "interrupted";
+  status: "queued" | "running" | "succeeded" | "failed" | "aborted" | "interrupted";
   includeInContext: boolean;
   outputTruncated?: boolean;
   fullOutputPath?: string;
@@ -194,6 +195,8 @@ export type TaskRunState = {
     followUp: string[];
   };
   recoveredInput?: string;
+  queuePosition?: number;
+  runLimit?: number;
 };
 
 export const IMAGE_MIME_LABELS = {

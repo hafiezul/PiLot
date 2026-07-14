@@ -6,11 +6,12 @@ import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
-import type { ProjectDiagnostic, TaskExecutionLocation, TaskModelState, TaskSetupState, TaskSetupStatus, TaskSummary, ThinkingLevel } from "../shared/projects.js";
+import type { ProjectDiagnostic, RunStatus, TaskExecutionLocation, TaskModelState, TaskSetupState, TaskSetupStatus, TaskSummary, ThinkingLevel } from "../shared/projects.js";
 import { BUILT_IN_PROVIDER_IDS } from "../shared/providers.js";
 import { guardTaskManager, taskSnapshot } from "./continuity.js";
 
 const metadataType = "pilot.task";
+const runMetadataType = "pilot.run";
 const maximumTasks = 500;
 const setupStatuses = new Set<TaskSetupStatus>(["pending", "running", "succeeded", "failed", "aborted", "interrupted", "bypassed"]);
 
@@ -133,6 +134,43 @@ async function readHeader(file: string): Promise<Header | undefined> {
   }
 }
 
+function runStatusOnActiveBranch(entries: Record<string, unknown>[]): RunStatus | undefined {
+  const entriesById = new Map(entries.flatMap((entry) => typeof entry.id === "string" ? [[entry.id, entry] as const] : []));
+  const leaf = [...entries].reverse().find((entry) => typeof entry.id === "string");
+  const activeIds = new Set<string>();
+  let entry = leaf;
+  while (entry && typeof entry.id === "string" && !activeIds.has(entry.id)) {
+    activeIds.add(entry.id);
+    entry = typeof entry.parentId === "string" ? entriesById.get(entry.parentId) : undefined;
+  }
+
+  let latestRunId: string | undefined;
+  let latestRunStatus: RunStatus | undefined;
+  for (const candidate of entries) {
+    if (typeof candidate.id !== "string" || !activeIds.has(candidate.id)) continue;
+    if (candidate.type === "custom" && candidate.customType === runMetadataType && candidate.data && typeof candidate.data === "object") {
+      const data = candidate.data as Record<string, unknown>;
+      const runId = typeof data.runId === "string" ? data.runId : undefined;
+      const outcome = typeof data.outcome === "string" ? data.outcome : undefined;
+      if (runId && (data.inputKind === "prompt" || data.inputKind === "command" || data.inputKind === "compaction")) {
+        latestRunId = runId;
+        latestRunStatus = outcome === "queued" ? "queued" : outcome === "running"
+          ? data.inputKind === "compaction" ? "compacting" : data.inputKind === "command" ? "running" : "preparing"
+          : undefined;
+      }
+      if (runId === latestRunId && outcome && ["settled", "failed", "aborted", "interrupted"].includes(outcome)) {
+        latestRunStatus = outcome as RunStatus;
+      }
+    } else if (candidate.type === "message" && latestRunStatus && ["settled", "failed", "aborted", "interrupted"].includes(latestRunStatus)) {
+      latestRunId = undefined;
+      latestRunStatus = undefined;
+    }
+  }
+  return latestRunStatus && ["queued", "preparing", "running", "retrying", "compacting"].includes(latestRunStatus)
+    ? "interrupted"
+    : latestRunStatus;
+}
+
 async function readTask(file: string, projectPath: string): Promise<TaskRead> {
   let header: Header | undefined;
   let malformed = false;
@@ -140,6 +178,7 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
   let sessionName = "";
   let metadata: TaskMetadata | undefined;
   let lastActivity: number | undefined;
+  const sessionEntries: Record<string, unknown>[] = [];
 
   try {
     const fileStat = await stat(file);
@@ -159,6 +198,7 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
         if ((header.version ?? 1) > CURRENT_SESSION_VERSION) return { incompatible: true };
         continue;
       }
+      sessionEntries.push(entry);
       if (entry.type === "session_info") sessionName = typeof entry.name === "string" ? entry.name : "";
       if (entry.type === "custom" && entry.customType === metadataType && entry.data && typeof entry.data === "object") {
         const data = entry.data as TaskMetadata;
@@ -169,6 +209,10 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
           execution: data.execution && typeof data.execution === "object" ? data.execution : undefined,
           setup: data.setup && typeof data.setup === "object" ? data.setup : undefined,
         };
+      }
+      if (entry.type === "custom" && entry.customType === runMetadataType) {
+        const timestamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+        if (Number.isFinite(timestamp)) lastActivity = Math.max(lastActivity ?? 0, timestamp);
       }
       if (entry.type === "message" && entry.message && typeof entry.message === "object") {
         const message = entry.message as { role?: unknown; content?: unknown; timestamp?: unknown };
@@ -204,6 +248,7 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
     if (metadata?.setup && !setup) return { malformed: true, header, hasMetadata: true };
     const headerActivity = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : NaN;
     const modified = lastActivity ?? (Number.isFinite(headerActivity) ? headerActivity : fileStat.mtimeMs);
+    const runStatus = runStatusOnActiveBranch(sessionEntries);
     const resolved: ResolvedTaskMetadata = {
       title: safeTaskTitle(sessionName || metadata?.title || firstMessage),
       lifecycle: metadata?.lifecycle ?? "active",
@@ -212,7 +257,7 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
       ...(setup ? { setup } : {}),
     };
     return {
-      task: { id: header.id!, path: file, title: resolved.title, lifecycle: resolved.lifecycle, modified: new Date(modified).toISOString(), execution, ...(setup ? { setup } : {}) },
+      task: { id: header.id!, path: file, title: resolved.title, lifecycle: resolved.lifecycle, modified: new Date(modified).toISOString(), execution, ...(setup ? { setup } : {}), ...(runStatus ? { runStatus } : {}) },
       malformed,
       header,
       hasMetadata: metadata !== undefined,

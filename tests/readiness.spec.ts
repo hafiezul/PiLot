@@ -118,7 +118,7 @@ async function launch(
   });
   const endpoint = `http://127.0.0.1:${port}`;
   let browser: Browser | undefined;
-  for (let attempt = 0; attempt < 100 && !browser; attempt++) {
+  for (let attempt = 0; attempt < 200 && !browser; attempt++) {
     try {
       browser = await chromium.connectOverCDP(endpoint);
     } catch {
@@ -174,6 +174,9 @@ async function deterministicProvider(root: string) {
   const finished = path.join(root, "tool-finished");
   const modelStopped = path.join(root, "model-stopped");
   const requests: string[] = [];
+  const heldConcurrent = new Map<string, () => void>();
+  let activeConcurrent = 0;
+  let maximumConcurrent = 0;
   const server = createHttpServer((request, response) => {
     let body = "";
     request.on("data", (chunk) => { body += chunk; });
@@ -197,6 +200,25 @@ async function deterministicProvider(root: string) {
       const chunk = (choice: object) => response.write(`data: ${JSON.stringify({
         id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [choice],
       })}\n\n`);
+      if (latestUser.startsWith("hold concurrent ")) {
+        activeConcurrent += 1;
+        maximumConcurrent = Math.max(maximumConcurrent, activeConcurrent);
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          heldConcurrent.delete(latestUser);
+          activeConcurrent -= 1;
+          if (response.destroyed) return;
+          chunk({ index: 0, delta: { role: "assistant", content: `Finished ${latestUser}.` }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+          response.end("data: [DONE]\n\n");
+        };
+        heldConcurrent.set(latestUser, finish);
+        chunk({ index: 0, delta: { role: "assistant", content: `Running ${latestUser}.` }, finish_reason: null });
+        response.once("close", finish);
+        return;
+      }
       if (latestUser.startsWith("<conversation>")) {
         const finishCompaction = () => {
           if (response.destroyed) return;
@@ -363,6 +385,9 @@ async function deterministicProvider(root: string) {
     finished,
     modelStopped,
     requests,
+    releaseConcurrent(prompt: string) { heldConcurrent.get(prompt)?.(); },
+    get activeConcurrent() { return activeConcurrent; },
+    get maximumConcurrent() { return maximumConcurrent; },
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -1273,6 +1298,205 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
   }
 });
 
+test("orchestrates queued Runs across Projects and Worktrees", async () => {
+  test.setTimeout(90_000);
+  const environment = await fixture();
+  const projectA = await realpath(environment.project);
+  const projectB = path.join(environment.root, "second-project");
+  await mkdir(projectB, { recursive: true });
+  const canonicalProjectB = await realpath(projectB);
+  for (const project of [projectA, canonicalProjectB]) {
+    await execute("git", ["init"], { cwd: project });
+    await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: project });
+    await execute("git", ["config", "user.name", "PiLot Test"], { cwd: project });
+    await writeFile(path.join(project, "README.md"), `# ${path.basename(project)}\n`);
+    await execute("git", ["add", "."], { cwd: project });
+    await execute("git", ["commit", "-m", "fixture"], { cwd: project });
+  }
+
+  const timestamp = "2026-01-02T00:00:00.000Z";
+  const attentionTask = async (name: string, title: string, outcome: "failed" | "running") => writeSession(environment.agentDir, projectA, name, [
+    { type: "session", version: 3, id: name, timestamp, cwd: projectA },
+    { type: "custom", customType: "pilot.task", id: `${name}-task`, parentId: null, timestamp, data: { version: 1, title, lifecycle: "active", projectPath: projectA, execution: { kind: "local", path: projectA } } },
+    { type: "custom", customType: "pilot.run", id: `${name}-start`, parentId: `${name}-task`, timestamp, data: { version: 1, runId: `${name}-run`, inputKind: "prompt", input: title, outcome: "running" } },
+    ...(outcome === "failed" ? [{ type: "custom", customType: "pilot.run", id: `${name}-finish`, parentId: `${name}-start`, timestamp, data: { version: 1, runId: `${name}-run`, outcome: "failed", error: "Fixture failure" } }] : []),
+  ]);
+  await attentionTask("failed-attention", "Failed release repair", "failed");
+  await attentionTask("interrupted-attention", "Interrupted migration", "running");
+  await writeSession(environment.agentDir, projectA, "abandoned-failure", [
+    { type: "session", version: 3, id: "abandoned-failure", timestamp, cwd: projectA },
+    { type: "custom", customType: "pilot.task", id: "abandoned-task", parentId: null, timestamp, data: { version: 1, title: "Healthy active branch", lifecycle: "active", projectPath: projectA, execution: { kind: "local", path: projectA } } },
+    { type: "custom", customType: "pilot.run", id: "abandoned-start", parentId: "abandoned-task", timestamp, data: { version: 1, runId: "abandoned-run", inputKind: "prompt", input: "Old branch", outcome: "running" } },
+    { type: "custom", customType: "pilot.run", id: "abandoned-finish", parentId: "abandoned-start", timestamp, data: { version: 1, runId: "abandoned-run", outcome: "failed", error: "Abandoned failure" } },
+    { type: "custom", customType: "pilot.run", id: "healthy-start", parentId: "abandoned-task", timestamp, data: { version: 1, runId: "healthy-run", inputKind: "prompt", input: "Current branch", outcome: "running" } },
+    { type: "custom", customType: "pilot.run", id: "healthy-finish", parentId: "healthy-start", timestamp, data: { version: 1, runId: "healthy-run", outcome: "settled" } },
+  ]);
+
+  const provider = await deterministicProvider(environment.root);
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture-model" }));
+  const userData = path.join(environment.agentDir, "pilot-user-data");
+  await mkdir(userData, { recursive: true });
+  await writeFile(path.join(userData, "projects.json"), JSON.stringify({
+    recentProjects: [projectA, canonicalProjectB],
+    selectedProject: projectA,
+    executionConsent: { [projectA]: true, [canonicalProjectB]: true },
+    setupCommands: {},
+  }));
+
+  const app = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+  try {
+    const attention = app.window.getByRole("region", { name: "Task attention overview" });
+    await expect(attention.getByRole("region", { name: "Interrupted Tasks" })).toContainText("Interrupted migration");
+    await expect(attention.getByRole("region", { name: "Failed Tasks" })).toContainText("Failed release repair");
+    await expect(attention).not.toContainText("Healthy active branch");
+
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    const settings = app.window.getByRole("main", { name: "Settings" });
+    const runLimit = settings.getByRole("spinbutton", { name: "Active Run limit" });
+    await expect(runLimit).toHaveValue("4");
+    await runLimit.fill("");
+    await runLimit.blur();
+    await expect(settings.getByRole("alert")).toContainText("Choose a whole number from 1 to 16");
+    await expect(runLimit).toHaveValue("4");
+    await runLimit.fill("2");
+    await runLimit.blur();
+    await expect(runLimit).toHaveValue("2");
+    await app.window.getByRole("button", { name: "Back to command center" }).click();
+
+    const tasks = await app.window.evaluate(async ({ firstProject, secondProject }) => {
+      const pilot = (window as any).pilot;
+      return {
+        localA: await pilot.createTask(firstProject, { kind: "local" }),
+        localAConflict: await pilot.createTask(firstProject, { kind: "local" }),
+        localB: await pilot.createTask(secondProject, { kind: "local" }),
+        worktreeA: await pilot.createTask(firstProject, { kind: "worktree", ref: "HEAD" }),
+        worktreeB: await pilot.createTask(firstProject, { kind: "worktree", ref: "HEAD" }),
+        worktreeCancelled: await pilot.createTask(firstProject, { kind: "worktree", ref: "HEAD" }),
+        worktreeRevoked: await pilot.createTask(firstProject, { kind: "worktree", ref: "HEAD" }),
+      };
+    }, { firstProject: projectA, secondProject: canonicalProjectB });
+    SessionManager.open(tasks.localA.path).appendSessionInfo("Project A local");
+    SessionManager.open(tasks.localAConflict.path).appendSessionInfo("Project A local conflict");
+    SessionManager.open(tasks.localB.path).appendSessionInfo("Project B local");
+    SessionManager.open(tasks.worktreeA.path).appendSessionInfo("Project A worktree first");
+    SessionManager.open(tasks.worktreeB.path).appendSessionInfo("Project A worktree second");
+    SessionManager.open(tasks.worktreeCancelled.path).appendSessionInfo("Project A cancelled wait");
+    SessionManager.open(tasks.worktreeRevoked.path).appendSessionInfo("Project A revoked wait");
+
+    await app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("button", { name: path.basename(projectA), exact: true }).click();
+    await app.window.getByRole("button", { name: "Open command center" }).click();
+
+    await app.window.evaluate(({ project, task }) => { void (window as any).pilot.submitPrompt(project, task, "hold concurrent project A"); }, { project: projectA, task: tasks.localA.path });
+    await expect.poll(() => provider.requests.map(latestUserText)).toContain("hold concurrent project A");
+    await app.window.evaluate(({ project, task }) => { void (window as any).pilot.submitPrompt(project, task, "hold concurrent project B"); }, { project: canonicalProjectB, task: tasks.localB.path });
+    await expect.poll(() => provider.requests.map(latestUserText)).toContain("hold concurrent project B");
+    expect(provider.activeConcurrent).toBe(2);
+
+    await app.window.evaluate(({ project, task }) => { void (window as any).pilot.submitPrompt(project, task, "hold concurrent worktree first"); }, { project: projectA, task: tasks.worktreeA.path });
+    const waiting = attention.getByRole("region", { name: "Waiting Tasks" });
+    await expect(waiting).toContainText("Project A worktree first");
+    await app.window.evaluate(({ project, task }) => { void (window as any).pilot.submitPrompt(project, task, "hold concurrent worktree second"); }, { project: projectA, task: tasks.worktreeB.path });
+    await expect(waiting).toContainText("Project A worktree second");
+    await app.window.evaluate(({ project, task }) => { void (window as any).pilot.executeCommand(project, task, "printf should-not-run > cancelled.txt", false); }, { project: projectA, task: tasks.worktreeCancelled.path });
+    await expect(waiting).toContainText("Project A cancelled wait");
+    await expect.poll(() => provider.requests.map(latestUserText)).not.toContain("hold concurrent worktree first");
+
+    await app.window.reload();
+    await expect(attention.getByRole("region", { name: "Running Tasks" })).toContainText("Project A local");
+    await expect(attention.getByRole("region", { name: "Running Tasks" })).toContainText("Project B local");
+    await expect(waiting).toContainText("Project A worktree first");
+
+    await waiting.getByRole("button", { name: /Project A cancelled wait/ }).click();
+    const cancelledTimeline = app.window.getByRole("region", { name: "Run timeline" });
+    await expect(cancelledTimeline).toContainText("Queue position 3");
+    await expect(cancelledTimeline.getByRole("region", { name: "Command: printf should-not-run > cancelled.txt" })).toContainText("Waiting");
+    await expect(app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("list", { name: `Active Tasks in ${path.basename(projectA)}` }).getByRole("button", { name: /Project A cancelled wait/ })).toContainText("Waiting");
+    await app.window.getByRole("form", { name: "Task composer" }).getByRole("button", { name: "Stop Run" }).click();
+    await expect(cancelledTimeline.getByRole("article").last()).toContainText("Aborted");
+    await app.window.getByRole("button", { name: "Open command center" }).click();
+    await expect(waiting).not.toContainText("Project A cancelled wait");
+
+    const conflict = await app.window.evaluate(async ({ project, task }) => {
+      try {
+        await (window as any).pilot.submitPrompt(project, task, "must not overlap Local");
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    }, { project: projectA, task: tasks.localAConflict.path });
+    expect(conflict).toContain("Another Local Task is already running in this Project");
+
+    await waiting.getByRole("button", { name: /Project A worktree second/ }).click();
+    const queuedTimeline = app.window.getByRole("region", { name: "Run timeline" });
+    await expect(queuedTimeline).toContainText("Waiting");
+    await expect(queuedTimeline).toContainText("Queue position 2");
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    await expect(navigation.getByRole("list", { name: `Active Tasks in ${path.basename(projectA)}` })).toContainText("Waiting");
+    await app.window.getByRole("button", { name: "Open command center" }).click();
+
+    provider.releaseConcurrent("hold concurrent project A");
+    await expect.poll(() => provider.requests.map(latestUserText)).toContain("hold concurrent worktree first");
+    expect(provider.maximumConcurrent).toBe(2);
+    await expect(attention.getByRole("region", { name: "Running Tasks" })).toContainText("Project A worktree first");
+    await expect(attention.getByRole("region", { name: "Waiting Tasks" })).toContainText("Project A worktree second");
+
+    provider.releaseConcurrent("hold concurrent project B");
+    await expect.poll(() => provider.requests.map(latestUserText)).toContain("hold concurrent worktree second");
+    expect(provider.requests.map(latestUserText).filter((text) => text.startsWith("hold concurrent "))).toEqual([
+      "hold concurrent project A",
+      "hold concurrent project B",
+      "hold concurrent worktree first",
+      "hold concurrent worktree second",
+    ]);
+    await expect(readFile(path.join(tasks.worktreeCancelled.execution.path, "cancelled.txt"), "utf8")).rejects.toThrow();
+    await expect(attention.getByRole("region", { name: "Waiting Tasks" })).toHaveCount(0);
+
+    provider.releaseConcurrent("hold concurrent worktree first");
+    provider.releaseConcurrent("hold concurrent worktree second");
+    await expect.poll(() => provider.activeConcurrent).toBe(0);
+    await expect(attention.getByRole("region", { name: "Running Tasks" })).toHaveCount(0);
+
+    await app.window.evaluate(() => (window as any).pilot.setGlobalRunCap(1));
+    await app.window.evaluate(({ project, task }) => { void (window as any).pilot.submitPrompt(project, task, "hold concurrent consent gate"); }, { project: canonicalProjectB, task: tasks.localB.path });
+    await expect.poll(() => provider.requests.map(latestUserText)).toContain("hold concurrent consent gate");
+    await app.window.evaluate(({ project, task }) => { void (window as any).pilot.submitPrompt(project, task, "must not start after consent revoke"); }, { project: projectA, task: tasks.worktreeRevoked.path });
+    await expect(attention.getByRole("region", { name: "Waiting Tasks" })).toContainText("Project A revoked wait");
+    const revokedProjects = JSON.parse(await readFile(path.join(userData, "projects.json"), "utf8"));
+    revokedProjects.executionConsent[projectA] = false;
+    await writeFile(path.join(userData, "projects.json"), JSON.stringify(revokedProjects));
+    provider.releaseConcurrent("hold concurrent consent gate");
+    await expect.poll(() => provider.activeConcurrent).toBe(0);
+    await expect(attention.getByRole("region", { name: "Failed Tasks" })).toContainText("Project A revoked wait");
+    expect(provider.requests.map(latestUserText)).not.toContain("must not start after consent revoke");
+    revokedProjects.executionConsent[projectA] = true;
+    await writeFile(path.join(userData, "projects.json"), JSON.stringify(revokedProjects));
+
+    await app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("button", { name: path.basename(projectA), exact: true }).click();
+    await app.window.getByRole("list", { name: `Active Tasks in ${path.basename(projectA)}` }).getByRole("button", { name: "Project A cancelled wait", exact: true }).click();
+    await expect(app.window.getByRole("region", { name: "Command: printf should-not-run > cancelled.txt" })).toContainText("Aborted");
+    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toMatchObject({ globalRunCap: 1 });
+  } finally {
+    provider.releaseConcurrent("hold concurrent project A");
+    provider.releaseConcurrent("hold concurrent project B");
+    provider.releaseConcurrent("hold concurrent worktree first");
+    provider.releaseConcurrent("hold concurrent worktree second");
+    provider.releaseConcurrent("hold concurrent consent gate");
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("pauses externally changed Tasks until Reload or Fork", async () => {
   test.setTimeout(60_000);
   const environment = await fixture();
@@ -1350,8 +1574,10 @@ test("pauses externally changed Tasks until Reload or Fork", async () => {
     await expect(timeline.getByRole("article").last()).toContainText("Settled");
     const reloadedEntries = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     const externalIndex = reloadedEntries.findIndex(({ id }) => id === externalId);
-    const resumedMarker = reloadedEntries.slice(externalIndex + 1).find((entry) => entry.customType === "pilot.run" && entry.data?.outcome === "running");
-    expect(resumedMarker).toMatchObject({ parentId: externalId, data: { inputKind: "prompt", input: "continue after reload" } });
+    const scheduledMarker = reloadedEntries.slice(externalIndex + 1).find((entry) => entry.customType === "pilot.run" && entry.data?.outcome === "queued");
+    expect(scheduledMarker).toMatchObject({ parentId: externalId, data: { inputKind: "prompt", input: "continue after reload" } });
+    const resumedMarker = reloadedEntries.slice(externalIndex + 1).find((entry) => entry.customType === "pilot.run" && entry.data?.outcome === "running" && entry.data?.runId === scheduledMarker.data.runId);
+    expect(resumedMarker).toMatchObject({ parentId: scheduledMarker.id });
     expect(reloadedEntries.find((entry) => entry.type === "message" && entry.parentId === resumedMarker.id)?.message.role).toBe("user");
 
     await prompt.fill("run abort tool");
@@ -1469,7 +1695,7 @@ test("reopens a process-terminated Run as Interrupted without replay", async () 
     await terminate(app);
 
     app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
-    await app.window.locator(".task-section").first().locator(".task-title-button").first().click();
+    await app.window.getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button").first().click();
     let timeline = app.window.getByRole("region", { name: "Run timeline" });
     await expect(timeline.getByRole("article").last()).toContainText("Interrupted");
     await expect(timeline.getByRole("article").last()).toContainText("abort model");
@@ -1485,7 +1711,7 @@ test("reopens a process-terminated Run as Interrupted without replay", async () 
     await terminate(app);
 
     app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
-    await app.window.locator(".task-section").first().locator(".task-title-button").first().click();
+    await app.window.getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button").first().click();
     timeline = app.window.getByRole("region", { name: "Run timeline" });
     const interrupted = timeline.getByRole("article").last();
     await expect(interrupted).toContainText("Interrupted");
@@ -2621,7 +2847,7 @@ test("applies and persists PiLot appearance preferences", async () => {
   try {
     await second.window.getByRole("button", { name: "Settings" }).click();
     await expect(second.window.getByRole("radio", { name: "Dark" })).toBeChecked();
-    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark", expandThinking: false, preferredTerminal: "system" });
+    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark", expandThinking: false, globalRunCap: 4, preferredTerminal: "system" });
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8").catch(() => "{}"))).toEqual({});
   } finally {
     await close(second);

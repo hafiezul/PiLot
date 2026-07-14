@@ -4,7 +4,7 @@ import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPreferences, saveAppearance, saveExpandThinking, savePreferredApplication, savePreferredTerminal } from "./preferences.js";
+import { loadPreferences, saveAppearance, saveExpandThinking, saveGlobalRunCap, savePreferredApplication, savePreferredTerminal } from "./preferences.js";
 import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectsState, getTaskCreation, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { RunCoordinator } from "./runs.js";
@@ -16,7 +16,7 @@ import { getApplicationState, getConfiguredEditor, getTerminalState } from "./ed
 import { createTaskWorktreeBranch, getTaskWorktreeState, openTaskWorktreeTerminal, removeManagedWorktree, WorktreeSetupCoordinator } from "./worktrees.js";
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
 import { applicationIds, type ApplicationId } from "../shared/editors.js";
-import type { Appearance, Preferences } from "../shared/preferences.js";
+import { DEFAULT_GLOBAL_RUN_CAP, type Appearance, type Preferences } from "../shared/preferences.js";
 import { CHANGE_STATUSES, type ChangeStatus, type ImageAttachment, type TaskCreationRequest, type TaskWorktreeFile, type ThinkingLevel } from "../shared/projects.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -29,7 +29,7 @@ const changeStatuses = new Set<ChangeStatus>(CHANGE_STATUSES);
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
 
-let preferences: Preferences = { appearance: "system", expandThinking: false, preferredTerminal: "system" };
+let preferences: Preferences = { appearance: "system", expandThinking: false, globalRunCap: DEFAULT_GLOBAL_RUN_CAP, preferredTerminal: "system" };
 const actionMenuItems = new Map<DesktopActionId, Electron.MenuItem>();
 
 function invokeRendererAction(id: DesktopActionId, target?: Electron.BaseWindow) {
@@ -157,6 +157,9 @@ app.whenReady().then(async () => {
   nativeTheme.on("updated", updateWindowChrome);
 
   createApplicationMenu();
+  const runs = new RunCoordinator(app.getPath("userData"), getAgentDir(), (state) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:run-event", state);
+  }, preferences.globalRunCap);
   ipcMain.on("actions:set-state", (_event, states: unknown) => {
     if (!Array.isArray(states) || states.some((state) => !state || typeof state !== "object"
       || typeof (state as DesktopActionState).id !== "string" || !desktopActionIds.has((state as DesktopActionState).id)
@@ -182,6 +185,11 @@ app.whenReady().then(async () => {
     preferences = await saveExpandThinking(app.getPath("userData"), expand);
     return preferences;
   });
+  ipcMain.handle("preferences:set-global-run-cap", async (_event, limit: unknown) => {
+    preferences = await saveGlobalRunCap(app.getPath("userData"), limit);
+    runs.setRunLimit(preferences.globalRunCap);
+    return preferences;
+  });
   ipcMain.handle("terminals:get", () => getTerminalState(preferences.preferredTerminal));
   ipcMain.handle("terminals:set-preferred", async (_event, terminal: unknown) => {
     preferences = await savePreferredTerminal(app.getPath("userData"), terminal);
@@ -194,10 +202,21 @@ app.whenReady().then(async () => {
   ipcMain.handle("providers:logout", (_event, provider: string) => logout(provider));
   ipcMain.handle("providers:oauth-reply", (_event, value?: string) => respondToOAuth(value));
 
-  const projectState = async () => getProjectsState(app.getPath("userData"), getAgentDir());
-  const runs = new RunCoordinator(app.getPath("userData"), getAgentDir(), (state) => {
-    for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:run-event", state);
-  });
+  const projectState = async () => {
+    const state = await getProjectsState(app.getPath("userData"), getAgentDir());
+    const withLiveRuns = (project: NonNullable<typeof state.selected>) => ({
+      ...project,
+      tasks: project.tasks.map((task) => {
+        const runStatus = runs.getLiveRunStatus(task.path);
+        return runStatus ? { ...task, runStatus } : task;
+      }),
+    });
+    const projects = state.projects.map(withLiveRuns);
+    const selected = state.selected
+      ? projects.find(({ path: projectPath }) => projectPath === state.selected!.path) ?? withLiveRuns(state.selected)
+      : undefined;
+    return { projects, ...(selected ? { selected } : {}) };
+  };
   const setups = new WorktreeSetupCoordinator(getAgentDir(), (state) => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:setup-event", state);
   });
@@ -259,10 +278,16 @@ app.whenReady().then(async () => {
     if (!projectPath) return projectState();
     return addProject(app.getPath("userData"), getAgentDir(), projectPath);
   });
-  ipcMain.handle("projects:select", async (_event, projectPath: unknown) =>
-    selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
-  ipcMain.handle("projects:remove", async (_event, projectPath: unknown) =>
-    removeProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
+  ipcMain.handle("projects:select", async (_event, projectPath: unknown) => {
+    await selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath));
+    return projectState();
+  });
+  ipcMain.handle("projects:remove", async (_event, projectPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    await removeProject(app.getPath("userData"), getAgentDir(), project);
+    await runs.abortProject(project);
+    return projectState();
+  });
   ipcMain.handle("tasks:get-creation", async (_event, projectPath: unknown) =>
     getTaskCreation(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
   ipcMain.handle("tasks:create", async (_event, projectPath: unknown, request: unknown) =>
@@ -440,7 +465,10 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("projects:set-execution-consent", async (_event, projectPath: unknown, consent: unknown) => {
     if (typeof consent !== "boolean") throw new Error("An execution consent decision is required");
-    return setExecutionConsent(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), consent);
+    const project = requireProjectPath(projectPath);
+    await setExecutionConsent(app.getPath("userData"), getAgentDir(), project, consent);
+    if (!consent) await runs.abortProject(project);
+    return projectState();
   });
   createWindow();
   app.on("activate", () => {

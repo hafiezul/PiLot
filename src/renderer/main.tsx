@@ -2,12 +2,40 @@ import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, us
 import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
 import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
-import type { Appearance } from "../shared/preferences";
+import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
+
+type TaskAttentionStatus = "running" | "waiting" | "failed" | "interrupted";
+
+function taskRunStatus(task: TaskSummary, state?: TaskRunState): RunStatus | undefined {
+  return state?.runs.find(({ id }) => id === state.activeRunId)?.status ?? state?.runs.at(-1)?.status ?? task.runStatus;
+}
+
+function taskAttentionStatus(task: TaskSummary, state?: TaskRunState): TaskAttentionStatus | undefined {
+  const status = taskRunStatus(task, state);
+  if (status === "queued") return "waiting";
+  if (status === "preparing" || status === "running" || status === "retrying" || status === "compacting") return "running";
+  return status === "failed" || status === "interrupted" ? status : undefined;
+}
+
+const taskStatusPresentation: Record<TaskAttentionStatus, { label: string; symbol: string }> = {
+  running: { label: "Running", symbol: "▶" },
+  waiting: { label: "Waiting", symbol: "◷" },
+  failed: { label: "Failed", symbol: "!" },
+  interrupted: { label: "Interrupted", symbol: "‖" },
+};
+
+function TaskStateIndicator({ status }: { status?: TaskAttentionStatus }) {
+  if (!status) return null;
+  const presentation = taskStatusPresentation[status];
+  return <span className={`task-state task-state-${status}`} aria-label={`Task status: ${presentation.label}`}>
+    <span aria-hidden="true">{presentation.symbol}</span><span>{presentation.label}</span>
+  </span>;
+}
 
 function ProviderSettings({ onChange }: { onChange(): void }) {
   const [state, setState] = useState<ProviderState>();
@@ -273,7 +301,7 @@ function CompleteOutput({ path }: { path?: string }) {
 }
 
 function CommandBlock({ item }: { item: CommandEvidence }) {
-  const status = item.status[0].toUpperCase() + item.status.slice(1);
+  const status = item.status === "queued" ? "Waiting" : item.status[0].toUpperCase() + item.status.slice(1);
   return <section className={`command-block ${item.status}`} role="region" aria-label={`Command: ${item.command}`}>
     <header><code>$ {item.command}</code><span>{status}</span></header>
     <p className="context-semantics">{item.includeInContext ? "Included in next Pi context" : "Local only — not sent to Pi"}</p>
@@ -325,7 +353,7 @@ function CompactionBlock({ item }: { item: CompactionEvidence }) {
 }
 
 function RunBlock({ run, index, expandThinking, changePaths, onOpenChange }: { run: RunEvidence; index: number; expandThinking: boolean; changePaths: string[]; onOpenChange(path: string): void }) {
-  const status = run.status[0].toUpperCase() + run.status.slice(1);
+  const status = run.status === "queued" ? "Waiting" : run.status[0].toUpperCase() + run.status.slice(1);
   const title = run.input.kind === "command" ? "Inline command" : run.input.kind === "compaction" ? "Context compaction" : "Agent run";
   return <article className={`run-evidence ${run.status}`} aria-labelledby={`run-${run.id}`}>
     <header className="run-heading">
@@ -1195,10 +1223,15 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   const imageDragDepth = useRef(0);
   const forkReturnFocus = useRef<HTMLElement | null>(null);
   const currentTaskPath = useRef(task.path);
+  const modelRequestSequence = useRef(0);
   currentTaskPath.current = task.path;
   const completionListId = useId();
   const imageHelpId = useId();
-  const updateModelState = (next: TaskModelState) => { setModelState(next); onDetails(next); };
+  const applyModelState = (next: TaskModelState) => { setModelState(next); onDetails(next); };
+  const updateModelState = (next: TaskModelState) => {
+    modelRequestSequence.current += 1;
+    applyModelState(next);
+  };
   const refreshDetails = () => window.pilot.getTaskModel(project.path, task.path).then(updateModelState);
 
   useEffect(() => {
@@ -1220,6 +1253,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   useLayoutEffect(() => {
     let cancelled = false;
     let receivedRunEvent = false;
+    const modelRequest = ++modelRequestSequence.current;
     setTimeline(undefined);
     setResources(undefined);
     setImages([]);
@@ -1243,7 +1277,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       if (cancelled) return;
       if (!receivedRunEvent) setTimeline(next);
       setExpandThinking(preferences.expandThinking);
-      updateModelState(model);
+      if (modelRequest === modelRequestSequence.current) applyModelState(model);
     }).catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
     void window.pilot.getTaskResources(project.path, task.path).then((taskResources) => {
       if (!cancelled) {
@@ -1329,6 +1363,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
 
   const activeRun = timeline?.runs.find(({ id }) => id === timeline.activeRunId);
   const active = Boolean(activeRun);
+  const waitingForCapacity = activeRun?.status === "queued";
   const setupBlocked = Boolean(setupState && setupState.status !== "succeeded" && setupState.status !== "bypassed");
   const externallyChanged = Boolean(timeline?.externalChange);
   const interrupted = !externallyChanged && timeline?.runs.at(-1)?.status === "interrupted";
@@ -1357,7 +1392,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     onContinuityChange(externallyChanged);
     return () => onContinuityChange(false);
   }, [externallyChanged, onContinuityChange]);
-  const live = activeRun?.input.kind === "prompt";
+  const live = activeRun?.input.kind === "prompt" && !waitingForCapacity;
   const liveReady = live && activeRun.status === "running";
   const beforeCursor = draft.slice(0, cursor);
   const slashMatch = beforeCursor.match(/^\/([^\s]*)$/);
@@ -1460,12 +1495,13 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       </div>
     </section>}
     <section className="run-timeline" aria-label="Run timeline">
-      <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active || externallyChanged} onClick={() => {
+      <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{waitingForCapacity ? "Waiting for capacity" : active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active || externallyChanged} onClick={() => {
         setError("");
         onActionStart();
         void window.pilot.compactTask(project.path, task.path).then(async () => { await refreshDetails(); onHistoryChange(); }).catch((reason) => onError(reason, "Add more Task history or check provider access, then try compacting again."));
       }} data-action="run.compact">Compact context</button></div></div>
       {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
+      {waitingForCapacity && <p className="queue-position" role="status"><strong>Waiting for capacity.</strong> Queue position {timeline?.queuePosition ?? 1} · global limit {timeline?.runLimit ?? 4} active Runs.</p>}
       {interrupted && <section className="interrupted-recovery" role="status" aria-label="Interrupted Run recovery"><strong>Run interrupted</strong><p>PiLot did not retry the interrupted input. Review the timeline and Changes before continuing.</p></section>}
       {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
       {error && <p className="error" role="alert">{error}</p>}
@@ -1509,7 +1545,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       void attachFiles([...event.dataTransfer.files]);
     }} onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
       {imageDragActive && <div className="image-drop-feedback" aria-hidden="true"><span>＋</span> Drop images to attach</div>}
-      <label htmlFor="task-prompt">{externallyChanged ? "Prompts paused — choose Reload or Fork" : setupBlocked ? "Finish Worktree setup before the first Run" : live ? "Guide the active Run" : "Prompt or inline command"}</label>
+      <label htmlFor="task-prompt">{externallyChanged ? "Prompts paused — choose Reload or Fork" : waitingForCapacity ? "Run waiting for capacity" : setupBlocked ? "Finish Worktree setup before the first Run" : live ? "Guide the active Run" : "Prompt or inline command"}</label>
       {resources?.diagnostics.length ? <section className="resource-diagnostics" aria-label="Pi resource diagnostics">
         {resources.diagnostics.map((diagnostic, index) => <p key={`${diagnostic.path ?? "resource"}-${index}`} className={diagnostic.severity}><strong>Pi resource {diagnostic.severity}:</strong> {diagnostic.message}{diagnostic.path && <code>{diagnostic.path}</code>}</p>)}
       </section> : null}
@@ -1621,6 +1657,72 @@ function RemovedWorktreeTaskPage({ task, onCreate }: { task: TaskSummary; onCrea
   </div>;
 }
 
+function CommandCenter({ startup, projects, runStates, onOpenTask, onCreateTask }: {
+  startup?: StartupState;
+  projects?: ProjectsState;
+  runStates: Record<string, TaskRunState>;
+  onOpenTask(projectPath: string, taskPath: string): void;
+  onCreateTask(): void;
+}) {
+  const tasks = (projects?.projects ?? []).flatMap((project) => project.tasks
+    .filter(({ lifecycle, execution }) => lifecycle === "active" && !(execution.kind === "worktree" && execution.removedAt))
+    .map((task) => ({ project, task, status: taskAttentionStatus(task, runStates[task.path]) })));
+  const attention = tasks.filter((item): item is typeof item & { status: TaskAttentionStatus } => Boolean(item.status));
+  const groups: Array<{ status: TaskAttentionStatus; label: string }> = [
+    { status: "interrupted", label: "Interrupted" },
+    { status: "failed", label: "Failed" },
+    { status: "waiting", label: "Waiting" },
+    { status: "running", label: "Running" },
+  ];
+  const recent = [...tasks].sort((left, right) => right.task.modified.localeCompare(left.task.modified)).slice(0, 8);
+
+  return <div className="command-center-page">
+    <header className="topbar command-center-topbar">
+      <div><h1>Command center</h1><p>Runs and Tasks across your Projects.</p></div>
+      <div className="command-center-actions">
+        {projects?.selected?.admitted && projects.selected.executionConsent && <button type="button" className="new-task-button" data-action="task.new" onClick={onCreateTask}>New Task</button>}
+        <span className="privacy"><i /> Local only</span>
+      </div>
+    </header>
+    {attention.length > 0 ? <section className="attention-overview" aria-label="Task attention overview">
+      <header><h2>Current work</h2><p>Attention and active Runs, ordered by consequence.</p></header>
+      {groups.map(({ status, label }) => {
+        const items = attention.filter((item) => item.status === status);
+        if (!items.length) return null;
+        return <section key={status} className={`attention-group attention-${status}`} aria-label={`${label} Tasks`}>
+          <div className="attention-group-heading"><h3>{label}</h3><span>{items.length}</span></div>
+          <ul>{items.map(({ project, task }) => <li key={task.path}>
+            <button type="button" onClick={() => onOpenTask(project.path, task.path)}>
+              <TaskStateIndicator status={status} />
+              <span className="attention-task-copy"><strong>{task.title}</strong><small>{project.name}</small></span>
+              <span className="attention-location">{task.execution.kind === "worktree" ? "Worktree" : "Local"}</span>
+            </button>
+          </li>)}</ul>
+        </section>;
+      })}
+    </section> : recent.length > 0 ? <section className="recent-tasks" aria-label="Recent Tasks">
+      <header><h2>Recent Tasks</h2><p>Nothing needs attention. Continue where you left off.</p></header>
+      <ul>{recent.map(({ project, task }) => <li key={task.path}><button type="button" onClick={() => onOpenTask(project.path, task.path)}>
+        <span><strong>{task.title}</strong><small>{project.name} · {task.execution.kind === "worktree" ? "Worktree" : "Local"}</small></span>
+        <time dateTime={task.modified}>{new Date(task.modified).toLocaleDateString()}</time>
+      </button></li>)}</ul>
+    </section> : null}
+
+    {!startup ? <p role="status" className="loading">Checking your Pi environment…</p>
+      : startup.gaps.length > 0 ? <section className="readiness command-readiness" aria-labelledby="readiness-title" tabIndex={0}>
+        <p className="eyebrow">Action required</p>
+        <h2 id="readiness-title">Readiness</h2>
+        <p className="muted">Resolve these items before starting a Task.</p>
+        <ol>{startup.gaps.map((gap) => <li key={gap.area}><span className="gap-mark" aria-hidden="true">!</span><div><h3>{gap.title}</h3><p>{gap.detail}</p></div></li>)}</ol>
+      </section> : !attention.length && !recent.length ? <section className="ready" aria-label={`${startup.passed} readiness checks passed`}>
+        <span className="ready-mark" aria-hidden="true">✓</span>
+        <p className="eyebrow">Environment ready</p>
+        <h2>Ready to work</h2>
+        <p className="muted">Your provider, shell, and Pi environment are ready.</p>
+      </section> : null}
+  </div>;
+}
+
 function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revision, historyDraft, changePaths, onSelectTask, onCreateTask, onForkTask, onOpenAccess, onChange, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onSetupChange, onContinuityChange, onActionStart, onError }: {
   project: ProjectAccess;
   needsAccess: boolean;
@@ -1681,6 +1783,10 @@ function applyAppearance(appearance: Appearance) {
 function GeneralSettings() {
   const [appearance, setAppearance] = useState<Appearance>();
   const [expandThinking, setExpandThinking] = useState(false);
+  const [globalRunCap, setGlobalRunCap] = useState<string>();
+  const [savedGlobalRunCap, setSavedGlobalRunCap] = useState(4);
+  const [runCapSaving, setRunCapSaving] = useState(false);
+  const [runCapError, setRunCapError] = useState("");
   const [terminals, setTerminals] = useState<TerminalState>();
   const [terminalSaving, setTerminalSaving] = useState(false);
   const [terminalError, setTerminalError] = useState("");
@@ -1688,10 +1794,30 @@ function GeneralSettings() {
     void window.pilot.getPreferences().then((value) => {
       setAppearance(value.appearance);
       setExpandThinking(value.expandThinking);
+      setGlobalRunCap(String(value.globalRunCap));
+      setSavedGlobalRunCap(value.globalRunCap);
       applyAppearance(value.appearance);
     });
     void window.pilot.getTerminalState().then(setTerminals).catch((reason) => setTerminalError(reason instanceof Error ? reason.message : String(reason)));
   }, []);
+  const saveRunCap = () => {
+    const limit = Number(globalRunCap);
+    if (!Number.isInteger(limit) || limit < MINIMUM_GLOBAL_RUN_CAP || limit > MAXIMUM_GLOBAL_RUN_CAP) {
+      setRunCapError(`Choose a whole number from ${MINIMUM_GLOBAL_RUN_CAP} to ${MAXIMUM_GLOBAL_RUN_CAP}.`);
+      setGlobalRunCap(String(savedGlobalRunCap));
+      return;
+    }
+    if (limit === savedGlobalRunCap || runCapSaving) return;
+    setRunCapError("");
+    setRunCapSaving(true);
+    void window.pilot.setGlobalRunCap(limit).then((next) => {
+      setGlobalRunCap(String(next.globalRunCap));
+      setSavedGlobalRunCap(next.globalRunCap);
+    }).catch((reason) => {
+      setGlobalRunCap(String(savedGlobalRunCap));
+      setRunCapError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => setRunCapSaving(false));
+  };
 
   return <section className="general-settings" aria-labelledby="general-title">
     <p className="eyebrow">Application</p>
@@ -1707,6 +1833,14 @@ function GeneralSettings() {
         }} />
         <span><strong>{value[0].toUpperCase() + value.slice(1)}</strong><small>{value === "system" ? "Follow your operating system" : `Always use ${value} appearance`}</small></span>
       </label>)}
+    </fieldset>
+    <fieldset className="run-cap-setting" disabled={globalRunCap === undefined || runCapSaving} aria-busy={runCapSaving}>
+      <legend>Concurrent Runs</legend>
+      <label>
+        <span><strong>Active Run limit</strong><small>Additional starts wait in order until capacity is available.</small></span>
+        <input type="number" aria-label="Active Run limit" min={MINIMUM_GLOBAL_RUN_CAP} max={MAXIMUM_GLOBAL_RUN_CAP} step="1" inputMode="numeric" value={globalRunCap ?? ""} onChange={(event) => setGlobalRunCap(event.target.value)} onBlur={saveRunCap} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+      </label>
+      {runCapError && <p className="error run-cap-error" role="alert">Could not update the active Run limit: {runCapError}</p>}
     </fieldset>
     <fieldset className="terminal-setting" disabled={!terminals || terminalSaving}>
       <legend>External terminal</legend>
@@ -1888,6 +2022,8 @@ function App() {
   const [state, setState] = useState<StartupState>();
   const [projects, setProjects] = useState<ProjectsState>();
   const [selectedTaskPath, setSelectedTaskPath] = useState<string>();
+  const [showHome, setShowHome] = useState(true);
+  const [runStates, setRunStates] = useState<Record<string, TaskRunState>>({});
   const [showSettings, setShowSettings] = useState(false);
   const [settingsDestination, setSettingsDestination] = useState<"general" | "providers">("general");
   const [showProjectAccess, setShowProjectAccess] = useState(false);
@@ -1925,7 +2061,10 @@ function App() {
   const updateProjectAccess = useCallback((next: ProjectsState) => {
     setProjects(next);
     const selected = next.selected;
-    if (selected?.executionConsent && (!selected.resourceTrust.required || selected.resourceTrust.decision !== null)) setShowProjectAccess(false);
+    if (selected?.executionConsent && (!selected.resourceTrust.required || selected.resourceTrust.decision !== null)) {
+      setShowProjectAccess(false);
+      setShowHome(false);
+    }
   }, []);
   const createTaskFromRequest = useCallback(async (request: TaskCreationRequest) => {
     const project = projects?.selected;
@@ -1935,6 +2074,7 @@ function App() {
     setProjects(await window.pilot.getProjects());
     setTaskDetails(undefined);
     setSelectedTaskPath(task.path);
+    setShowHome(false);
   }, [projects?.selected?.path]);
   const createSelectedTask = useCallback(async (returnFocus?: HTMLElement | null) => {
     const project = projects?.selected;
@@ -1978,12 +2118,31 @@ function App() {
   const reportActionError = useCallback((reason: unknown, recovery: string) => {
     setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery });
   }, []);
+  const refreshTaskProjection = useCallback((taskPath: string) => {
+    setRunStates((current) => {
+      const next = { ...current };
+      delete next[taskPath];
+      return next;
+    });
+    setTaskRevision((value) => value + 1);
+    void window.pilot.getProjects().then(setProjects).catch((reason) => reportActionError(reason, "Reload the Project to refresh Task state."));
+  }, [reportActionError]);
+  const openTaskFromHome = useCallback((projectPath: string, taskPath: string) => {
+    setActionError(undefined);
+    void window.pilot.selectProject(projectPath).then((next) => {
+      setProjects(next);
+      setTaskDetails(undefined);
+      setSelectedTaskPath(taskPath);
+      setShowHome(false);
+    }).catch((reason) => reportActionError(reason, "Reload the Project list and try opening the Task again."));
+  }, [reportActionError]);
   const handleRunChange = useCallback((active: boolean) => setRunActive(active), []);
   const handleSetupChange = useCallback((active: boolean) => setSetupActive(active), []);
   const handleContinuityChange = useCallback((changed: boolean) => setTaskExternallyChanged(changed), []);
 
   const selectedProject = projects?.selected;
-  const selectedTask = selectedProject?.tasks.find(({ path }) => path === selectedTaskPath);
+  const surfaceProject = showHome ? undefined : selectedProject;
+  const selectedTask = surfaceProject?.tasks.find(({ path }) => path === selectedTaskPath);
   const removedWorktreeAt = selectedTask?.execution.kind === "worktree" ? selectedTask.execution.removedAt : undefined;
   const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
   const workspaceAvailable = !showSettings;
@@ -2028,7 +2187,7 @@ function App() {
   const unavailable = (reason: string) => ({ enabled: false, reason });
   const availability: ActionAvailability = {
     "project.add": workspaceAvailable ? { enabled: true } : unavailable("Return to the command center to add a Project"),
-    "task.new": taskAvailable || Boolean(workspaceAvailable && selectedProject && !needsProjectAccess) ? { enabled: true } : unavailable("Select a Project with access enabled"),
+    "task.new": taskAvailable || Boolean(workspaceAvailable && selectedProject?.admitted && !needsProjectAccess) ? { enabled: true } : unavailable("Select a Project with access enabled"),
     "task.exportJsonl": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
     "task.exportHtml": taskAvailable && !runActive ? { enabled: true } : unavailable(runActive ? "Stop the active Run first" : "Select a Task"),
     "task.archive": taskAvailable && !runActive && !setupActive && !taskExternallyChanged ? { enabled: true } : unavailable(taskExternallyChanged ? "Reload or fork the externally changed Task first" : setupActive ? "Stop Worktree setup first" : runActive ? "Stop the active Run first" : "Select a Task"),
@@ -2102,6 +2261,9 @@ function App() {
     window.addEventListener("keydown", openPalette);
     return () => window.removeEventListener("keydown", openPalette);
   }, []);
+  useEffect(() => window.pilot.onTaskRunEvent((next) => {
+    setRunStates((current) => ({ ...current, [next.taskPath]: next }));
+  }), []);
   useEffect(() => {
     refresh();
     void window.pilot.getPreferences().then((value) => applyAppearance(value.appearance));
@@ -2122,8 +2284,12 @@ function App() {
       <div className="shell">
         <nav aria-label="Projects and tasks" className="navigation">
           <header className="brand">
-            <span className="mark" aria-hidden="true">π</span>
-            <strong>PiLot</strong>
+            <button type="button" className="brand-home" aria-label="Open command center" aria-current={showHome ? "page" : undefined} onClick={() => {
+              setShowHome(true);
+              setSelectedTaskPath(undefined);
+              setTaskDetails(undefined);
+              setShowDetails(false);
+            }}><span className="mark" aria-hidden="true">π</span><strong>PiLot</strong></button>
           </header>
           <div className="nav-heading">
             <span>Projects</span>
@@ -2133,7 +2299,8 @@ function App() {
             <ul className="project-list">
               {projects.projects.map((project) => (
                 <li key={project.path}>
-                  <button aria-current={projects.selected?.path === project.path ? "page" : undefined} onClick={() => {
+                  <button aria-label={project.name} aria-current={!showHome && projects.selected?.path === project.path ? "page" : undefined} onClick={() => {
+                    setShowHome(false);
                     setSelectedTaskPath(undefined);
                     setTaskDetails(undefined);
                     void window.pilot.selectProject(project.path).then(setProjects).catch((reason) => reportActionError(reason, "Reload the Project list and try selecting it again."));
@@ -2143,7 +2310,12 @@ function App() {
                     <small>{project.taskCount}</small>
                   </button>
                   {projects.selected?.path === project.path && <ul className="task-nav-list" aria-label={`Active Tasks in ${project.name}`}>
-                    {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => <li key={task.path}><button aria-current={selectedTaskPath === task.path ? "page" : undefined} onClick={() => { setTaskDetails(undefined); setSelectedTaskPath(task.path); }}>{task.title}</button></li>)}
+                    {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => {
+                      const status = taskAttentionStatus(task, runStates[task.path]);
+                      return <li key={task.path}><button aria-current={!showHome && selectedTaskPath === task.path ? "page" : undefined} onClick={() => { setShowHome(false); setTaskDetails(undefined); setSelectedTaskPath(task.path); }}>
+                        <span className="task-nav-title">{task.title}</span><TaskStateIndicator status={status} />
+                      </button></li>;
+                    })}
                   </ul>}
                 </li>
               ))}
@@ -2158,8 +2330,8 @@ function App() {
         </nav>
 
         <main id="content" className="workspace-main">
-          {selectedProject ? <ProjectPage
-            project={selectedProject}
+          {surfaceProject ? <ProjectPage
+            project={surfaceProject}
             needsAccess={needsProjectAccess}
             selectedTaskPath={selectedTaskPath}
             reloadToken={reloadToken}
@@ -2169,7 +2341,7 @@ function App() {
             onSelectTask={(path) => {
               setTaskDetails(undefined);
               setSelectedTaskPath(path);
-              const task = selectedProject.tasks.find((candidate) => candidate.path === path);
+              const task = surfaceProject.tasks.find((candidate) => candidate.path === path);
               if (task?.execution.kind === "worktree" && task.execution.removedAt) {
                 detailsReturnFocus.current = null;
                 setInspectorView("history");
@@ -2190,7 +2362,7 @@ function App() {
             onOpenAccess={() => setShowProjectAccess(true)}
             onChange={setProjects}
             onDetails={setTaskDetails}
-            onHistoryChange={() => setTaskRevision((value) => value + 1)}
+            onHistoryChange={() => { if (selectedTaskPath) refreshTaskProjection(selectedTaskPath); }}
             onOpenSettings={openProviderSettings}
             onOpenChange={openChange}
             onRunChange={handleRunChange}
@@ -2198,49 +2370,16 @@ function App() {
             onContinuityChange={handleContinuityChange}
             onActionStart={clearActionError}
             onError={reportActionError}
-          /> : <>
-            <header className="topbar">
-              <div>
-                <span className="eyebrow">Command center</span>
-                <h1>Good to have you here.</h1>
-              </div>
-              <span className="privacy"><i /> Local only</span>
-            </header>
-
-            {!state ? (
-              <p role="status" className="loading">Checking your Pi environment…</p>
-            ) : state.gaps.length === 0 ? (
-              <section className="ready" aria-label={`${state.passed} readiness checks passed`}>
-                <span className="ready-mark" aria-hidden="true">✓</span>
-                <p className="eyebrow">Environment ready</p>
-                <h2>Ready to work</h2>
-                <p className="muted">Your provider, shell, and Pi environment are ready.</p>
-              </section>
-            ) : (
-              <section className="readiness" aria-labelledby="readiness-title" tabIndex={0}>
-                <p className="eyebrow">Action required</p>
-                <h2 id="readiness-title">Readiness</h2>
-                <p className="muted">Resolve these items before starting a task.</p>
-                <ol>
-                  {state.gaps.map((gap) => (
-                    <li key={gap.area}>
-                      <span className="gap-mark" aria-hidden="true">!</span>
-                      <div><h3>{gap.title}</h3><p>{gap.detail}</p></div>
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            )}
-          </>}
+          /> : <CommandCenter startup={state} projects={projects} runStates={runStates} onOpenTask={openTaskFromHome} onCreateTask={() => void createSelectedTask()} />}
         </main>
 
         <aside aria-label="Inspector" className={`inspector${showDetails ? " details-visible" : ""}`}>
           <InspectorTabs selected={inspectorView} changeCount={taskChanges?.files.length ?? 0} historyPaths={taskHistory?.pathCount ?? 0} onSelect={setInspectorView} />
           <button type="button" className="inspector-close" aria-label="Close Inspector" onClick={closeDetails}>×</button>
           {inspectorView === "details" ? <div id="inspector-details-panel" className="inspector-body" role="tabpanel" aria-labelledby="inspector-details-tab">
-            {selectedProject ? needsProjectAccess ? <>
+            {surfaceProject ? needsProjectAccess ? <>
               <p className="eyebrow">Project</p>
-              <h2>{selectedProject.name}</h2>
+              <h2>{surfaceProject.name}</h2>
               <p className="muted inspector-note">Complete the open access decision to continue.</p>
             </> : selectedTask && removedWorktreeAt ? <section className="task-details" aria-label="Removed Task details">
               <p className="eyebrow">Archived Task</p>
@@ -2264,11 +2403,11 @@ function App() {
               </dl>
             </section> : <section className="project-details" aria-label="Project details">
               <p className="eyebrow">Project</p>
-              <h2>{selectedProject.name}</h2>
-              <p className="muted inspector-note">{selectedProject.path}</p>
+              <h2>{surfaceProject.name}</h2>
+              <p className="muted inspector-note">{surfaceProject.path}</p>
               <dl>
-                <div><dt>Active Tasks</dt><dd>{selectedProject.tasks.filter(({ lifecycle }) => lifecycle === "active").length}</dd></div>
-                <div><dt>Archived Tasks</dt><dd>{selectedProject.tasks.filter(({ lifecycle }) => lifecycle === "archived").length}</dd></div>
+                <div><dt>Active Tasks</dt><dd>{surfaceProject.tasks.filter(({ lifecycle }) => lifecycle === "active").length}</dd></div>
+                <div><dt>Archived Tasks</dt><dd>{surfaceProject.tasks.filter(({ lifecycle }) => lifecycle === "archived").length}</dd></div>
                 <div><dt>Execution location</dt><dd>Chosen per Task</dd></div>
               </dl>
             </section> : <>
@@ -2280,8 +2419,8 @@ function App() {
               </dl>
             </>}
           </div> : inspectorView === "changes" ? <div id="inspector-changes-panel" className="inspector-body changes-inspector-body" role="tabpanel" aria-labelledby="inspector-changes-tab">
-            {selectedProject && selectedTask && !removedWorktreeAt && !needsProjectAccess
-              ? <ChangesPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} changes={taskChanges} loadError={changesError} selectedPath={selectedChangePath} disabled={runActive || setupActive || taskExternallyChanged} onSelect={setSelectedChangePath} onWorktreeRemoved={(next) => {
+            {surfaceProject && selectedTask && !removedWorktreeAt && !needsProjectAccess
+              ? <ChangesPanel key={`${surfaceProject.path}:${selectedTask.path}`} project={surfaceProject} task={selectedTask} changes={taskChanges} loadError={changesError} selectedPath={selectedChangePath} disabled={runActive || setupActive || taskExternallyChanged} onSelect={setSelectedChangePath} onWorktreeRemoved={(next) => {
                 setProjects(next);
                 setSelectedTaskPath(undefined);
                 setTaskDetails(undefined);
@@ -2290,11 +2429,11 @@ function App() {
               }} />
               : <div className="changes-empty"><strong>Select a Task</strong><p>Choose an active Task to review its Git changes.</p></div>}
           </div> : <div id="inspector-history-panel" className="inspector-body history-inspector-body" role="tabpanel" aria-labelledby="inspector-history-tab">
-            {selectedProject && selectedTask && !needsProjectAccess
-              ? <HistoryPanel key={`${selectedProject.path}:${selectedTask.path}`} project={selectedProject} task={selectedTask} history={taskHistory} loadError={historyError} disabled={runActive || setupActive || taskExternallyChanged} readOnly={Boolean(removedWorktreeAt)} onChange={setTaskHistory} onNavigate={(editorText) => {
+            {surfaceProject && selectedTask && !needsProjectAccess
+              ? <HistoryPanel key={`${surfaceProject.path}:${selectedTask.path}`} project={surfaceProject} task={selectedTask} history={taskHistory} loadError={historyError} disabled={runActive || setupActive || taskExternallyChanged} readOnly={Boolean(removedWorktreeAt)} onChange={setTaskHistory} onNavigate={(editorText) => {
                 setTaskDetails(undefined);
                 setHistoryDraft((current) => ({ taskPath: selectedTask.path, text: editorText ?? "", version: (current?.version ?? 0) + 1 }));
-                setTaskRevision((value) => value + 1);
+                refreshTaskProjection(selectedTask.path);
               }} onTaskCreated={async (result) => {
                 setProjects(await window.pilot.getProjects());
                 setTaskDetails(undefined);
