@@ -307,10 +307,74 @@ test("invokes native actions through menus and the Command Palette", async () =>
     const palette = app.window.getByRole("dialog", { name: "Command Palette" });
     await expect(palette).toBeVisible();
     const actions = palette.getByRole("listbox", { name: "Actions" });
-    await expect(actions.getByRole("option", { name: /Open Command Palette/ })).toContainText(process.platform === "darwin" ? "⇧⌘P" : "Ctrl+Shift+P");
-    await palette.getByRole("combobox", { name: "Search actions" }).press("Escape");
+    const actionSearch = palette.getByRole("combobox", { name: "Search actions" });
+    await expect(actions.getByRole("option", { name: /Open Command Palette/ })).toHaveCount(0);
+    await expect(app.window.getByRole("button", { name: /Command Palette/ })).toContainText(process.platform === "darwin" ? "⇧⌘P" : "Ctrl+Shift+P");
+    await expect(actions.getByText("Available now · File", { exact: true })).toBeVisible();
+    await expect(actions.getByText("Available now · Task", { exact: true })).toBeVisible();
+    await expect(actions.getByText("Available now · Run", { exact: true })).toBeVisible();
+    await expect(actions.getByText("Available now · View", { exact: true })).toBeVisible();
+    await expect(actions.getByText("Unavailable · Run", { exact: true })).toBeVisible();
+    const availabilityOrder = await actions.getByRole("option").evaluateAll((options) => options.map((option) => option.getAttribute("aria-disabled")));
+    expect(availabilityOrder).toEqual([...availabilityOrder].sort());
+    expect(await actions.getByRole("option").evaluateAll((options) => options.map((option) => (option as HTMLElement).tabIndex))).toEqual(Array(13).fill(-1));
+    const paletteContrast = (appearance: "light" | "dark") => app.window.evaluate((nextAppearance) => {
+      document.documentElement.dataset.appearance = nextAppearance;
+      const parse = (value: string) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+      const luminance = (value: string) => {
+        const channels = parse(value).map((channel) => {
+          const normalized = channel / 255;
+          return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+        });
+        return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+      };
+      const ratio = (left: string, right: string) => {
+        const values = [luminance(left), luminance(right)].sort((a, b) => b - a);
+        return (values[0] + 0.05) / (values[1] + 0.05);
+      };
+      const paletteElement = document.querySelector<HTMLElement>(".command-palette")!;
+      const selected = paletteElement.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')!;
+      const input = paletteElement.querySelector<HTMLInputElement>('input[type="search"]')!;
+      const paletteBackground = getComputedStyle(paletteElement).backgroundColor;
+      return {
+        selectedText: ratio(getComputedStyle(selected).color, getComputedStyle(selected).backgroundColor),
+        focusRing: ratio(getComputedStyle(input).outlineColor, paletteBackground),
+        placeholder: ratio(getComputedStyle(input, "::placeholder").color, paletteBackground),
+      };
+    }, appearance);
+    for (const appearance of ["light", "dark"] as const) {
+      const contrast = await paletteContrast(appearance);
+      expect(contrast.selectedText).toBeGreaterThanOrEqual(4.5);
+      expect(contrast.focusRing).toBeGreaterThanOrEqual(3);
+      expect(contrast.placeholder).toBeGreaterThanOrEqual(4.5);
+    }
+    await app.window.evaluate(() => { document.documentElement.dataset.appearance = "system"; });
+    await actionSearch.fill("stop run");
+    await expect(actionSearch).not.toHaveAttribute("aria-activedescendant");
+    await actionSearch.press("Enter");
+    await expect(palette).toBeVisible();
+    await actionSearch.fill("");
+    await actionSearch.press("End");
+    await expect(actions.locator('[aria-selected="true"]')).toHaveAttribute("aria-disabled", "false");
+    await actionSearch.press("Home");
+    await expect(actions.locator('[aria-selected="true"]')).toHaveAttribute("aria-disabled", "false");
+    await actionSearch.fill("nw tsk");
+    await expect(actions.getByRole("option", { name: /New Task/ })).toBeVisible();
+    await actionSearch.fill("a");
+    const resultGroups = await actions.getByRole("group").evaluateAll((groups) => groups.map((group) => group.getAttribute("aria-label")));
+    expect(new Set(resultGroups).size).toBe(resultGroups.length);
+    await actionSearch.press("Escape");
     await expect(palette).toBeHidden();
     await expect(prompt).toBeFocused();
+
+    await app.window.setViewportSize({ width: 680, height: 520 });
+    await app.window.getByRole("button", { name: /Command Palette/ }).click();
+    const paletteBounds = await palette.boundingBox();
+    expect(paletteBounds).toBeTruthy();
+    expect(paletteBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(paletteBounds!.y + paletteBounds!.height).toBeLessThanOrEqual(520);
+    await app.window.keyboard.press("Escape");
+    await app.window.setViewportSize({ width: 1180, height: 760 });
 
     await app.window.keyboard.press(`${primary}+Shift+P`);
     await palette.getByRole("combobox", { name: "Search actions" }).fill("choose model");
@@ -331,7 +395,10 @@ test("invokes native actions through menus and the Command Palette", async () =>
     await palette.getByRole("combobox", { name: "Search actions" }).fill("show details");
     await palette.getByRole("option", { name: /Show Details/ }).click();
     await expect(app.window.getByRole("complementary", { name: "Inspector" })).toBeVisible();
-    await app.window.getByRole("button", { name: "Close Inspector" }).click();
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("hide details");
+    await palette.getByRole("option", { name: /Hide Details/ }).click();
+    await expect(app.window.getByRole("complementary", { name: "Inspector" })).toBeHidden();
     await expect(prompt).toBeFocused();
     await app.window.setViewportSize({ width: 1180, height: 760 });
 
@@ -350,6 +417,8 @@ test("invokes native actions through menus and the Command Palette", async () =>
     const activeTasks = app.window.getByRole("list", { name: /Active Tasks in/ }).getByRole("button");
     await expect(activeTasks).toHaveCount(2);
     await app.window.keyboard.press(`${primary}+Shift+P`);
+    await expect(palette).toBeVisible();
+    await expect(palette.getByRole("combobox", { name: "Search actions" })).toBeFocused();
     await palette.getByRole("combobox", { name: "Search actions" }).fill("new task");
     await expect(palette.getByRole("option", { name: /New Task/ })).toContainText(process.platform === "darwin" ? "⌘N" : "Ctrl+N");
     await palette.getByRole("option", { name: /New Task/ }).click();
@@ -363,6 +432,47 @@ test("invokes native actions through menus and the Command Palette", async () =>
   } finally {
     await close(app);
     await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("hides current-surface actions from the Command Palette", async () => {
+  const environment = await fixture();
+  const app = await launch(environment.agentDir);
+  const primary = process.platform === "darwin" ? "Meta" : "Control";
+  try {
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    await app.window.keyboard.press(`${primary}+Shift+P`);
+    const palette = app.window.getByRole("dialog", { name: "Command Palette" });
+    await expect(palette).toBeVisible();
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("settings");
+    await expect(palette.getByRole("option", { name: /^Settings/ })).toHaveCount(0);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("surfaces and dismisses native action failures", async () => {
+  const environment = await fixture();
+  const app = await launch(environment.agentDir, false, {
+    PILOT_TEST_PROJECT_DIR: environment.project,
+    PILOT_TEST_EXPORT_DIR: path.join(environment.root, "missing", "directory"),
+  });
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    await app.window.getByRole("button", { name: /Command Palette/ }).click();
+    const palette = app.window.getByRole("dialog", { name: "Command Palette" });
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("export jsonl");
+    await palette.getByRole("option", { name: /Export Task as JSONL/ }).click();
+    const alert = app.window.getByRole("alert");
+    await expect(alert).toContainText("Action failed");
+    await alert.getByRole("button", { name: "Dismiss error" }).click();
+    await expect(alert).toHaveCount(0);
+  } finally {
+    await close(app);
     await rm(environment.root, { recursive: true, force: true });
   }
 });
@@ -949,7 +1059,7 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     expect(await providerRail.evaluate((element) => ({
       overflowY: getComputedStyle(element).overflowY,
       scrollbarWidth: getComputedStyle(element).scrollbarWidth,
-    }))).toEqual({ overflowY: "auto", scrollbarWidth: "none" });
+    }))).toEqual({ overflowY: "auto", scrollbarWidth: "auto" });
     await expect(picker.getByRole("tab")).toHaveCount(3);
     await expect(picker.getByRole("tab").nth(0)).toHaveAccessibleName("Anthropic (Claude Pro/Max)");
     await expect(picker.getByRole("tab").nth(1)).toHaveAccessibleName("Fixture");

@@ -17,6 +17,7 @@ export const desktopActions = [
 
 export type DesktopAction = typeof desktopActions[number];
 export type DesktopActionId = DesktopAction["id"];
+export type DesktopActionState = { id: DesktopActionId; enabled: boolean; label?: string };
 
 export const desktopActionIds = new Set<DesktopActionId>(desktopActions.map(({ id }) => id));
 

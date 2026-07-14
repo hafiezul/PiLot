@@ -7,7 +7,7 @@ import type { PiLotApi } from "./shared/readiness.js";
 const api: PiLotApi = {
   getStartupState: () => ipcRenderer.invoke("startup:get"),
   platform: process.platform as "darwin" | "win32" | "linux",
-  setEnabledActions: (ids) => ipcRenderer.send("actions:set-enabled", ids),
+  setActionState: (states) => ipcRenderer.send("actions:set-state", states),
   onAction: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, id: DesktopActionId) => listener(id);
     ipcRenderer.on("actions:invoke", handler);

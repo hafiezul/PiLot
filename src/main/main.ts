@@ -11,7 +11,7 @@ import { LocalRunCoordinator } from "./runs.js";
 import { getTaskModelState, setTaskModel, setTaskThinking } from "./tasks.js";
 import { getTaskResources } from "./resources.js";
 import { getStartupState } from "./readiness.js";
-import { desktopActionIds, desktopActions, type DesktopActionId } from "../shared/actions.js";
+import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
 import type { ImageAttachment, ThinkingLevel } from "../shared/projects.js";
 
@@ -150,10 +150,17 @@ app.whenReady().then(async () => {
   nativeTheme.on("updated", updateWindowChrome);
 
   createApplicationMenu();
-  ipcMain.on("actions:set-enabled", (_event, ids: unknown) => {
-    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string" || !desktopActionIds.has(id as DesktopActionId))) return;
-    const enabled = new Set(ids as DesktopActionId[]);
-    for (const [id, item] of actionMenuItems) item.enabled = enabled.has(id);
+  ipcMain.on("actions:set-state", (_event, states: unknown) => {
+    if (!Array.isArray(states) || states.some((state) => !state || typeof state !== "object"
+      || typeof (state as DesktopActionState).id !== "string" || !desktopActionIds.has((state as DesktopActionState).id)
+      || typeof (state as DesktopActionState).enabled !== "boolean"
+      || (typeof (state as DesktopActionState).label !== "undefined" && typeof (state as DesktopActionState).label !== "string"))) return;
+    for (const state of states as DesktopActionState[]) {
+      const item = actionMenuItems.get(state.id);
+      if (!item) continue;
+      item.enabled = state.enabled;
+      item.label = state.label ?? desktopActions.find(({ id }) => id === state.id)!.label;
+    }
   });
 
   ipcMain.handle("startup:get", getStartupState);
