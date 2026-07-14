@@ -1,6 +1,6 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { promisify } from "node:util";
@@ -90,6 +90,21 @@ async function close(app: { browser: Browser; process: ChildProcess }) {
   await app.browser.close();
   if (app.process.exitCode === null) app.process.kill();
   await exit;
+}
+
+async function openCurrentTaskPathError(page: Page, filePath: string) {
+  return page.evaluate(async (target) => {
+    const pilot = (window as any).pilot;
+    const state = await pilot.getProjects();
+    const project = state.selected;
+    const task = project.tasks.reduce((latest: { modified: string }, candidate: { modified: string }) => candidate.modified > latest.modified ? candidate : latest);
+    try {
+      await pilot.openTaskPathInEditor(project.path, task.path, "vscode", target);
+      return "";
+    } catch (reason) {
+      return reason instanceof Error ? reason.message : String(reason);
+    }
+  }, filePath);
 }
 
 function latestUserText(body: string) {
@@ -1020,10 +1035,19 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
   const provider = await deterministicProvider(environment.root);
   const executionPath = await realpath(environment.project);
   const sourceDirectory = path.join(environment.project, "src");
-  const editorScript = path.join(environment.root, "editor.mjs");
+  const editorDirectory = path.join(environment.root, "editors");
+  const editorScript = path.join(environment.root, "configured-editor.mjs");
   const editorLog = path.join(environment.root, "editor.log");
   const generatedContent = Array.from({ length: 1_500 }, (_, index) => `export const generated${index} = ${index};`).join("\n") + "\n";
-  await mkdir(sourceDirectory, { recursive: true });
+  await Promise.all([mkdir(sourceDirectory, { recursive: true }), mkdir(editorDirectory, { recursive: true })]);
+  const fakeEditor = async (name: string) => {
+    const target = path.join(editorDirectory, process.platform === "win32" ? `${name}.cmd` : name);
+    await writeFile(target, process.platform === "win32"
+      ? `@echo off\r\n>>\"%PILOT_EDITOR_LOG%\" echo ${name}:%~1\r\n`
+      : `#!/bin/sh\nprintf '${name}:%s\\n' \"$1\" >> \"$PILOT_EDITOR_LOG\"\n`);
+    if (process.platform !== "win32") await chmod(target, 0o755);
+  };
+  await Promise.all([fakeEditor("cursor"), fakeEditor("code")]);
   await Promise.all([
     writeFile(path.join(sourceDirectory, "app.ts"), "export const value = 1;\nkeep\n"),
     writeFile(path.join(sourceDirectory, "a[1].ts"), "export const bracket = 1;\n"),
@@ -1031,7 +1055,7 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
     writeFile(path.join(sourceDirectory, "old-name.ts"), "export const renamed = true;\n"),
     writeFile(path.join(sourceDirectory, "mode.sh"), "#!/bin/sh\necho ready\n"),
     writeFile(path.join(environment.project, "obsolete.txt"), "remove me\n"),
-    writeFile(editorScript, `import { appendFileSync } from "node:fs";\nappendFileSync(process.argv[2], process.argv[3] + "\\n");\n`),
+    writeFile(editorScript, `import { appendFileSync } from "node:fs";\nappendFileSync(process.argv[2], "configured:" + process.argv[3] + "\\n");\n`),
   ]);
   await execute("git", ["init"], { cwd: environment.project });
   await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: environment.project });
@@ -1063,7 +1087,16 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
       externalEditor: `"${process.execPath}" "${editorScript}" "${editorLog}"`,
     })),
   ]);
-  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+  const editorPath = `${editorDirectory}${path.delimiter}${process.env.PATH ?? process.env.Path ?? ""}`;
+  const appEnvironment = {
+    PILOT_TEST_PROJECT_DIR: environment.project,
+    PILOT_EDITOR_LOG: editorLog,
+    EDITOR: "vim",
+    VISUAL: "",
+    PATH: editorPath,
+    ...(process.platform === "win32" ? { Path: editorPath } : {}),
+  };
+  let app = await launch(environment.agentDir, false, appEnvironment);
 
   try {
     await app.window.getByRole("button", { name: "Add project" }).click();
@@ -1132,12 +1165,98 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
     const activeDescendant = await diff.getAttribute("aria-activedescendant");
     await expect(diff.locator(`[id="${activeDescendant}"]`)).toHaveCount(1);
 
-    await changes.getByRole("button", { name: "Open src/generated.ts in editor" }).click();
-    await changes.getByRole("button", { name: "Open execution location in editor" }).click();
+    const executionEditor = changes.getByRole("group", { name: "Open execution location externally" });
+    const configuredEditor = executionEditor.getByRole("button", { name: "Open execution location in Pi configured editor" });
+    await expect(configuredEditor).toBeVisible();
+    const editorChooser = executionEditor.getByRole("button", { name: "Choose application for execution location" });
+    await editorChooser.click();
+    const editorMenu = app.window.getByRole("menu", { name: "Applications" });
+    const configuredOption = editorMenu.getByRole("menuitemradio", { name: "Pi configured editor" });
+    await expect(configuredOption).toBeFocused();
+    await configuredOption.press("ArrowDown");
+    await expect(configuredOption).not.toBeFocused();
+    await app.window.keyboard.press("Escape");
+    await expect(editorChooser).toBeFocused();
+    await editorChooser.click();
+    await configuredOption.press("Tab");
+    await expect(editorMenu).not.toBeVisible();
+    await configuredEditor.click();
+    await editorChooser.click();
+    await editorMenu.getByRole("menuitemradio", { name: "VS Code" }).click();
+    const fileEditor = changes.getByRole("group", { name: "Open src/generated.ts externally" });
+    await fileEditor.getByRole("button", { name: "Open src/generated.ts in VS Code" }).click();
     await expect.poll(async () => (await readFile(editorLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).sort()).toEqual([
-      path.join(executionPath, "src", "generated.ts"),
-      executionPath,
+      `code:${path.join(executionPath, "src", "generated.ts")}`,
+      `code:${executionPath}`,
+      `configured:${executionPath}`,
     ].sort());
+    await expect.poll(async () => JSON.parse(await readFile(path.join(environment.agentDir, "pilot-user-data", "preferences.json"), "utf8"))).toMatchObject({ preferredEditor: "vscode" });
+    const unchangedFileError = await openCurrentTaskPathError(app.window, ".git/config");
+    expect(unchangedFileError).toContain("not a current Git change");
+    if (process.platform !== "win32") {
+      const outsideFile = path.join(environment.root, "outside.ts");
+      await writeFile(outsideFile, "export const outside = true;\n");
+      await symlink(outsideFile, path.join(sourceDirectory, "outside-link.ts"));
+      await expect(changesTab).toHaveAccessibleName("Changes, 10 changed files");
+      const symlinkError = await openCurrentTaskPathError(app.window, "src/outside-link.ts");
+      expect(symlinkError).toContain("must stay within the Execution location");
+    }
+
+    await close(app);
+    app = await launch(environment.agentDir, false, appEnvironment);
+    await app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button", { name: "Untitled task" }).first().click();
+    const reopenedInspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await reopenedInspector.getByRole("tab", { name: /Changes/ }).click();
+    await expect(reopenedInspector.getByRole("group", { name: "Open execution location externally" }).getByRole("button", { name: "Open execution location in VS Code" })).toBeVisible();
+
+    await close(app);
+    const preferencesPath = path.join(environment.agentDir, "pilot-user-data", "preferences.json");
+    const stalePreferences = JSON.parse(await readFile(preferencesPath, "utf8"));
+    await Promise.all([
+      writeFile(preferencesPath, JSON.stringify({ ...stalePreferences, preferredEditor: "configured" }, null, 2)),
+      writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture-model" })),
+    ]);
+    app = await launch(environment.agentDir, false, appEnvironment);
+    await app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button", { name: "Untitled task" }).first().click();
+    const fallbackInspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await fallbackInspector.getByRole("tab", { name: /Changes/ }).click();
+    const fallbackEditor = fallbackInspector.getByRole("group", { name: "Open execution location externally" }).getByRole("button", { name: "Open execution location in Cursor" });
+    await expect(fallbackEditor).toBeVisible();
+    await expect(fallbackInspector.getByText(/vim needs an attached terminal/)).toBeVisible();
+    await expect.poll(async () => JSON.parse(await readFile(preferencesPath, "utf8"))).toMatchObject({ preferredEditor: "configured" });
+    await fallbackEditor.click();
+    await expect.poll(async () => JSON.parse(await readFile(preferencesPath, "utf8"))).toMatchObject({ preferredEditor: "cursor" });
+
+    const projectEditorDirectory = path.join(environment.project, "tools");
+    const projectEditor = path.join(projectEditorDirectory, process.platform === "win32" ? "editor.cmd" : "editor");
+    await Promise.all([mkdir(projectEditorDirectory, { recursive: true }), mkdir(path.join(environment.project, ".pi"), { recursive: true })]);
+    await Promise.all([
+      writeFile(projectEditor, process.platform === "win32"
+        ? "@echo off\r\n>>\"%PILOT_EDITOR_LOG%\" echo relative:%~1\r\n"
+        : "#!/bin/sh\nprintf 'relative:%s\\n' \"$1\" >> \"$PILOT_EDITOR_LOG\"\n"),
+      writeFile(path.join(environment.project, ".pi", "settings.json"), JSON.stringify({ externalEditor: process.platform === "win32" ? "./tools/editor.cmd" : "./tools/editor" })),
+    ]);
+    if (process.platform !== "win32") await chmod(projectEditor, 0o755);
+    await app.window.evaluate(() => window.dispatchEvent(new Event("focus")));
+    const fallbackChooser = fallbackInspector.getByRole("group", { name: "Open execution location externally" }).getByRole("button", { name: "Choose application for execution location" });
+    await fallbackChooser.click();
+    await app.window.getByRole("menu", { name: "Applications" }).getByRole("menuitemradio", { name: "Pi configured editor" }).click();
+    await expect.poll(async () => (await readFile(editorLog, "utf8")).split("\n")).toContain(`relative:${executionPath}`);
+
+    const admissionError = await app.window.evaluate(async () => {
+      const pilot = (window as any).pilot;
+      const state = await pilot.getProjects();
+      const project = state.selected;
+      const task = project.tasks.reduce((latest: { modified: string }, candidate: { modified: string }) => candidate.modified > latest.modified ? candidate : latest);
+      await pilot.removeProject(project.path);
+      try {
+        await pilot.openTaskPathInEditor(project.path, task.path, "vscode");
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    });
+    expect(admissionError).toContain("Admit this Project");
   } finally {
     await close(app);
     await provider.close();

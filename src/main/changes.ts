@@ -1,9 +1,11 @@
-import { ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { lstat, readFile, readlink } from "node:fs/promises";
+import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
+import type { EditorId } from "../shared/editors.js";
 import type { ChangeStatus, DiffHunk, TaskChanges, TaskFileDiff } from "../shared/projects.js";
+import { getConfiguredEditor, launchEditor } from "./editors.js";
+import { assertProjectAdmitted } from "./projects.js";
 import { assertRunnableTask } from "./tasks.js";
 
 const maximumDiffBytes = 16 * 1024 * 1024;
@@ -270,82 +272,20 @@ export async function getTaskFileDiff(agentDir: string, projectPath: string, tas
   }
 }
 
-function editorCommandParts(command: string) {
-  const parts: string[] = [];
-  let current = "";
-  let quote = "";
-  for (let index = 0; index < command.length; index++) {
-    const character = command[index];
-    if (quote) {
-      if (character === quote) quote = "";
-      else if (quote === '"' && character === "\\" && command[index + 1] === '"') {
-        current += '"';
-        index += 1;
-      } else current += character;
-    } else if (character === '"' || character === "'") quote = character;
-    else if (/\s/.test(character)) {
-      if (current) { parts.push(current); current = ""; }
-    } else if (character === "\\" && process.platform !== "win32" && command[index + 1] && /[\s\\"']/.test(command[index + 1])) {
-      current += command[++index];
-    } else current += character;
-  }
-  if (quote) throw new Error("The configured external editor has an unmatched quote");
-  if (current) parts.push(current);
-  if (!parts.length) throw new Error("Configure an external editor command before opening files");
-  return parts;
-}
-
-function launchDetached(command: string, args: string[], cwd: string, env = process.env) {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { cwd, detached: true, env, shell: false, stdio: "ignore" });
-    child.once("error", reject);
-    child.once("spawn", () => {
-      child.unref();
-      resolve();
-    });
-  });
-}
-
-async function launchEditor(command: string, target: string, executionPath: string) {
-  const [editor, ...args] = editorCommandParts(command);
-  if (process.platform !== "win32" || !/\.(?:bat|cmd)$/i.test(editor)) {
-    try {
-      await launchDetached(editor, [...args, target], executionPath);
-      return;
-    } catch (error) {
-      if (process.platform !== "win32") throw error;
+export async function openTaskPathInEditor(userDataDir: string, agentDir: string, projectPath: string, taskPath: string, editor: EditorId, filePath?: string) {
+  await assertProjectAdmitted(userDataDir, projectPath);
+  const { executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+  const canonicalExecutionPath = await realpath(executionPath);
+  const requestedTarget = filePath ? resolveChangePath(executionPath, filePath) : executionPath;
+  await lstat(requestedTarget);
+  const target = await realpath(requestedTarget);
+  if (filePath) {
+    const change = (await getTaskChanges(agentDir, projectPath, taskPath)).files.find((candidate) => candidate.path === gitPath(filePath));
+    if (!change || change.status === "deleted") throw new Error("That file is not a current Git change");
+    const relative = path.relative(canonicalExecutionPath, target);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("Changed files must stay within the Execution location");
     }
   }
-  const editorEnvironment: NodeJS.ProcessEnv = {
-    ...process.env,
-    PILOT_EDITOR_COMMAND: editor,
-    PILOT_EDITOR_TARGET: target,
-  };
-  const argumentReferences = args.map((argument, index) => {
-    const name = `PILOT_EDITOR_ARG_${index}`;
-    editorEnvironment[name] = argument;
-    return `"%${name}%"`;
-  });
-  const invocation = `""%PILOT_EDITOR_COMMAND%" ${argumentReferences.join(" ")} "%PILOT_EDITOR_TARGET%""`;
-  await launchDetached(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/v:off", "/c", invocation], executionPath, editorEnvironment);
-}
-
-export async function openTaskPathInEditor(agentDir: string, projectPath: string, taskPath: string, filePath?: string) {
-  const { executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
-  const target = filePath ? resolveChangePath(executionPath, filePath) : executionPath;
-  await lstat(target);
-  const trusted = new ProjectTrustStore(agentDir).getEntry(executionPath)?.decision === true;
-  const settings = SettingsManager.create(executionPath, agentDir, { projectTrusted: trusted });
-  const configured = settings.getProjectSettings().externalEditor
-    ?? settings.getGlobalSettings().externalEditor
-    ?? process.env.VISUAL
-    ?? process.env.EDITOR;
-  if (!configured?.trim()) {
-    throw new Error("Configure externalEditor in Pi settings or set VISUAL or EDITOR before opening files");
-  }
-  try {
-    await launchEditor(configured, target, executionPath);
-  } catch (reason) {
-    throw new Error(`Could not open the configured external editor: ${reason instanceof Error ? reason.message : String(reason)}`);
-  }
+  await launchEditor(editor, target, canonicalExecutionPath, getConfiguredEditor(agentDir, canonicalExecutionPath));
 }

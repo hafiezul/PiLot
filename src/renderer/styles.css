@@ -389,8 +389,17 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .execution-editor-row { display: flex; align-items: center; gap: 10px; padding: 0 16px 13px; border-bottom: 1px solid var(--change-border); }
 .execution-editor-row code { min-width: 0; flex: 1; overflow: hidden; color: var(--change-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .execution-editor-row button, .file-diff > header button { flex: none; border: 1px solid var(--change-button-border); border-radius: 5px; padding: 5px 7px; color: inherit; background: var(--change-surface); cursor: pointer; font-size: 10px; }
-.execution-editor-row button:hover, .file-diff > header button:hover:not(:disabled) { background: var(--change-subtle); }
-.file-diff > header button:disabled { cursor: not-allowed; opacity: .5; }
+.execution-editor-row button:hover:not(:disabled), .file-diff > header button:hover:not(:disabled) { background: var(--change-subtle); }
+.execution-editor-row button:disabled, .file-diff > header button:disabled { cursor: not-allowed; opacity: .5; }
+.editor-open-control { display: flex; min-width: 0; flex: none; }
+.editor-open-control > .editor-open-primary { overflow: hidden; max-width: 150px; border-radius: 5px 0 0 5px; text-overflow: ellipsis; white-space: nowrap; }
+.editor-open-control > .editor-open-primary strong { font-weight: 650; }
+.editor-open-control > .editor-open-picker { width: 25px; margin-left: -1px; border-radius: 0 5px 5px 0; padding-right: 5px; padding-left: 5px; }
+.editor-picker-popover:popover-open { display: block; overflow-x: hidden; overflow-y: auto; }
+.editor-open-control .editor-picker-popover button { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 0; border-radius: 0; padding: 8px 10px; color: inherit; background: transparent; cursor: pointer; font-size: 11px; text-align: left; }
+.editor-open-control .editor-picker-popover button:hover, .editor-open-control .editor-picker-popover button:focus-visible { background: var(--change-subtle); }
+.file-diff > header .editor-picker-popover span { color: inherit; font-size: inherit; }
+.editor-discovery-note { flex: none; margin: -4px 16px 12px; color: var(--change-muted); font-size: 10px; line-height: 1.4; }
 .changed-file-list { max-height: 180px; flex: none; list-style: none; margin: 0; padding: 4px; border-bottom: 1px solid var(--change-border); overflow-y: auto; overscroll-behavior: contain; }
 .changed-file-list li { margin: 0; }
 .changed-file-list button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; width: 100%; gap: 5px; border: 0; border-radius: 4px; padding: 6px; color: inherit; background: transparent; cursor: pointer; text-align: left; }

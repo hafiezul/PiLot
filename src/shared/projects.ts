@@ -1,3 +1,5 @@
+import type { EditorId } from "./editors.js";
+
 export type TaskSummary = {
   id: string;
   path: string;
@@ -251,7 +253,7 @@ export type ProjectsApi = {
   getTaskResources(projectPath: string, taskPath: string): Promise<TaskResourceState>;
   getTaskChanges(projectPath: string, taskPath: string): Promise<TaskChanges>;
   getTaskFileDiff(projectPath: string, taskPath: string, filePath: string): Promise<TaskFileDiff>;
-  openTaskPathInEditor(projectPath: string, taskPath: string, filePath?: string): Promise<void>;
+  openTaskPathInEditor(projectPath: string, taskPath: string, editor: EditorId, filePath?: string): Promise<void>;
   setTaskModel(projectPath: string, taskPath: string, provider: string, modelId: string): Promise<TaskModelState>;
   setTaskThinking(projectPath: string, taskPath: string, level: ThinkingLevel): Promise<TaskModelState>;
   submitPrompt(projectPath: string, taskPath: string, prompt: string, images?: ImageAttachment[]): Promise<void>;

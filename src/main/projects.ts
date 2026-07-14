@@ -176,6 +176,11 @@ export async function setExecutionConsent(
   return getProjectsState(directory, agentDir);
 }
 
+export async function assertProjectAdmitted(directory: string, projectPath: string) {
+  const saved = await load(directory);
+  if (!saved.recentProjects.includes(await canonicalize(projectPath))) throw new Error("Admit this Project before opening external applications");
+}
+
 export async function assertExecutionAllowed(directory: string, projectPath: string) {
   const saved = await load(directory);
   if (saved.executionConsent[await canonicalize(projectPath)] !== true) {
