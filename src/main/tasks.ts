@@ -1,19 +1,34 @@
 import { AuthStorage, CURRENT_SESSION_VERSION, estimateTokens, ModelRegistry, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
 import { mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import type { ProjectDiagnostic, TaskModelState, TaskSummary, ThinkingLevel } from "../shared/projects.js";
+import type { ProjectDiagnostic, TaskExecutionLocation, TaskModelState, TaskSetupState, TaskSetupStatus, TaskSummary, ThinkingLevel } from "../shared/projects.js";
 import { BUILT_IN_PROVIDER_IDS } from "../shared/providers.js";
 import { guardTaskManager, taskSnapshot } from "./continuity.js";
 
 const metadataType = "pilot.task";
 const maximumTasks = 500;
+const setupStatuses = new Set<TaskSetupStatus>(["pending", "running", "succeeded", "failed", "aborted", "interrupted", "bypassed"]);
 
 type Header = { type?: string; version?: number; id?: string; cwd?: string; timestamp?: unknown };
-type TaskMetadata = { title?: string; lifecycle?: "active" | "archived" };
+type TaskMetadata = {
+  title?: string;
+  lifecycle?: "active" | "archived";
+  projectPath?: string;
+  execution?: Partial<TaskExecutionLocation>;
+  setup?: Partial<Omit<TaskSetupState, "taskPath">>;
+};
+type ResolvedTaskMetadata = {
+  title: string;
+  lifecycle: "active" | "archived";
+  projectPath: string;
+  execution: TaskExecutionLocation;
+  setup?: Omit<TaskSetupState, "taskPath">;
+};
 type Inspection = { task?: TaskSummary; incompatible?: boolean; malformed?: boolean; enrichmentFailed?: boolean };
-type TaskRead = Inspection & { header?: Header; hasMetadata?: boolean };
+type TaskRead = Inspection & { header?: Header; hasMetadata?: boolean; metadata?: ResolvedTaskMetadata };
 
 const taskWrites = new Map<string, Promise<void>>();
 
@@ -55,8 +70,32 @@ async function normalize(value: string) {
   return realpath(value).catch(() => path.resolve(value));
 }
 
-function appendMetadata(file: string, data: Required<TaskMetadata>) {
-  guardTaskManager(file, SessionManager.open(file)).appendCustomEntry(metadataType, { version: 1, ...data });
+function metadataData(data: ResolvedTaskMetadata) {
+  return { version: 1, ...data };
+}
+
+function worktreeExecution(value: unknown): Extract<TaskExecutionLocation, { kind: "worktree" }> | undefined {
+  if (!value || typeof value !== "object") return;
+  const data = value as Record<string, unknown>;
+  if (data.kind !== "worktree" || typeof data.path !== "string" || typeof data.worktreePath !== "string"
+    || typeof data.ref !== "string" || typeof data.commit !== "string") return;
+  return { kind: "worktree", path: data.path, worktreePath: data.worktreePath, ref: data.ref, commit: data.commit };
+}
+
+function appendMetadata(file: string, data: ResolvedTaskMetadata) {
+  guardTaskManager(file, SessionManager.open(file)).appendCustomEntry(metadataType, metadataData(data));
+}
+
+function git(cwd: string, args: string[]) {
+  return new Promise<string>((resolve, reject) => {
+    execFile("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8", maxBuffer: 1024 * 1024 },
+      (error, stdout) => error ? reject(error) : resolve(stdout));
+  });
+}
+
+async function gitCommonDirectory(cwd: string) {
+  const value = (await git(cwd, ["rev-parse", "--git-common-dir"])).trim();
+  return realpath(path.resolve(cwd, value));
 }
 
 async function readHeader(file: string): Promise<Header | undefined> {
@@ -97,7 +136,6 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
       if (!header) {
         header = entry;
         if (header.type !== "session" || typeof header.id !== "string" || typeof header.cwd !== "string") return { malformed: true };
-        if (await normalize(header.cwd) !== projectPath) return {};
         if ((header.version ?? 1) > CURRENT_SESSION_VERSION) return { incompatible: true };
         continue;
       }
@@ -107,6 +145,9 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
         metadata = {
           title: typeof data.title === "string" ? data.title : undefined,
           lifecycle: data.lifecycle === "archived" ? "archived" : "active",
+          projectPath: typeof data.projectPath === "string" ? data.projectPath : undefined,
+          execution: data.execution && typeof data.execution === "object" ? data.execution : undefined,
+          setup: data.setup && typeof data.setup === "object" ? data.setup : undefined,
         };
       }
       if (entry.type === "message" && entry.message && typeof entry.message === "object") {
@@ -122,15 +163,40 @@ async function readTask(file: string, projectPath: string): Promise<TaskRead> {
     }
     if (!header) return { malformed: true };
 
+    const canonicalProject = await normalize(metadata?.projectPath ?? header.cwd!);
+    if (canonicalProject !== projectPath) return {};
+    const storedWorktree = metadata?.execution?.kind === "worktree";
+    const worktree = worktreeExecution(metadata?.execution);
+    if (storedWorktree && !worktree) return { malformed: true, header, hasMetadata: true };
+    const execution = worktree ?? { kind: "local" as const, path: projectPath };
+    const setupStatus = typeof metadata?.setup?.status === "string" && setupStatuses.has(metadata.setup.status as TaskSetupStatus)
+      ? metadata.setup.status as TaskSetupStatus
+      : undefined;
+    const setup = typeof metadata?.setup?.command === "string" && metadata.setup.command && setupStatus
+      ? {
+        command: metadata.setup.command,
+        status: setupStatus,
+        output: typeof metadata.setup.output === "string" ? metadata.setup.output : "",
+        outputTruncated: metadata.setup.outputTruncated === true,
+        ...(typeof metadata.setup.exitCode === "number" ? { exitCode: metadata.setup.exitCode } : {}),
+      }
+      : undefined;
+    if (metadata?.setup && !setup) return { malformed: true, header, hasMetadata: true };
     const headerActivity = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : NaN;
     const modified = lastActivity ?? (Number.isFinite(headerActivity) ? headerActivity : fileStat.mtimeMs);
-    const title = safeTaskTitle(sessionName || metadata?.title || firstMessage);
-    const lifecycle = metadata?.lifecycle ?? "active";
+    const resolved: ResolvedTaskMetadata = {
+      title: safeTaskTitle(sessionName || metadata?.title || firstMessage),
+      lifecycle: metadata?.lifecycle ?? "active",
+      projectPath,
+      execution,
+      ...(setup ? { setup } : {}),
+    };
     return {
-      task: { id: header.id!, path: file, title, lifecycle, modified: new Date(modified).toISOString() },
+      task: { id: header.id!, path: file, title: resolved.title, lifecycle: resolved.lifecycle, modified: new Date(modified).toISOString(), execution, ...(setup ? { setup } : {}) },
       malformed,
       header,
       hasMetadata: metadata !== undefined,
+      metadata: resolved,
     };
   } catch {
     return { malformed: true };
@@ -151,7 +217,7 @@ async function inspect(file: string, projectPath: string): Promise<Inspection> {
       if (manager.getEntries().some((entry) => entry.type === "custom" && entry.customType === metadataType)) {
         return readTask(file, projectPath);
       }
-      manager.appendCustomEntry(metadataType, { version: 1, title: live.task.title, lifecycle: live.task.lifecycle });
+      manager.appendCustomEntry(metadataType, metadataData(live.metadata!));
       return live;
     });
   } catch {
@@ -159,18 +225,29 @@ async function inspect(file: string, projectPath: string): Promise<Inspection> {
   }
 }
 
-export async function createLocalTask(agentDir: string, projectPath: string) {
+export async function createTaskAtExecution(agentDir: string, projectPath: string, execution: TaskExecutionLocation, setupCommand?: string) {
   const project = await normalize(projectPath);
   const directory = getProjectSessionDirectory(agentDir, project);
-  const manager = SessionManager.create(project, directory);
+  const manager = SessionManager.create(execution.path, directory);
   const file = manager.getSessionFile();
   const header = manager.getHeader();
   if (!file || !header) throw new Error("Pi could not create this Task");
   await mkdir(directory, { recursive: true });
   await writeFile(file, `${JSON.stringify(header)}\n`, { flag: "wx" });
-  const opened = SessionManager.open(file);
-  opened.appendCustomEntry(metadataType, { version: 1, title: "Untitled task", lifecycle: "active" });
-  return { id: header.id, path: file, title: "Untitled task", lifecycle: "active" as const, modified: header.timestamp };
+  const metadata: ResolvedTaskMetadata = {
+    title: "Untitled task",
+    lifecycle: "active",
+    projectPath: project,
+    execution,
+    ...(setupCommand ? { setup: { command: setupCommand, status: "pending", output: "", outputTruncated: false } } : {}),
+  };
+  guardTaskManager(file, SessionManager.open(file)).appendCustomEntry(metadataType, metadataData(metadata));
+  return { id: header.id, path: file, title: metadata.title, lifecycle: metadata.lifecycle, modified: header.timestamp, execution, ...(metadata.setup ? { setup: metadata.setup } : {}) };
+}
+
+export async function createLocalTask(agentDir: string, projectPath: string) {
+  const project = await normalize(projectPath);
+  return createTaskAtExecution(agentDir, project, { kind: "local", path: project });
 }
 
 export async function assertRunnableTask(agentDir: string, projectPath: string, taskPath: string) {
@@ -183,8 +260,47 @@ export async function assertRunnableTask(agentDir: string, projectPath: string, 
   const task = await readTask(file, project);
   if (task.incompatible) throw new Error("Update PiLot before running this newer Task");
   if (task.malformed) throw new Error("Repair this Task's unreadable history before running it");
-  if (!task.task) throw new Error("This Task does not belong to the admitted Project");
-  return { file, project, executionPath: project };
+  if (!task.task || !task.header) throw new Error("This Task does not belong to the admitted Project");
+  const execution = task.task.execution;
+  const executionPath = await normalize(execution.path);
+  if (await normalize(task.header.cwd!) !== executionPath) throw new Error("This Task's Execution location does not match its Pi history");
+  if (execution.kind === "local") {
+    if (executionPath !== project) throw new Error("This Local Task does not belong to the admitted Project");
+  } else {
+    const worktreePath = await normalize(execution.worktreePath);
+    const relative = path.relative(worktreePath, executionPath);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("This managed Worktree Task has an invalid Execution location");
+    }
+    try {
+      const [projectGit, worktreeGit] = await Promise.all([gitCommonDirectory(project), gitCommonDirectory(executionPath)]);
+      if (projectGit !== worktreeGit) throw new Error("mismatch");
+    } catch {
+      throw new Error("This managed Worktree is unavailable or no longer belongs to the Project");
+    }
+  }
+  return { file, project, executionPath, execution, setup: task.metadata?.setup };
+}
+
+export async function getTaskSetupState(agentDir: string, projectPath: string, taskPath: string): Promise<TaskSetupState | undefined> {
+  const context = await assertRunnableTask(agentDir, projectPath, taskPath);
+  return context.setup ? { taskPath: context.file, ...context.setup } : undefined;
+}
+
+export async function setTaskSetupState(
+  agentDir: string,
+  projectPath: string,
+  taskPath: string,
+  setup: Omit<TaskSetupState, "taskPath">,
+): Promise<TaskSetupState> {
+  const context = await assertRunnableTask(agentDir, projectPath, taskPath);
+  if (!context.setup) throw new Error("This Task has no setup command");
+  return withTaskWrite(context.file, async () => {
+    const task = await readTask(context.file, context.project);
+    if (!task.metadata?.setup) throw new Error("This Task has no setup command");
+    appendMetadata(context.file, { ...task.metadata, setup });
+    return { taskPath: context.file, ...setup };
+  });
 }
 
 export async function discoverTasks(agentDir: string, projectPath: string) {
@@ -225,7 +341,7 @@ export async function discoverTasks(agentDir: string, projectPath: string) {
       malformedByDirectory.set(directory, (malformedByDirectory.get(directory) ?? 0) + 1);
       continue;
     }
-    if (await normalize(header.cwd!) === projectPath) {
+    if (directory === canonicalDirectory || await normalize(header.cwd!) === projectPath) {
       matching.push(file);
       matchingDirectories.add(directory);
     }
@@ -284,12 +400,12 @@ function clampThinkingLevel(model: RegisteredModel, requested: ThinkingLevel) {
     ?? "off";
 }
 
-function modelServices(agentDir: string, projectPath: string) {
+function modelServices(agentDir: string, projectPath: string, executionPath = projectPath) {
   const auth = AuthStorage.create(path.join(agentDir, "auth.json"));
   const models = ModelRegistry.create(auth, path.join(agentDir, "models.json"));
   if (models.getError()) throw new Error(`Fix models.json before configuring this Task: ${models.getError()}`);
   const trusted = new ProjectTrustStore(agentDir).getEntry(projectPath)?.decision === true;
-  return { auth, models, settings: SettingsManager.create(projectPath, agentDir, { projectTrusted: trusted }) };
+  return { auth, models, settings: SettingsManager.create(executionPath, agentDir, { projectTrusted: trusted }) };
 }
 
 function usage(manager: SessionManager, model?: RegisteredModel): TaskModelState["usage"] {
@@ -364,8 +480,8 @@ function customEndpointProviders(agentDir: string) {
   }
 }
 
-function taskModelState(file: string, projectPath: string, agentDir: string, manager: SessionManager): TaskModelState {
-  const { auth, models, settings } = modelServices(agentDir, projectPath);
+function taskModelState(file: string, projectPath: string, executionPath: string, agentDir: string, manager: SessionManager): TaskModelState {
+  const { auth, models, settings } = modelServices(agentDir, projectPath, executionPath);
   const customEndpoints = customEndpointProviders(agentDir);
   const available = models.getAvailable();
   const availableByKey = new Map(available.map((model) => [`${model.provider}/${model.id}`, model]));
@@ -412,39 +528,39 @@ function taskModelState(file: string, projectPath: string, agentDir: string, man
 }
 
 export async function getTaskModelState(agentDir: string, projectPath: string, taskPath: string) {
-  const { file, project } = await assertRunnableTask(agentDir, projectPath, taskPath);
-  return withTaskWrite(file, async () => taskModelState(file, project, agentDir, SessionManager.open(file)));
+  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+  return withTaskWrite(file, async () => taskModelState(file, project, executionPath, agentDir, SessionManager.open(file)));
 }
 
 export async function setTaskModel(agentDir: string, projectPath: string, taskPath: string, provider: string, modelId: string) {
-  const { file, project } = await assertRunnableTask(agentDir, projectPath, taskPath);
+  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
   return withTaskWrite(file, async () => {
     const manager = guardTaskManager(file, SessionManager.open(file));
-    const before = taskModelState(file, project, agentDir, manager);
-    const { models } = modelServices(agentDir, project);
+    const before = taskModelState(file, project, executionPath, agentDir, manager);
+    const { models } = modelServices(agentDir, project, executionPath);
     const model = models.getAvailable().find((candidate) => candidate.provider === provider && candidate.id === modelId);
     if (!model) throw new Error("Connect this model's provider in Settings before selecting it");
     const saved = manager.buildSessionContext().model;
     if (saved?.provider !== provider || saved.modelId !== modelId) manager.appendModelChange(provider, modelId);
     const thinking = clampThinkingLevel(model, before.thinkingLevel);
     if (thinking !== before.thinkingLevel) manager.appendThinkingLevelChange(thinking);
-    return taskModelState(file, project, agentDir, manager);
+    return taskModelState(file, project, executionPath, agentDir, manager);
   });
 }
 
 export async function setTaskThinking(agentDir: string, projectPath: string, taskPath: string, requested: ThinkingLevel) {
   if (!allThinkingLevels.includes(requested)) throw new Error("Choose a valid thinking level");
-  const { file, project } = await assertRunnableTask(agentDir, projectPath, taskPath);
+  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
   return withTaskWrite(file, async () => {
     const manager = guardTaskManager(file, SessionManager.open(file));
-    const before = taskModelState(file, project, agentDir, manager);
+    const before = taskModelState(file, project, executionPath, agentDir, manager);
     if (!before.selected) throw new Error("Connect a provider before choosing a thinking level");
-    const { models } = modelServices(agentDir, project);
+    const { models } = modelServices(agentDir, project, executionPath);
     const model = models.find(before.selected.provider, before.selected.id);
     if (!model) throw new Error("Choose an available model first");
     const thinking = clampThinkingLevel(model, requested);
     if (thinking !== before.thinkingLevel) manager.appendThinkingLevelChange(thinking);
-    return taskModelState(file, project, agentDir, manager);
+    return taskModelState(file, project, executionPath, agentDir, manager);
   });
 }
 
@@ -475,31 +591,46 @@ export function setTaskLifecycle(agentDir: string, projectPath: string, taskPath
     if (version < 2 || version > CURRENT_SESSION_VERSION) {
       throw new Error("Update this Task's Pi format before changing its lifecycle");
     }
-    appendMetadata(file, { title: task.task.title, lifecycle });
+    appendMetadata(file, { ...task.metadata!, title: task.task.title, lifecycle });
   });
 }
 
-export async function forkChangedTask(agentDir: string, projectPath: string, taskPath: string) {
+export async function forkChangedTask(
+  agentDir: string,
+  projectPath: string,
+  taskPath: string,
+  targetExecution: TaskExecutionLocation,
+  setupCommand?: string,
+) {
   const file = path.resolve(taskPath);
   const relative = path.relative(path.resolve(agentDir, "sessions"), file);
   if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error("This Task does not belong to the admitted Project");
   }
-  const project = await normalize(projectPath);
+  const { project, executionPath } = await assertRunnableTask(agentDir, projectPath, file);
   const source = taskSnapshot(file).toString("utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
   const sourceHeader = source[0] as Header | undefined;
   if (!sourceHeader || sourceHeader.type !== "session" || typeof sourceHeader.id !== "string" || typeof sourceHeader.cwd !== "string"
-    || await normalize(sourceHeader.cwd) !== project || (sourceHeader.version ?? 1) !== CURRENT_SESSION_VERSION) {
+    || await normalize(sourceHeader.cwd) !== executionPath || (sourceHeader.version ?? 1) !== CURRENT_SESSION_VERSION) {
     throw new Error("The last PiLot path cannot be forked safely");
   }
 
-  const created = SessionManager.create(project, path.dirname(file), { parentSession: file });
+  const created = SessionManager.create(targetExecution.path, path.dirname(file), { parentSession: file });
   const output = created.getSessionFile();
   const header = created.getHeader();
   if (!output || !header) throw new Error("Pi could not fork this Task");
   await writeFile(output, `${[header, ...source.slice(1)].map((entry) => JSON.stringify(entry)).join("\n")}\n`, { flag: "wx" });
   const copied = await readTask(output, project);
   if (!copied.task || copied.malformed) throw new Error("The last PiLot path cannot be forked safely");
-  SessionManager.open(output).appendCustomEntry(metadataType, { version: 1, title: copied.task.title, lifecycle: "active" });
-  return { ...copied.task, id: header.id, path: output, lifecycle: "active" as const, modified: header.timestamp };
+  const setup = setupCommand ? { command: setupCommand, status: "pending" as const, output: "", outputTruncated: false } : undefined;
+  appendMetadata(output, { ...copied.metadata!, title: copied.task.title, lifecycle: "active", execution: targetExecution, setup });
+  return {
+    ...copied.task,
+    id: header.id,
+    path: output,
+    lifecycle: "active" as const,
+    modified: header.timestamp,
+    execution: targetExecution,
+    setup,
+  };
 }

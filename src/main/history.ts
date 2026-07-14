@@ -1,7 +1,7 @@
 import { SessionManager, type SessionEntry, type SessionTreeNode } from "@earendil-works/pi-coding-agent";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { TaskHistoryKind, TaskHistoryNode, TaskHistoryState, TaskSummary } from "../shared/projects.js";
+import type { TaskExecutionLocation, TaskHistoryKind, TaskHistoryNode, TaskHistoryState, TaskSetupState, TaskSummary } from "../shared/projects.js";
 import { safeTaskTitle } from "./tasks.js";
 
 export const historyNavigationType = "pilot.history-navigation";
@@ -114,45 +114,32 @@ function currentTaskTitle(manager: SessionManager) {
   return safeTaskTitle(prompt?.type === "message" ? contentText((prompt.message as { content?: unknown }).content) : "");
 }
 
-async function persistTask(manager: SessionManager, title: string): Promise<TaskSummary> {
-  manager.appendCustomEntry(taskMetadataType, { version: 1, title, lifecycle: "active" });
+async function persistTask(
+  sourceFile: string,
+  entries: SessionEntry[],
+  title: string,
+  projectPath: string,
+  execution: TaskExecutionLocation,
+  setup?: Omit<TaskSetupState, "taskPath">,
+): Promise<TaskSummary> {
+  const manager = SessionManager.create(execution.path, path.dirname(sourceFile), { parentSession: sourceFile });
   const file = manager.getSessionFile();
   const header = manager.getHeader();
   if (!file || !header) throw new Error("Pi could not create this Task");
-  try {
-    await access(file);
-  } catch (reason) {
-    if ((reason as NodeJS.ErrnoException).code !== "ENOENT") throw reason;
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, `${[header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`, { flag: "wx" });
-  }
-  return { id: header.id, path: file, title, lifecycle: "active", modified: header.timestamp };
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, `${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`, { flag: "wx" });
+  SessionManager.open(file).appendCustomEntry(taskMetadataType, { version: 1, title, lifecycle: "active", projectPath, execution, setup });
+  return { id: header.id, path: file, title, lifecycle: "active", modified: header.timestamp, execution, ...(setup ? { setup } : {}) };
 }
 
-export async function forkFromPrompt(file: string, project: string, manager: SessionManager, entryId: string) {
+export async function forkFromPrompt(file: string, project: string, execution: TaskExecutionLocation, setup: Omit<TaskSetupState, "taskPath"> | undefined, manager: SessionManager, entryId: string) {
   const entry = manager.getEntry(entryId);
   if (!entry || entry.type !== "message" || entry.message.role !== "user") throw new Error("Choose a prompt to fork");
   const draft = contentText(entry.message.content);
-  const title = safeTaskTitle(draft);
-  let fork: SessionManager;
-  if (entry.parentId) {
-    if (!manager.createBranchedSession(entry.parentId)) throw new Error("Pi could not fork this Task");
-    fork = manager;
-  } else {
-    fork = SessionManager.create(project, manager.getSessionDir(), { parentSession: file });
-  }
-  return { task: await persistTask(fork, title), draft };
+  const entries = entry.parentId ? manager.getBranch(entry.parentId) : [];
+  return { task: await persistTask(file, entries, safeTaskTitle(draft), project, execution, setup), draft };
 }
 
-export async function cloneActivePath(file: string, project: string, manager: SessionManager) {
-  const title = currentTaskTitle(manager);
-  const leafId = manager.getLeafId();
-  let clone: SessionManager;
-  if (leafId) {
-    if (!manager.createBranchedSession(leafId)) throw new Error("Pi could not clone this Task");
-    clone = manager;
-  } else {
-    clone = SessionManager.create(project, manager.getSessionDir(), { parentSession: file });
-  }
-  return { task: await persistTask(clone, title) };
+export async function cloneActivePath(file: string, project: string, execution: TaskExecutionLocation, setup: Omit<TaskSetupState, "taskPath"> | undefined, manager: SessionManager) {
+  return { task: await persistTask(file, manager.getBranch(), currentTaskTitle(manager), project, execution, setup) };
 }

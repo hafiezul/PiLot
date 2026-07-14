@@ -4,11 +4,11 @@ import path from "node:path";
 import type { TaskResourceState } from "../shared/projects.js";
 import { assertRunnableTask } from "./tasks.js";
 
-export async function loadTaskResources(agentDir: string, project: string) {
-  const trusted = new ProjectTrustStore(agentDir).getEntry(project)?.decision === true;
-  const settings = SettingsManager.create(project, agentDir, { projectTrusted: trusted });
+export async function loadTaskResources(agentDir: string, projectPath: string, executionPath = projectPath) {
+  const trusted = new ProjectTrustStore(agentDir).getEntry(projectPath)?.decision === true;
+  const settings = SettingsManager.create(executionPath, agentDir, { projectTrusted: trusted });
   const loader = new DefaultResourceLoader({
-    cwd: project,
+    cwd: executionPath,
     agentDir,
     settingsManager: settings,
     noExtensions: true,
@@ -57,10 +57,10 @@ function provenance(sourceInfo: { source: string; scope: "user" | "project" | "t
 }
 
 export async function getTaskResources(agentDir: string, projectPath: string, taskPath: string): Promise<TaskResourceState> {
-  const { project } = await assertRunnableTask(agentDir, projectPath, taskPath);
+  const { project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
   const [loaded, discovered] = await Promise.all([
-    loadTaskResources(agentDir, project).then((value) => ({ value })).catch((error: unknown) => ({ error })),
-    projectFiles(project),
+    loadTaskResources(agentDir, project, executionPath).then((value) => ({ value })).catch((error: unknown) => ({ error })),
+    projectFiles(executionPath),
   ]);
   if (!("value" in loaded)) return {
     taskPath: path.resolve(taskPath),

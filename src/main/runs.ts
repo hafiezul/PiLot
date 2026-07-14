@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { copyFile } from "node:fs/promises";
 import path from "node:path";
 import { builtInTuiCommand } from "../shared/actions.js";
-import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CommandEvidence, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type RetryEvidence, type RunEvidence, type RunEvidenceItem, type RunStatus, type TaskRunState } from "../shared/projects.js";
+import { detectSupportedImageMimeType, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type CommandEvidence, type CompactionEvidence, type ImageAttachment, type LiveInputMode, type RetryEvidence, type RunEvidence, type RunEvidenceItem, type RunStatus, type TaskExecutionLocation, type TaskRunState, type TaskSetupState } from "../shared/projects.js";
 import { assertExecutionAllowed } from "./projects.js";
 import { loadTaskResources } from "./resources.js";
 import { assertRunnableTask, forkChangedTask as forkTaskSnapshot, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
@@ -140,6 +140,16 @@ function hasExternalChange(active: ActiveRun) {
 
 function runStatus(active: ActiveRun, status: RunStatus): RunStatus {
   return hasExternalChange(active) ? "interrupted" : status;
+}
+
+function assertSetupReady(setup?: Omit<TaskSetupState, "taskPath">) {
+  if (setup && setup.status !== "succeeded" && setup.status !== "bypassed") {
+    throw new Error("Finish Worktree setup or deliberately continue without it before the first Run");
+  }
+}
+
+function taskSetup(command?: string): Omit<TaskSetupState, "taskPath"> | undefined {
+  return command ? { command, status: "pending", output: "", outputTruncated: false } : undefined;
 }
 
 function persistRunOutcome(active: ActiveRun) {
@@ -401,9 +411,9 @@ function savedState(taskPath: string, manager: SessionManager, executionPath: st
   return { taskPath, runs };
 }
 
-export class LocalRunCoordinator {
+export class RunCoordinator {
   private activeTasks = new Map<string, ActiveRun>();
-  private activeProjects = new Set<string>();
+  private activeExecutionLocations = new Set<string>();
   private observedTasks = new Set<string>();
   private taskStates = new Map<string, TaskRunState>();
   private taskHistories = new Map<string, ReturnType<typeof taskHistoryState>>();
@@ -428,9 +438,20 @@ export class LocalRunCoordinator {
     return getTaskContinuity(resolved);
   }
 
-  private finishRun(file: string, project: string, active: ActiveRun) {
+  private assertExecutionAvailable(executionPath: string, kind: "local" | "worktree") {
+    if (this.activeExecutionLocations.has(executionPath)) {
+      throw new Error(kind === "local" ? "Another Local Task is already running in this Project" : "Another Task is already running in this Worktree");
+    }
+  }
+
+  private claimExecution(executionPath: string, kind: "local" | "worktree") {
+    this.assertExecutionAvailable(executionPath, kind);
+    this.activeExecutionLocations.add(executionPath);
+  }
+
+  private finishRun(file: string, active: ActiveRun) {
     this.activeTasks.delete(file);
-    this.activeProjects.delete(project);
+    this.activeExecutionLocations.delete(active.executionPath);
     if (!active.externalChanged && active.manager) this.taskHistories.set(file, taskHistoryState(file, active.manager));
     this.publish({ ...active.state, activeRunId: undefined });
   }
@@ -455,17 +476,17 @@ export class LocalRunCoordinator {
     if (saved) this.publish({ ...saved, activeRunId: undefined, externalChange });
   }
 
-  private async mutateTaskHistory<T>(projectPath: string, taskPath: string, operation: (context: { file: string; project: string; executionPath: string }) => Promise<T>) {
+  private async mutateTaskHistory<T>(projectPath: string, taskPath: string, operation: (context: Awaited<ReturnType<typeof assertRunnableTask>>) => Promise<T>) {
     const context = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     SessionManager.open(context.file);
     this.observe(context.file);
     assertTaskCurrent(context.file);
-    if (this.activeProjects.has(context.project)) throw new Error("Stop the active Run before changing Task history");
-    this.activeProjects.add(context.project);
+    if (this.activeExecutionLocations.has(context.executionPath)) throw new Error("Stop the active Run in this Execution location before changing Task history");
+    this.activeExecutionLocations.add(context.executionPath);
     try {
       return await withTaskWrite(context.file, () => operation(context));
     } finally {
-      this.activeProjects.delete(context.project);
+      this.activeExecutionLocations.delete(context.executionPath);
     }
   }
 
@@ -501,11 +522,11 @@ export class LocalRunCoordinator {
     });
   }
 
-  async forkChangedTask(projectPath: string, taskPath: string) {
+  async forkChangedTask(projectPath: string, taskPath: string, execution: TaskExecutionLocation, setupCommand?: string) {
     await assertExecutionAllowed(this.userData, projectPath);
     const file = path.resolve(taskPath);
     if (this.activeTasks.has(file)) throw new Error("Wait for the interrupted Run to stop before forking this Task");
-    return withTaskWrite(file, () => forkTaskSnapshot(this.agentDir, projectPath, file));
+    return withTaskWrite(file, () => forkTaskSnapshot(this.agentDir, projectPath, file, execution, setupCommand));
   }
 
   async getTaskHistory(projectPath: string, taskPath: string) {
@@ -542,23 +563,23 @@ export class LocalRunCoordinator {
     });
   }
 
-  async forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string) {
+  async forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string, execution: TaskExecutionLocation, setupCommand?: string) {
     await assertExecutionAllowed(this.userData, projectPath);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project }) =>
-      forkFromPrompt(file, project, guardTaskManager(file, SessionManager.open(file)), entryId));
+      forkFromPrompt(file, project, execution, taskSetup(setupCommand), guardTaskManager(file, SessionManager.open(file)), entryId));
   }
 
-  async cloneTaskHistory(projectPath: string, taskPath: string) {
+  async cloneTaskHistory(projectPath: string, taskPath: string, execution: TaskExecutionLocation, setupCommand?: string) {
     await assertExecutionAllowed(this.userData, projectPath);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project }) =>
-      cloneActivePath(file, project, guardTaskManager(file, SessionManager.open(file))));
+      cloneActivePath(file, project, execution, taskSetup(setupCommand), guardTaskManager(file, SessionManager.open(file))));
   }
 
   async navigateTaskHistory(projectPath: string, taskPath: string, entryId: string, summarize: boolean, customInstructions?: string) {
     const instructions = customInstructions?.trim();
     if (instructions && instructions.length > 2_000) throw new Error("Summary focus must be 2,000 characters or fewer");
     if (summarize) await assertExecutionAllowed(this.userData, projectPath);
-    return this.mutateTaskHistory(projectPath, taskPath, async ({ file, executionPath }) => {
+    return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project, executionPath }) => {
       if (!summarize) {
         const manager = guardTaskManager(file, SessionManager.open(file));
         const editorText = navigateWithoutSummary(manager, entryId);
@@ -571,7 +592,7 @@ export class LocalRunCoordinator {
       const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
       if (models.getError()) throw new Error(`Fix models.json before summarizing Task history: ${models.getError()}`);
       if (!models.getAvailable().length) throw new Error("Connect a provider in Settings before summarizing Task history");
-      const { session, manager } = await this.createSession(executionPath, file, auth, models);
+      const { session, manager } = await this.createSession(project, executionPath, file, auth, models);
       try {
         const result = await session.navigateTree(entryId, { summarize: true, ...(instructions ? { customInstructions: instructions } : {}) });
         if (result.cancelled) throw new Error(result.aborted ? "Branch summarization was stopped" : "History navigation was cancelled");
@@ -590,12 +611,13 @@ export class LocalRunCoordinator {
     if (!text) throw new Error("Enter a prompt");
     assertDesktopPrompt(text);
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath, execution, setup } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    assertSetupReady(setup);
     const manager = SessionManager.open(file);
     this.observe(file);
     assertTaskCurrent(file);
     const preparedImages = await prepareImages(images);
-    if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
+    this.assertExecutionAvailable(executionPath, execution.kind);
 
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
     const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
@@ -622,13 +644,13 @@ export class LocalRunCoordinator {
       compactionSequence: 0,
       externalChanged: false,
     };
-    this.activeProjects.add(project);
+    this.claimExecution(executionPath, execution.kind);
     this.activeTasks.set(file, active);
     this.publish(active.state);
 
     try {
       await withTaskWrite(file, async () => {
-        const { session, manager } = await this.createSession(executionPath, file, auth, models);
+        const { session, manager } = await this.createSession(project, executionPath, file, auth, models);
         active.session = session;
         active.manager = manager;
         const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
@@ -673,7 +695,7 @@ export class LocalRunCoordinator {
       updateRun(active, (value) => ({ ...value, status: runStatus(active, active.abortRequested ? "aborted" : "failed") }));
       if (!hasExternalChange(active) && !active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Run failed", detail);
     } finally {
-      this.finishRun(file, project, active);
+      this.finishRun(file, active);
     }
   }
 
@@ -693,11 +715,12 @@ export class LocalRunCoordinator {
     const text = command.trim();
     if (!text) throw new Error("Enter a command");
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath, execution, setup } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    assertSetupReady(setup);
     const manager = SessionManager.open(file);
     this.observe(file);
     assertTaskCurrent(file);
-    if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
+    this.assertExecutionAvailable(executionPath, execution.kind);
 
     const run: RunEvidence = {
       id: randomUUID(),
@@ -719,7 +742,7 @@ export class LocalRunCoordinator {
       compactionSequence: 0,
       externalChanged: false,
     };
-    this.activeProjects.add(project);
+    this.claimExecution(executionPath, execution.kind);
     this.activeTasks.set(file, active);
     this.publish(active.state);
 
@@ -727,7 +750,7 @@ export class LocalRunCoordinator {
       await withTaskWrite(file, async () => {
         const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
         const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
-        const { session, manager } = await this.createSession(executionPath, file, auth, models);
+        const { session, manager } = await this.createSession(project, executionPath, file, auth, models);
         active.session = session;
         active.manager = manager;
         manager.appendCustomEntry(runMetadataType, {
@@ -785,17 +808,18 @@ export class LocalRunCoordinator {
       if (!hasExternalChange(active)) replaceItem(active, "command", (item) => item.kind === "command" ? { ...item, output: detail, status: "failed" } : item);
       updateRun(active, (value) => ({ ...value, status: runStatus(active, "failed") }));
     } finally {
-      this.finishRun(file, project, active);
+      this.finishRun(file, active);
     }
   }
 
   async compactTask(projectPath: string, taskPath: string) {
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath, execution, setup } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    assertSetupReady(setup);
     const manager = SessionManager.open(file);
     this.observe(file);
     assertTaskCurrent(file);
-    if (this.activeProjects.has(project)) throw new Error("Another Local Task is already running in this Project");
+    this.assertExecutionAvailable(executionPath, execution.kind);
 
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
     const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
@@ -822,13 +846,13 @@ export class LocalRunCoordinator {
       compactionSequence: 0,
       externalChanged: false,
     };
-    this.activeProjects.add(project);
+    this.claimExecution(executionPath, execution.kind);
     this.activeTasks.set(file, active);
     this.publish(active.state);
 
     try {
       await withTaskWrite(file, async () => {
-        const { session, manager } = await this.createSession(executionPath, file, auth, models);
+        const { session, manager } = await this.createSession(project, executionPath, file, auth, models);
         active.session = session;
         active.manager = manager;
         const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
@@ -866,12 +890,12 @@ export class LocalRunCoordinator {
       updateRun(active, (value) => ({ ...value, status: runStatus(active, active.abortRequested ? "aborted" : "failed") }));
       if (!hasExternalChange(active) && !active.abortRequested) addNotice(active, `${run.id}-failure`, "error", "Compaction failed", detail);
     } finally {
-      this.finishRun(file, project, active);
+      this.finishRun(file, active);
     }
   }
 
   async exportTask(projectPath: string, taskPath: string, format: "jsonl" | "html", outputPath: string) {
-    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
     if (this.activeTasks.has(file)) throw new Error("Stop the active Run before exporting this Task");
     if (format === "jsonl") {
       await copyFile(file, outputPath);
@@ -879,7 +903,7 @@ export class LocalRunCoordinator {
     }
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
     const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
-    const { session } = await this.createSession(executionPath, file, auth, models);
+    const { session } = await this.createSession(project, executionPath, file, auth, models);
     try {
       await session.exportToHtml(outputPath);
     } finally {
@@ -913,8 +937,8 @@ export class LocalRunCoordinator {
     await Promise.all([...this.activeTasks].map(([taskPath]) => this.abortTask(taskPath)));
   }
 
-  private async createSession(executionPath: string, file: string, auth: AuthStorage, models: ModelRegistry) {
-    const { loader: resources, settings } = await loadTaskResources(this.agentDir, executionPath);
+  private async createSession(projectPath: string, executionPath: string, file: string, auth: AuthStorage, models: ModelRegistry) {
+    const { loader: resources, settings } = await loadTaskResources(this.agentDir, projectPath, executionPath);
     const manager = guardTaskManager(file, SessionManager.open(file));
     const { session } = await createAgentSession({
       cwd: executionPath,

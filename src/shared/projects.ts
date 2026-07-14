@@ -1,12 +1,41 @@
 import type { ApplicationId } from "./editors.js";
 
+export type TaskExecutionLocation =
+  | { kind: "local"; path: string }
+  | { kind: "worktree"; path: string; worktreePath: string; ref: string; commit: string };
+
+export type TaskSetupStatus = "pending" | "running" | "succeeded" | "failed" | "aborted" | "interrupted" | "bypassed";
+
+export type TaskSetupState = {
+  taskPath: string;
+  command: string;
+  status: TaskSetupStatus;
+  output: string;
+  outputTruncated: boolean;
+  exitCode?: number;
+};
+
 export type TaskSummary = {
   id: string;
   path: string;
   title: string;
   lifecycle: "active" | "archived";
   modified: string;
+  execution: TaskExecutionLocation;
+  setup?: Omit<TaskSetupState, "taskPath">;
 };
+
+export type TaskCreationState = {
+  repository: boolean;
+  dirty: boolean;
+  defaultRef?: string;
+  refs: Array<{ value: string; label: string }>;
+  setupCommand: string;
+};
+
+export type TaskCreationRequest =
+  | { kind: "local" }
+  | { kind: "worktree"; ref: string; setupCommand?: string };
 
 export type ProjectDiagnostic = {
   title: string;
@@ -278,17 +307,23 @@ export type ProjectsApi = {
   addProject(): Promise<ProjectsState>;
   selectProject(path: string): Promise<ProjectsState>;
   removeProject(path: string): Promise<ProjectsState>;
-  createTask(projectPath: string): Promise<TaskSummary>;
+  getTaskCreation(projectPath: string): Promise<TaskCreationState>;
+  createTask(projectPath: string, request: TaskCreationRequest): Promise<TaskSummary>;
   getTaskRun(projectPath: string, taskPath: string): Promise<TaskRunState>;
+  getTaskSetup(projectPath: string, taskPath: string): Promise<TaskSetupState | undefined>;
+  runTaskSetup(projectPath: string, taskPath: string): Promise<void>;
+  abortTaskSetup(taskPath: string): Promise<void>;
+  bypassTaskSetup(projectPath: string, taskPath: string): Promise<TaskSetupState>;
+  onTaskSetupEvent(listener: (state: TaskSetupState) => void): () => void;
   reloadTask(projectPath: string, taskPath: string): Promise<TaskRunState>;
-  forkChangedTask(projectPath: string, taskPath: string): Promise<TaskSummary>;
+  forkChangedTask(projectPath: string, taskPath: string, request: TaskCreationRequest): Promise<TaskSummary>;
   getTaskModel(projectPath: string, taskPath: string): Promise<TaskModelState>;
   getTaskResources(projectPath: string, taskPath: string): Promise<TaskResourceState>;
   getTaskHistory(projectPath: string, taskPath: string): Promise<TaskHistoryState>;
   navigateTaskHistory(projectPath: string, taskPath: string, entryId: string, summarize: boolean, customInstructions?: string): Promise<TaskHistoryNavigation>;
   setTaskHistoryLabel(projectPath: string, taskPath: string, entryId: string, label?: string): Promise<TaskHistoryState>;
-  forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string): Promise<TaskHistoryTaskResult>;
-  cloneTaskHistory(projectPath: string, taskPath: string): Promise<TaskHistoryTaskResult>;
+  forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string, request: TaskCreationRequest): Promise<TaskHistoryTaskResult>;
+  cloneTaskHistory(projectPath: string, taskPath: string, request: TaskCreationRequest): Promise<TaskHistoryTaskResult>;
   getTaskChanges(projectPath: string, taskPath: string): Promise<TaskChanges>;
   getTaskFileDiff(projectPath: string, taskPath: string, filePath: string): Promise<TaskFileDiff>;
   openTaskPathInApplication(projectPath: string, taskPath: string, application: ApplicationId, filePath?: string): Promise<void>;

@@ -5,18 +5,19 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPreferences, saveAppearance, saveExpandThinking, savePreferredApplication } from "./preferences.js";
-import { addProject, assertProjectAdmitted, createTask, getProjectsState, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived } from "./projects.js";
+import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectsState, getTaskCreation, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
-import { LocalRunCoordinator } from "./runs.js";
+import { RunCoordinator } from "./runs.js";
 import { assertRunnableTask, getTaskModelState, setTaskModel, setTaskThinking } from "./tasks.js";
 import { getTaskResources } from "./resources.js";
 import { getStartupState } from "./readiness.js";
 import { getTaskChanges, getTaskFileDiff, openTaskPathInApplication } from "./changes.js";
 import { getApplicationState, getConfiguredEditor } from "./editors.js";
+import { WorktreeSetupCoordinator } from "./worktrees.js";
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
 import { applicationIds, type ApplicationId } from "../shared/editors.js";
 import type { Appearance, Preferences } from "../shared/preferences.js";
-import type { ImageAttachment, ThinkingLevel } from "../shared/projects.js";
+import type { ImageAttachment, TaskCreationRequest, ThinkingLevel } from "../shared/projects.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
@@ -187,8 +188,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("providers:oauth-reply", (_event, value?: string) => respondToOAuth(value));
 
   const projectState = async () => getProjectsState(app.getPath("userData"), getAgentDir());
-  const runs = new LocalRunCoordinator(app.getPath("userData"), getAgentDir(), (state) => {
+  const runs = new RunCoordinator(app.getPath("userData"), getAgentDir(), (state) => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:run-event", state);
+  });
+  const setups = new WorktreeSetupCoordinator(getAgentDir(), (state) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:setup-event", state);
   });
   const requireProjectPath = (value: unknown) => {
     if (typeof value !== "string" || !value) throw new Error("A Project path is required");
@@ -202,12 +206,23 @@ app.whenReady().then(async () => {
     if (typeof value !== "string" || !value || value.length > 128 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error("A history entry is required");
     return value;
   };
+  const requireTaskCreation = (value: unknown): TaskCreationRequest => {
+    if (!value || typeof value !== "object" || ((value as TaskCreationRequest).kind !== "local" && (value as TaskCreationRequest).kind !== "worktree")) {
+      throw new Error("Choose an Execution location");
+    }
+    if ((value as TaskCreationRequest).kind === "worktree") {
+      if (typeof (value as { ref?: unknown }).ref !== "string") throw new Error("Choose a committed branch or commit");
+      const setup = (value as { setupCommand?: unknown }).setupCommand;
+      if (setup !== undefined && typeof setup !== "string") throw new Error("Setup command must be text");
+    }
+    return value as TaskCreationRequest;
+  };
   const editorContext = async (projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     await assertProjectAdmitted(app.getPath("userData"), project);
     const { executionPath } = await assertRunnableTask(getAgentDir(), project, task);
-    return getConfiguredEditor(getAgentDir(), executionPath);
+    return getConfiguredEditor(getAgentDir(), executionPath, project);
   };
   ipcMain.handle("applications:get", async (_event, projectPath: unknown, taskPath: unknown) =>
     getApplicationState(preferences.preferredApplication, await editorContext(projectPath, taskPath)));
@@ -235,14 +250,33 @@ app.whenReady().then(async () => {
     selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
   ipcMain.handle("projects:remove", async (_event, projectPath: unknown) =>
     removeProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
-  ipcMain.handle("tasks:create", async (_event, projectPath: unknown) =>
-    createTask(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
+  ipcMain.handle("tasks:get-creation", async (_event, projectPath: unknown) =>
+    getTaskCreation(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
+  ipcMain.handle("tasks:create", async (_event, projectPath: unknown, request: unknown) =>
+    createTask(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireTaskCreation(request)));
   ipcMain.handle("tasks:get-run", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskRun(requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-setup", async (_event, projectPath: unknown, taskPath: unknown) =>
+    setups.get(requireProjectPath(projectPath), requireTaskPath(taskPath)));
+  ipcMain.handle("tasks:run-setup", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    await assertExecutionAllowed(app.getPath("userData"), project);
+    return setups.run(project, requireTaskPath(taskPath));
+  });
+  ipcMain.handle("tasks:abort-setup", async (_event, taskPath: unknown) => setups.abort(requireTaskPath(taskPath)));
+  ipcMain.handle("tasks:bypass-setup", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    await assertExecutionAllowed(app.getPath("userData"), project);
+    return setups.bypass(project, requireTaskPath(taskPath));
+  });
   ipcMain.handle("tasks:reload", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.reloadTask(requireProjectPath(projectPath), requireTaskPath(taskPath)));
-  ipcMain.handle("tasks:fork-changed", async (_event, projectPath: unknown, taskPath: unknown) =>
-    runs.forkChangedTask(requireProjectPath(projectPath), requireTaskPath(taskPath)));
+  ipcMain.handle("tasks:fork-changed", async (_event, projectPath: unknown, taskPath: unknown, request: unknown) => {
+    const project = requireProjectPath(projectPath);
+    const task = requireTaskPath(taskPath);
+    return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
+      runs.forkChangedTask(project, task, execution, setupCommand));
+  });
   ipcMain.handle("tasks:get-model", async (_event, projectPath: unknown, taskPath: unknown) =>
     getTaskModelState(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) =>
@@ -257,10 +291,19 @@ app.whenReady().then(async () => {
     if (label !== undefined && typeof label !== "string") throw new Error("A history label must be text");
     return runs.setTaskHistoryLabel(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId), label as string | undefined);
   });
-  ipcMain.handle("tasks:fork-history", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown) =>
-    runs.forkTaskFromHistory(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId)));
-  ipcMain.handle("tasks:clone-history", async (_event, projectPath: unknown, taskPath: unknown) =>
-    runs.cloneTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath)));
+  ipcMain.handle("tasks:fork-history", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, request: unknown) => {
+    const project = requireProjectPath(projectPath);
+    const task = requireTaskPath(taskPath);
+    const entry = requireHistoryEntry(entryId);
+    return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
+      runs.forkTaskFromHistory(project, task, entry, execution, setupCommand));
+  });
+  ipcMain.handle("tasks:clone-history", async (_event, projectPath: unknown, taskPath: unknown, request: unknown) => {
+    const project = requireProjectPath(projectPath);
+    const task = requireTaskPath(taskPath);
+    return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
+      runs.cloneTaskHistory(project, task, execution, setupCommand));
+  });
   ipcMain.handle("tasks:get-changes", async (_event, projectPath: unknown, taskPath: unknown) =>
     getTaskChanges(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-file-diff", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {

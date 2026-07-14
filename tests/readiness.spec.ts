@@ -697,6 +697,179 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
   }
 });
 
+test("creates a managed Worktree Task from a committed ref", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const provider = await deterministicProvider(environment.root);
+  await mkdir(path.join(project, ".pi"), { recursive: true });
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [
+          { id: "committed-model", name: "Committed model", contextWindow: 32_000, maxTokens: 1_000 },
+          { id: "local-model", name: "Local model", contextWindow: 32_000, maxTokens: 1_000 },
+        ],
+      },
+    },
+  }));
+  await execute("git", ["init"], { cwd: project });
+  await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: project });
+  await execute("git", ["config", "user.name", "PiLot Test"], { cwd: project });
+  await Promise.all([
+    writeFile(path.join(project, ".gitignore"), "ignored.txt\n"),
+    writeFile(path.join(project, "tracked.txt"), "committed\n"),
+    writeFile(path.join(project, ".pi", "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "committed-model" })),
+  ]);
+  await execute("git", ["add", "."], { cwd: project });
+  await execute("git", ["commit", "-m", "fixture base"], { cwd: project });
+  await execute("git", ["branch", "fixture-base"], { cwd: project });
+  const baseCommit = (await execute("git", ["rev-parse", "HEAD"], { cwd: project })).stdout.trim();
+  await Promise.all([
+    writeFile(path.join(project, "tracked.txt"), "dirty local\n"),
+    writeFile(path.join(project, "ignored.txt"), "local only\n"),
+    writeFile(path.join(project, ".pi", "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "local-model" })),
+  ]);
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    const access = app.window.getByRole("dialog", { name: "Project access" });
+    await access.getByRole("button", { name: "Trust project resources", exact: true }).click();
+    await access.getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+
+    const create = app.window.getByRole("dialog", { name: "Create Task" });
+    await expect(create.getByRole("radio", { name: "Local" })).toBeChecked();
+    await expect(create.getByRole("radio", { name: "Worktree" })).toBeVisible();
+    await create.getByRole("radio", { name: "Worktree" }).check();
+    await expect(create).toContainText("Dirty, untracked, and ignored files in Local are excluded");
+    await create.getByRole("combobox", { name: "Branch or commit" }).fill("fixture-base");
+    await create.getByRole("textbox", { name: "Project setup command" }).fill("printf 'dependencies ready\\n' > setup.txt; printf 'setup streamed\\n'");
+    await create.getByRole("button", { name: "Create Worktree Task" }).click();
+
+    await expect(app.window.getByText("Worktree · fixture-base", { exact: true })).toBeVisible();
+    const setup = app.window.getByRole("region", { name: "Worktree setup" });
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await expect(composer.getByRole("button", { name: /Provider and model/ })).toContainText("Committed model");
+    await expect(setup.getByRole("status", { name: "Setup status" })).toHaveText("Pending");
+    await expect(composer.getByRole("button", { name: "Send" })).toBeDisabled();
+    await setup.getByRole("button", { name: "Run setup" }).click();
+    await expect(setup.getByRole("log", { name: "Setup output" })).toContainText("setup streamed");
+    await expect(setup.getByRole("status", { name: "Setup status" })).toHaveText("Succeeded");
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("!printf 'worktree run\\n' > run.txt");
+    await expect(composer.getByRole("button", { name: "Send" })).toBeEnabled();
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
+    const task = await app.window.evaluate(async () => {
+      const state = await (window as any).pilot.getProjects();
+      return state.selected.tasks.find((candidate: any) => candidate.execution.kind === "worktree");
+    });
+    expect(task.execution.path).not.toBe(project);
+    expect(await readFile(path.join(task.execution.path, "tracked.txt"), "utf8")).toBe("committed\n");
+    expect(await readFile(path.join(task.execution.path, "setup.txt"), "utf8")).toBe("dependencies ready\n");
+    expect(await readFile(path.join(task.execution.path, "run.txt"), "utf8")).toBe("worktree run\n");
+    await expect(readFile(path.join(project, "run.txt"), "utf8")).rejects.toThrow();
+    await expect(readFile(path.join(task.execution.path, "ignored.txt"), "utf8")).rejects.toThrow();
+    const metadata = (await readFile(task.path, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+      .filter((entry) => entry.customType === "pilot.task").at(-1);
+    expect(metadata.data).toMatchObject({
+      projectPath: project,
+      execution: { kind: "worktree", path: task.execution.path, ref: "fixture-base" },
+    });
+    expect((await execute("git", ["worktree", "list", "--porcelain"], { cwd: project })).stdout).toContain(task.execution.path);
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await inspector.getByRole("tab", { name: /History/ }).click();
+    await inspector.getByRole("button", { name: "Clone active path" }).click();
+    const cloneDialog = app.window.getByRole("dialog", { name: "Create Task" });
+    await expect(cloneDialog.getByRole("note")).toContainText("uncommitted files are never transferred");
+    await cloneDialog.getByRole("radio", { name: "Worktree" }).check();
+    await cloneDialog.getByRole("combobox", { name: "Branch or commit" }).fill(baseCommit);
+    await cloneDialog.getByRole("button", { name: "Create Worktree Task" }).click();
+    await expect(cloneDialog).toHaveCount(0);
+    await expect.poll(() => app.window.evaluate(async (sourcePath) => Boolean((await (window as any).pilot.getProjects()).selected.tasks.find((candidate: any) => candidate.path !== sourcePath && candidate.execution.kind === "worktree")), task.path)).toBe(true);
+    const cloneTask = await app.window.evaluate(async (sourcePath) => (await (window as any).pilot.getProjects()).selected.tasks.find((candidate: any) => candidate.path !== sourcePath && candidate.execution.kind === "worktree"), task.path);
+    expect(cloneTask.execution.path).not.toBe(task.execution.path);
+    expect((await execute("git", ["worktree", "list", "--porcelain"], { cwd: project })).stdout).toContain(cloneTask.execution.path);
+    const cloneSetup = app.window.getByRole("region", { name: "Worktree setup" });
+    await cloneSetup.getByRole("button", { name: "Run setup" }).click();
+    await expect(cloneSetup.getByRole("status", { name: "Setup status" })).toHaveText("Succeeded");
+    const cloneComposer = app.window.getByRole("form", { name: "Task composer" });
+    await cloneComposer.getByRole("combobox", { name: "Prompt" }).fill("!sleep 5");
+    await cloneComposer.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("region", { name: "Command: sleep 5" })).toContainText("Running");
+    await app.window.evaluate(async ({ projectPath, taskPath }) => {
+      await (window as any).pilot.executeCommand(projectPath, taskPath, "printf 'isolated\\n' > concurrent.txt", false);
+    }, { projectPath: project, taskPath: task.path });
+    expect(await readFile(path.join(task.execution.path, "concurrent.txt"), "utf8")).toBe("isolated\n");
+    await cloneComposer.getByRole("button", { name: "Stop Run" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" })).toContainText("Aborted");
+
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const failedCreate = app.window.getByRole("dialog", { name: "Create Task" });
+    await failedCreate.getByRole("radio", { name: "Worktree" }).check();
+    await expect(failedCreate.getByRole("textbox", { name: "Project setup command" })).toHaveValue(/dependencies ready/);
+    await failedCreate.getByRole("combobox", { name: "Branch or commit" }).fill(baseCommit);
+    await failedCreate.getByRole("textbox", { name: "Project setup command" }).fill("printf 'setup failed\\n'; exit 7");
+    await failedCreate.getByRole("button", { name: "Create Worktree Task" }).click();
+    const failedSetup = app.window.getByRole("region", { name: "Worktree setup" });
+    await failedSetup.getByRole("button", { name: "Run setup" }).click();
+    await expect(failedSetup.getByRole("log", { name: "Setup output" })).toContainText("setup failed");
+    await expect(failedSetup.getByRole("status", { name: "Setup status" })).toHaveText("Failed");
+    const blocked = await app.window.evaluate(async () => {
+      const pilot = (window as any).pilot;
+      const projectState = (await pilot.getProjects()).selected;
+      const worktree = projectState.tasks.find((candidate: any) => candidate.setup?.command.includes("setup failed"));
+      try {
+        await pilot.submitPrompt(projectState.path, worktree.path, "must stay blocked");
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    });
+    expect(blocked).toContain("Finish Worktree setup");
+    await failedSetup.getByRole("button", { name: "Continue without setup" }).click();
+    await expect(failedSetup.getByRole("status", { name: "Setup status" })).toHaveText("Bypassed");
+
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const abortedCreate = app.window.getByRole("dialog", { name: "Create Task" });
+    await abortedCreate.getByRole("radio", { name: "Worktree" }).check();
+    await abortedCreate.getByRole("combobox", { name: "Branch or commit" }).fill("fixture-base");
+    await abortedCreate.getByRole("textbox", { name: "Project setup command" }).fill("printf 'setup started\\n'; sleep 10; touch setup-finished");
+    await abortedCreate.getByRole("button", { name: "Create Worktree Task" }).click();
+    const abortedSetup = app.window.getByRole("region", { name: "Worktree setup" });
+    await abortedSetup.getByRole("button", { name: "Run setup" }).click();
+    await expect(abortedSetup.getByRole("log", { name: "Setup output" })).toContainText("setup started");
+    await abortedSetup.getByRole("button", { name: "Stop setup" }).click();
+    await expect(abortedSetup.getByRole("status", { name: "Setup status" })).toHaveText("Aborted");
+    const abortedTask = await app.window.evaluate(async () => {
+      const tasks = (await (window as any).pilot.getProjects()).selected.tasks;
+      return tasks.find((candidate: any) => candidate.setup?.command.includes("setup started"));
+    });
+    await expect(readFile(path.join(abortedTask.execution.path, "setup-finished"), "utf8")).rejects.toThrow();
+    const concurrentSetup = await app.window.evaluate(async ({ projectPath, taskPath }) => {
+      const pilot = (window as any).pilot;
+      const first = pilot.runTaskSetup(projectPath, taskPath);
+      while ((await pilot.getTaskSetup(projectPath, taskPath))?.status !== "running") {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      let conflict = "";
+      try { await pilot.runTaskSetup(projectPath, taskPath); }
+      catch (reason) { conflict = reason instanceof Error ? reason.message : String(reason); }
+      await pilot.abortTaskSetup(taskPath);
+      await first;
+      return { conflict, status: (await pilot.getTaskSetup(projectPath, taskPath))?.status };
+    }, { projectPath: project, taskPath: abortedTask.path });
+    expect(concurrentSetup).toEqual({ conflict: expect.stringContaining("already running"), status: "aborted" });
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("runs and aborts a Local Task through the Electron boundary", async () => {
   const environment = await fixture();
   const project = await realpath(environment.project);
@@ -721,6 +894,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await app.window.getByRole("button", { name: "Add project" }).click();
     await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
     await app.window.getByRole("button", { name: "New Task" }).click();
+    await expect(app.window.getByRole("dialog", { name: "Create Task" })).toHaveCount(0);
 
     const composer = app.window.getByRole("form", { name: "Task composer" });
     const modelControl = composer.getByRole("button", { name: /Provider and model/ });
@@ -738,6 +912,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await expect(run).toContainText("Running");
     await expect(run).toContainText("Streaming from PiLot.");
     await expect(run).toContainText("Settled");
+    await expect(composer.getByRole("button", { name: "Send" })).toBeVisible();
 
     const directory = sessionDirectory(environment.agentDir, project);
     const firstFile = path.join(directory, (await readdir(directory)).find((file) => file.endsWith(".jsonl"))!);
@@ -757,6 +932,15 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await abortComposer.getByRole("button", { name: "Send" }).click();
     const abortRun = app.window.getByRole("region", { name: "Run timeline" });
     await expect(abortRun.locator('details[aria-label="bash tool, running"]')).toBeVisible();
+    const localConflict = await app.window.evaluate(async ({ projectPath, taskPath }) => {
+      try {
+        await (window as any).pilot.submitPrompt(projectPath, taskPath, "must serialize");
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    }, { projectPath: project, taskPath: firstFile });
+    expect(localConflict).toContain("Another Local Task is already running in this Project");
     const stopToolRun = abortComposer.getByRole("button", { name: "Stop Run" });
     await expect(stopToolRun).toHaveAttribute("title", "Stop Run");
     await expect(stopToolRun.locator("svg")).toBeVisible();
@@ -830,6 +1014,7 @@ test("pauses externally changed Tasks until Reload or Fork", async () => {
     await app.window.getByRole("button", { name: "Add project" }).click();
     await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
     await app.window.getByRole("button", { name: "New Task" }).click();
+    await app.window.getByRole("dialog", { name: "Create Task" }).getByRole("button", { name: "Create Local Task" }).click();
     const composer = app.window.getByRole("form", { name: "Task composer" });
     const prompt = composer.getByRole("combobox", { name: "Prompt" });
     const timeline = app.window.getByRole("region", { name: "Run timeline" });
@@ -890,6 +1075,9 @@ test("pauses externally changed Tasks until Reload or Fork", async () => {
     const blockedEntries = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(blockedEntries.at(-1)?.id).toBe(secondExternalId);
     await continuity.getByRole("button", { name: "Fork Task" }).click();
+    const forkDialog = app.window.getByRole("dialog", { name: "Create Task" });
+    await expect(forkDialog.getByRole("note")).toContainText("uncommitted files are never transferred");
+    await forkDialog.getByRole("button", { name: "Create Local Task" }).click();
     await expect(continuity).toHaveCount(0);
     await expect(prompt).toBeEnabled();
     await expect.poll(async () => {
@@ -982,6 +1170,7 @@ test("reopens a process-terminated Run as Interrupted without replay", async () 
     await app.window.getByRole("button", { name: "Add project" }).click();
     await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
     await app.window.getByRole("button", { name: "New Task" }).click();
+    await app.window.getByRole("dialog", { name: "Create Task" }).getByRole("button", { name: "Create Local Task" }).click();
     let composer = app.window.getByRole("form", { name: "Task composer" });
     await composer.getByRole("combobox", { name: "Prompt" }).fill("abort model");
     await composer.getByRole("button", { name: "Send" }).click();
@@ -1397,6 +1586,7 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
     await app.window.getByRole("button", { name: "Add project" }).click();
     await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
     await app.window.getByRole("button", { name: "New Task" }).click();
+    await app.window.getByRole("dialog", { name: "Create Task" }).getByRole("button", { name: "Create Local Task" }).click();
     const prompt = app.window.getByRole("combobox", { name: "Prompt" });
     await prompt.fill("edit tracked file");
     await app.window.getByRole("button", { name: "Send" }).click();

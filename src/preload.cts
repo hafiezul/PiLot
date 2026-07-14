@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron") as typeof import("electron");
 import type { DesktopActionId } from "./shared/actions.js";
-import type { TaskRunState } from "./shared/projects.js";
+import type { TaskRunState, TaskSetupState } from "./shared/projects.js";
 import type { OAuthEvent } from "./shared/providers.js";
 import type { PiLotApi } from "./shared/readiness.js";
 
@@ -33,17 +33,27 @@ const api: PiLotApi = {
   addProject: () => ipcRenderer.invoke("projects:add"),
   selectProject: (path) => ipcRenderer.invoke("projects:select", path),
   removeProject: (path) => ipcRenderer.invoke("projects:remove", path),
-  createTask: (projectPath) => ipcRenderer.invoke("tasks:create", projectPath),
+  getTaskCreation: (projectPath) => ipcRenderer.invoke("tasks:get-creation", projectPath),
+  createTask: (projectPath, request) => ipcRenderer.invoke("tasks:create", projectPath, request),
   getTaskRun: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-run", projectPath, taskPath),
+  getTaskSetup: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-setup", projectPath, taskPath),
+  runTaskSetup: (projectPath, taskPath) => ipcRenderer.invoke("tasks:run-setup", projectPath, taskPath),
+  abortTaskSetup: (taskPath) => ipcRenderer.invoke("tasks:abort-setup", taskPath),
+  bypassTaskSetup: (projectPath, taskPath) => ipcRenderer.invoke("tasks:bypass-setup", projectPath, taskPath),
+  onTaskSetupEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: TaskSetupState) => listener(value);
+    ipcRenderer.on("tasks:setup-event", handler);
+    return () => ipcRenderer.removeListener("tasks:setup-event", handler);
+  },
   reloadTask: (projectPath, taskPath) => ipcRenderer.invoke("tasks:reload", projectPath, taskPath),
-  forkChangedTask: (projectPath, taskPath) => ipcRenderer.invoke("tasks:fork-changed", projectPath, taskPath),
+  forkChangedTask: (projectPath, taskPath, request) => ipcRenderer.invoke("tasks:fork-changed", projectPath, taskPath, request),
   getTaskModel: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-model", projectPath, taskPath),
   getTaskResources: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-resources", projectPath, taskPath),
   getTaskHistory: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-history", projectPath, taskPath),
   navigateTaskHistory: (projectPath, taskPath, entryId, summarize, customInstructions) => ipcRenderer.invoke("tasks:navigate-history", projectPath, taskPath, entryId, summarize, customInstructions),
   setTaskHistoryLabel: (projectPath, taskPath, entryId, label) => ipcRenderer.invoke("tasks:set-history-label", projectPath, taskPath, entryId, label),
-  forkTaskFromHistory: (projectPath, taskPath, entryId) => ipcRenderer.invoke("tasks:fork-history", projectPath, taskPath, entryId),
-  cloneTaskHistory: (projectPath, taskPath) => ipcRenderer.invoke("tasks:clone-history", projectPath, taskPath),
+  forkTaskFromHistory: (projectPath, taskPath, entryId, request) => ipcRenderer.invoke("tasks:fork-history", projectPath, taskPath, entryId, request),
+  cloneTaskHistory: (projectPath, taskPath, request) => ipcRenderer.invoke("tasks:clone-history", projectPath, taskPath, request),
   getTaskChanges: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-changes", projectPath, taskPath),
   getTaskFileDiff: (projectPath, taskPath, filePath) => ipcRenderer.invoke("tasks:get-file-diff", projectPath, taskPath, filePath),
   openTaskPathInApplication: (projectPath, taskPath, application, filePath) => ipcRenderer.invoke("tasks:open-in-application", projectPath, taskPath, application, filePath),

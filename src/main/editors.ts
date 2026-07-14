@@ -164,8 +164,8 @@ async function resolvedApplications(configured?: ConfiguredEditor) {
   return [...(custom ? [custom, ...known] : known), fileManager()];
 }
 
-export function getConfiguredEditor(agentDir: string, executionPath: string): ConfiguredEditor | undefined {
-  const trusted = new ProjectTrustStore(agentDir).getEntry(executionPath)?.decision === true;
+export function getConfiguredEditor(agentDir: string, executionPath: string, projectPath = executionPath): ConfiguredEditor | undefined {
+  const trusted = new ProjectTrustStore(agentDir).getEntry(projectPath)?.decision === true;
   const settings = SettingsManager.create(executionPath, agentDir, { projectTrusted: trusted });
   const projectCommand = settings.getProjectSettings().externalEditor;
   if (projectCommand?.trim()) return { command: projectCommand, label: "Pi configured editor", baseDirectory: executionPath };

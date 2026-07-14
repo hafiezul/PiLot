@@ -4,7 +4,7 @@ import { desktopActions, type DesktopActionId } from "../shared/actions";
 import type { ApplicationId, ApplicationState } from "../shared/editors";
 import type { Appearance } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSummary, type ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
@@ -174,6 +174,62 @@ function ProjectAccessDialog({ project, dismissible, onChange, onClose }: { proj
   return <dialog ref={dialog} className="project-access-dialog" aria-labelledby="project-access-title">
     {dismissible && <button className="dialog-close" aria-label="Close project access" onClick={onClose}>×</button>}
     <ProjectAccessPanel project={project} onChange={onChange} />
+  </dialog>;
+}
+
+function TaskCreationDialog({ project, state, contextNote, onCreate, onClose }: {
+  project: ProjectAccess;
+  state: TaskCreationState;
+  contextNote?: string;
+  onCreate(request: TaskCreationRequest): Promise<void>;
+  onClose(): void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const refListId = useId();
+  const [kind, setKind] = useState<"local" | "worktree">("local");
+  const [ref, setRef] = useState(state.defaultRef ?? "");
+  const [setupCommand, setSetupCommand] = useState(project.resourceTrust.decision === true ? state.setupCommand : "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    element.showModal();
+    return () => { if (element.open) element.close(); };
+  }, []);
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try { await onCreate(kind === "local" ? { kind } : { kind, ref, setupCommand: setupCommand.trim() || undefined }); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  };
+
+  return <dialog ref={dialog} className="task-creation-dialog" aria-labelledby="task-creation-title" onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
+    <form method="dialog" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+      <header><h2 id="task-creation-title">Create Task</h2><p>Choose where this Task can read and change files in {project.name} before its first Run.</p></header>
+      {contextNote && <p className="task-creation-note" role="note">{contextNote}</p>}
+      <fieldset disabled={busy}>
+        <legend>Execution location</legend>
+        <label><input type="radio" name="execution" checked={kind === "local"} onChange={() => setKind("local")} /><span><strong>Local</strong><small>Use the Project's current checkout.</small></span></label>
+        <label><input type="radio" name="execution" checked={kind === "worktree"} disabled={!state.defaultRef} onChange={() => setKind("worktree")} /><span><strong>Worktree</strong><small>{state.defaultRef ? "Create an isolated checkout for this Task." : "Commit the Project before creating a worktree."}</small></span></label>
+      </fieldset>
+      {kind === "worktree" && <section className="worktree-options" aria-label="Worktree options">
+        <label>Branch or commit
+          <input list={refListId} value={ref} autoFocus disabled={busy} onChange={(event) => setRef(event.target.value)} placeholder="Branch name or commit SHA" required />
+          <datalist id={refListId}>{state.refs.map((item) => <option key={`${item.value}:${item.label}`} value={item.value}>{item.label}</option>)}</datalist>
+        </label>
+        <p className="worktree-boundary" role="note"><strong>Committed files only.</strong> Dirty, untracked, and ignored files in Local are excluded.</p>
+        {state.dirty && <p className="worktree-dirty" role="status">Local currently has uncommitted files. They will remain only in Local.</p>}
+        <label>Project setup command <span className="optional">Optional</span>
+          <textarea value={setupCommand} rows={3} maxLength={20000} aria-label="Project setup command" disabled={busy || project.resourceTrust.decision !== true} onChange={(event) => setSetupCommand(event.target.value)} placeholder={project.resourceTrust.decision === true ? "For example: npm ci" : "Trust Project resources to enable setup"} />
+          <small>{project.resourceTrust.decision === true ? "Saved for this Project. PiLot never infers setup, and runs this only when you choose Run setup." : "Setup commands require trusted Project resources."}</small>
+        </label>
+      </section>}
+      {error && <p className="error" role="alert">{error}</p>}
+      <footer><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button type="submit" className="primary-action" disabled={busy || (kind === "worktree" && !ref.trim())}>{busy ? "Creating…" : kind === "worktree" ? "Create Worktree Task" : "Create Local Task"}</button></footer>
+    </form>
   </dialog>;
 }
 
@@ -566,6 +622,7 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, onSelec
 }
 
 type FlatHistoryNode = { node: TaskHistoryNode; depth: number; parentId?: string; position: number; setSize: number };
+type HistoryTaskCreationAction = { kind: "clone" } | { kind: "fork"; entryId: string };
 
 function HistoryPanel({ project, task, history, loadError, disabled, onChange, onNavigate, onTaskCreated }: {
   project: ProjectAccess;
@@ -578,6 +635,7 @@ function HistoryPanel({ project, task, history, loadError, disabled, onChange, o
   onTaskCreated(result: TaskHistoryTaskResult): Promise<void>;
 }) {
   const tree = useRef<HTMLDivElement>(null);
+  const creationReturnFocus = useRef<HTMLElement | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [label, setLabel] = useState("");
@@ -586,6 +644,7 @@ function HistoryPanel({ project, task, history, loadError, disabled, onChange, o
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [creation, setCreation] = useState<{ state: TaskCreationState; action: HistoryTaskCreationAction }>();
   const allNodes = useMemo(() => {
     const values: TaskHistoryNode[] = [];
     const visit = (nodes: TaskHistoryNode[]) => nodes.forEach((node) => { values.push(node); visit(node.children); });
@@ -626,13 +685,26 @@ function HistoryPanel({ project, task, history, loadError, disabled, onChange, o
     try { await operation(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
   };
+  const createFromHistory = async (action: HistoryTaskCreationAction, request: TaskCreationRequest) => {
+    const result = action.kind === "clone"
+      ? await window.pilot.cloneTaskHistory(project.path, task.path, request)
+      : await window.pilot.forkTaskFromHistory(project.path, task.path, action.entryId, request);
+    setCreation(undefined);
+    await onTaskCreated(result);
+  };
+  const chooseExecution = (action: HistoryTaskCreationAction) => void attempt(async () => {
+    creationReturnFocus.current = document.activeElement as HTMLElement | null;
+    const state = await window.pilot.getTaskCreation(project.path);
+    if (state.repository) setCreation({ state, action });
+    else await createFromHistory(action, { kind: "local" });
+  });
 
   if (!history) return loadError
     ? <div className="history-empty" role="alert"><strong>Could not read Task history</strong><p>{loadError}</p></div>
     : <p className="muted history-loading" role="status">Reading Task history…</p>;
 
   return <section className="history-panel" aria-label="Task history inspector" aria-busy={busy}>
-    <header className="history-heading"><div><p className="eyebrow">Pi session tree</p><h2>Task history</h2></div><div><span>{history.pathCount} path{history.pathCount === 1 ? "" : "s"}</span><button type="button" disabled={disabled || busy} onClick={() => void attempt(async () => onTaskCreated(await window.pilot.cloneTaskHistory(project.path, task.path)))}>Clone active path</button></div></header>
+    <header className="history-heading"><div><p className="eyebrow">Pi session tree</p><h2>Task history</h2></div><div><span>{history.pathCount} path{history.pathCount === 1 ? "" : "s"}</span><button type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "clone" })}>Clone active path</button></div></header>
     {!history.roots.length ? <div className="history-empty"><strong>No history entries yet</strong><p>Submit a prompt to begin this Task's history.</p></div> : <>
       {history.roots.length > 1 && <p className="history-root-branch" role="note">Task start · {history.roots.length} branches</p>}
       <div ref={tree} className="history-tree" role="tree" aria-label="Task history">
@@ -655,7 +727,7 @@ function HistoryPanel({ project, task, history, loadError, disabled, onChange, o
         </button>)}
       </div>
       {selected && <section className="history-actions" aria-label={`Actions for ${selected.title}`}>
-        {selected.kind === "prompt" && <button className="history-fork" type="button" disabled={disabled || busy} onClick={() => void attempt(async () => onTaskCreated(await window.pilot.forkTaskFromHistory(project.path, task.path, selected.id)))}>Fork from prompt</button>}
+        {selected.kind === "prompt" && <button className="history-fork" type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "fork", entryId: selected.id })}>Fork from prompt</button>}
         <form onSubmit={(event) => { event.preventDefault(); void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id, label); onChange(next); setNotice("Label saved"); }); }}>
           <label>History label<input aria-label="History label" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} /></label>
           <div><button type="submit" disabled={disabled || busy || !label.trim()}>Save label</button><button type="button" disabled={disabled || busy || !selected.label} onClick={() => void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id); onChange(next); setLabel(""); setNotice("Label cleared"); })}>Clear label</button></div>
@@ -668,6 +740,10 @@ function HistoryPanel({ project, task, history, loadError, disabled, onChange, o
         </fieldset>
       </section>}
     </>}
+    {creation && <TaskCreationDialog project={project} state={creation.state} contextNote="Task history is copied, but uncommitted files are never transferred between Execution locations." onCreate={(request) => createFromHistory(creation.action, request)} onClose={() => {
+      setCreation(undefined);
+      requestAnimationFrame(() => creationReturnFocus.current?.focus());
+    }} />}
     {busy && <p className="muted history-notice" role="status">Updating Task history…</p>}
     {notice && <p className="success history-notice" role="status">{notice}</p>}
     {error && <p className="error history-notice" role="alert">{error}</p>}
@@ -945,6 +1021,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   onError(reason: unknown, recovery: string): void;
 }) {
   const [timeline, setTimeline] = useState<TaskRunState>();
+  const [setupState, setSetupState] = useState<TaskSetupState>();
   const [modelState, setModelState] = useState<TaskModelState>();
   const [resources, setResources] = useState<TaskResourceState>();
   const [expandThinking, setExpandThinking] = useState(false);
@@ -960,6 +1037,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   const [error, setError] = useState("");
   const [actionNotice, setActionNotice] = useState("");
   const [attachmentError, setAttachmentError] = useState("");
+  const [forkCreation, setForkCreation] = useState<TaskCreationState>();
   const taskPage = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
   const positionedTask = useRef("");
@@ -967,6 +1045,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   const promptInput = useRef<HTMLTextAreaElement>(null);
   const imagePicker = useRef<HTMLInputElement>(null);
   const imageDragDepth = useRef(0);
+  const forkReturnFocus = useRef<HTMLElement | null>(null);
   const currentTaskPath = useRef(task.path);
   currentTaskPath.current = task.path;
   const completionListId = useId();
@@ -975,6 +1054,22 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   const refreshDetails = () => window.pilot.getTaskModel(project.path, task.path).then(updateModelState);
 
   useEffect(() => {
+    let cancelled = false;
+    let receivedEvent = false;
+    setSetupState(task.setup ? { taskPath: task.path, ...task.setup } : undefined);
+    const unsubscribe = window.pilot.onTaskSetupEvent((next) => {
+      if (next.taskPath === task.path) {
+        receivedEvent = true;
+        setSetupState(next);
+      }
+    });
+    void window.pilot.getTaskSetup(project.path, task.path).then((next) => {
+      if (!cancelled && !receivedEvent) setSetupState(next);
+    }).catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
+    return () => { cancelled = true; unsubscribe(); };
+  }, [project.path, task.path]);
+
+  useLayoutEffect(() => {
     let cancelled = false;
     let receivedRunEvent = false;
     setTimeline(undefined);
@@ -1086,8 +1181,22 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
 
   const activeRun = timeline?.runs.find(({ id }) => id === timeline.activeRunId);
   const active = Boolean(activeRun);
+  const setupBlocked = Boolean(setupState && setupState.status !== "succeeded" && setupState.status !== "bypassed");
   const externallyChanged = Boolean(timeline?.externalChange);
   const interrupted = !externallyChanged && timeline?.runs.at(-1)?.status === "interrupted";
+  const createContinuityFork = async (request: TaskCreationRequest) => {
+    const next = await window.pilot.forkChangedTask(project.path, task.path, request);
+    setForkCreation(undefined);
+    onFork(next);
+  };
+  const chooseForkExecution = () => {
+    forkReturnFocus.current = document.activeElement as HTMLElement | null;
+    setError("");
+    void window.pilot.getTaskCreation(project.path).then((state) => {
+      if (state.repository) setForkCreation(state);
+      else void createContinuityFork({ kind: "local" }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  };
   useEffect(() => {
     onRunChange(active);
     return () => onRunChange(false);
@@ -1148,7 +1257,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   };
   const submit = (mode?: LiveInputMode) => {
     const input = draft.trim();
-    if (!input || externallyChanged || (active && (!liveReady || !mode))) return;
+    if (!input || setupBlocked || externallyChanged || (active && (!liveReady || !mode))) return;
     setError("");
     setDraft("");
     const hiddenCommand = !active && input.startsWith("!!");
@@ -1168,12 +1277,36 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     });
   };
   const queues = timeline?.queues ?? { steering: [], followUp: [] };
+  const setupStatus = setupState ? setupState.status[0].toUpperCase() + setupState.status.slice(1) : "";
 
   return <div ref={taskPage} className="task-page">
     <header className="topbar task-topbar">
-      <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">Local execution location</span></div>
+      <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">{task.execution.kind === "worktree" ? `Worktree · ${task.execution.ref}` : "Local execution location"}</span></div>
       <button className="new-task-button" data-action="task.new" onClick={onCreate}>New Task</button>
     </header>
+    {setupState && <section className={`worktree-setup setup-${setupState.status}`} aria-label="Worktree setup">
+      <header><div><h2>Worktree setup</h2><p>Run the trusted Project command before this Task's first Run.</p></div><span role="status" aria-label="Setup status">{setupStatus}</span></header>
+      <code>{setupState.command}</code>
+      {setupState.output && <pre role="log" aria-label="Setup output" aria-live="polite">{setupState.output}</pre>}
+      {setupState.outputTruncated && <p className="output-bound">Earlier setup output is not shown.</p>}
+      <div className="worktree-setup-actions">
+        {setupState.status === "pending" && <button type="button" onClick={() => {
+          setError("");
+          void window.pilot.runTaskSetup(project.path, task.path).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+        }}>Run setup</button>}
+        {setupState.status === "running" && <button type="button" onClick={() => void window.pilot.abortTaskSetup(task.path).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))}>Stop setup</button>}
+        {["failed", "aborted", "interrupted"].includes(setupState.status) && <>
+          <button type="button" onClick={() => {
+            setError("");
+            void window.pilot.runTaskSetup(project.path, task.path).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+          }}>Run setup again</button>
+          <button type="button" onClick={() => {
+            setError("");
+            void window.pilot.bypassTaskSetup(project.path, task.path).then(setSetupState).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+          }}>Continue without setup</button>
+        </>}
+      </div>
+    </section>}
     <section className="run-timeline" aria-label="Run timeline">
       <div className="timeline-heading"><h2>Run timeline</h2><div><span aria-live="polite">{active ? "Run active" : `${timeline?.runs.length ?? 0} Runs`}</span><button type="button" disabled={active || externallyChanged} onClick={() => {
         setError("");
@@ -1190,7 +1323,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 6.25 3.25 3.25 3.25-3.25" /></svg>
       </button>}
       {externallyChanged && <section className="continuity-alert" role="alert" aria-labelledby="continuity-alert-title">
-        <div><strong id="continuity-alert-title">Task changed outside PiLot</strong><p>PiLot paused Task history writes to protect both paths. Review the Run timeline and Changes before continuing.</p></div>
+        <div><strong id="continuity-alert-title">Task changed outside PiLot</strong><p>PiLot paused Task history writes to protect both paths. Review the Run timeline and Changes before continuing. Forking copies the last PiLot path and asks for a new Execution location.</p></div>
         <div className="continuity-actions">
           <button type="button" disabled={active} onClick={() => {
             setError("");
@@ -1201,10 +1334,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
               setActionNotice("External Task history reloaded");
             }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
           }}>Reload Task</button>
-          <button type="button" disabled={active} onClick={() => {
-            setError("");
-            void window.pilot.forkChangedTask(project.path, task.path).then(onFork).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-          }}>Fork Task</button>
+          <button type="button" disabled={active} onClick={chooseForkExecution}>Fork Task</button>
         </div>
       </section>}
       <form className="task-composer" aria-label="Task composer" aria-disabled={externallyChanged || undefined} onDragEnter={(event) => {
@@ -1227,7 +1357,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       void attachFiles([...event.dataTransfer.files]);
     }} onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
       {imageDragActive && <div className="image-drop-feedback" aria-hidden="true"><span>＋</span> Drop images to attach</div>}
-      <label htmlFor="task-prompt">{externallyChanged ? "Prompts paused — choose Reload or Fork" : live ? "Guide the active Run" : "Prompt or inline command"}</label>
+      <label htmlFor="task-prompt">{externallyChanged ? "Prompts paused — choose Reload or Fork" : setupBlocked ? "Finish Worktree setup before the first Run" : live ? "Guide the active Run" : "Prompt or inline command"}</label>
       {resources?.diagnostics.length ? <section className="resource-diagnostics" aria-label="Pi resource diagnostics">
         {resources.diagnostics.map((diagnostic, index) => <p key={`${diagnostic.path ?? "resource"}-${index}`} className={diagnostic.severity}><strong>Pi resource {diagnostic.severity}:</strong> {diagnostic.message}{diagnostic.path && <code>{diagnostic.path}</code>}</p>)}
       </section> : null}
@@ -1309,7 +1439,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
             ? <button type="button" data-action="run.stop" className="composer-action stop-action" aria-label="Stop Run" title="Stop Run" onClick={() => { onActionStart(); void window.pilot.abortTask(task.path).catch((reason) => onError(reason, "The Run may already be settled. Reload the Task if its status looks stale.")); }}>
               <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="6" height="6" rx="1" /></svg>
             </button>
-            : <button type="submit" className="composer-action send-action" aria-label="Send" title="Send" disabled={externallyChanged || !draft.trim() || (active && !liveReady)}>
+            : <button type="submit" className="composer-action send-action" aria-label="Send" title="Send" disabled={setupBlocked || externallyChanged || !draft.trim() || (active && !liveReady)}>
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12V4M4.75 7.25 8 4l3.25 3.25" /></svg>
             </button>}
 
@@ -1317,6 +1447,10 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       </div>
       </form>
     </div>
+    {forkCreation && <TaskCreationDialog project={project} state={forkCreation} contextNote="The last PiLot history path is copied, but uncommitted files are never transferred between Execution locations." onCreate={createContinuityFork} onClose={() => {
+      setForkCreation(undefined);
+      requestAnimationFrame(() => forkReturnFocus.current?.focus());
+    }} />}
   </div>;
 }
 
@@ -1563,6 +1697,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsDestination, setSettingsDestination] = useState<"general" | "providers">("general");
   const [showProjectAccess, setShowProjectAccess] = useState(false);
+  const [taskCreation, setTaskCreation] = useState<TaskCreationState>();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const [runActive, setRunActive] = useState(false);
@@ -1581,6 +1716,8 @@ function App() {
   const [historyDraft, setHistoryDraft] = useState<{ taskPath: string; text: string; version: number }>();
   const settingsButton = useRef<HTMLButtonElement>(null);
   const detailsReturnFocus = useRef<HTMLElement | null>(null);
+  const taskCreationReturnFocus = useRef<HTMLElement | null>(null);
+  const taskCreationPreviousTask = useRef<string | undefined>(undefined);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
     setState(startup);
     setProjects(projectState);
@@ -1595,19 +1732,36 @@ function App() {
     const selected = next.selected;
     if (selected?.executionConsent && (!selected.resourceTrust.required || selected.resourceTrust.decision !== null)) setShowProjectAccess(false);
   }, []);
-  const createSelectedTask = useCallback(async () => {
+  const createTaskFromRequest = useCallback(async (request: TaskCreationRequest) => {
     const project = projects?.selected;
     if (!project) return;
+    const task = await window.pilot.createTask(project.path, request);
+    setTaskCreation(undefined);
+    setProjects(await window.pilot.getProjects());
+    setTaskDetails(undefined);
+    setSelectedTaskPath(task.path);
+  }, [projects?.selected?.path]);
+  const createSelectedTask = useCallback(async (returnFocus?: HTMLElement | null) => {
+    const project = projects?.selected;
+    if (!project) return;
+    taskCreationPreviousTask.current = selectedTaskPath;
+    taskCreationReturnFocus.current = returnFocus ?? (document.activeElement as HTMLElement | null);
+    setSelectedTaskPath(undefined);
     setActionError(undefined);
     try {
-      const task = await window.pilot.createTask(project.path);
-      setProjects(await window.pilot.getProjects());
-      setTaskDetails(undefined);
-      setSelectedTaskPath(task.path);
+      const creation = await window.pilot.getTaskCreation(project.path);
+      if (creation.repository) setTaskCreation(creation);
+      else await createTaskFromRequest({ kind: "local" });
     } catch (reason) {
+      setSelectedTaskPath(taskCreationPreviousTask.current);
       setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery: "Check Project access and try creating the Task again." });
     }
-  }, [projects?.selected?.path]);
+  }, [createTaskFromRequest, projects?.selected?.path, selectedTaskPath]);
+  const closeTaskCreation = useCallback(() => {
+    setTaskCreation(undefined);
+    setSelectedTaskPath(taskCreationPreviousTask.current);
+    requestAnimationFrame(() => taskCreationReturnFocus.current?.focus());
+  }, []);
   const openProviderSettings = useCallback(() => {
     setSettingsDestination("providers");
     setShowSettings(true);
@@ -1709,7 +1863,7 @@ function App() {
       return;
     }
     if (id === "project.add") { attempt(window.pilot.addProject().then(setProjects), "Choose another folder or check its permissions, then try again."); return; }
-    if (id === "task.new") { void createSelectedTask(); return; }
+    if (id === "task.new") { void createSelectedTask(returnFocus); return; }
     if (id === "task.archive" && selectedProject && selectedTask) {
       attempt(window.pilot.setTaskArchived(selectedProject.path, selectedTask.path, true).then((next) => {
         setProjects(next);
@@ -1886,6 +2040,7 @@ function App() {
                 <div><dt>Context</dt><dd>{taskDetails.usage.contextWindow ? `${taskDetails.usage.contextTokens === null ? "Calculating" : taskDetails.usage.contextTokens.toLocaleString()} / ${taskDetails.usage.contextWindow.toLocaleString()}` : "Unavailable"}</dd></div>
                 <div><dt>Total tokens</dt><dd>{taskDetails.usage.totalTokens.toLocaleString()}</dd></div>
                 <div><dt>Cost</dt><dd>${taskDetails.usage.cost.toFixed(5)}</dd></div>
+                <div><dt>Execution location</dt><dd>{selectedTask.execution.kind === "worktree" ? "Worktree" : "Local"}</dd></div>
               </dl>
             </section> : <section className="project-details" aria-label="Project details">
               <p className="eyebrow">Project</p>
@@ -1894,7 +2049,7 @@ function App() {
               <dl>
                 <div><dt>Active Tasks</dt><dd>{selectedProject.tasks.filter(({ lifecycle }) => lifecycle === "active").length}</dd></div>
                 <div><dt>Archived Tasks</dt><dd>{selectedProject.tasks.filter(({ lifecycle }) => lifecycle === "archived").length}</dd></div>
-                <div><dt>Execution location</dt><dd>Local</dd></div>
+                <div><dt>Execution location</dt><dd>Chosen per Task</dd></div>
               </dl>
             </section> : <>
               <p className="eyebrow">Startup</p>
@@ -1926,6 +2081,7 @@ function App() {
         </aside>
       </div>
       {selectedProject && (needsProjectAccess || showProjectAccess) && <ProjectAccessDialog project={selectedProject} dismissible={!needsProjectAccess} onChange={updateProjectAccess} onClose={closeProjectAccess} />}
+      {selectedProject && taskCreation && <TaskCreationDialog project={selectedProject} state={taskCreation} onCreate={createTaskFromRequest} onClose={closeTaskCreation} />}
       <CommandPalette open={paletteOpen} availability={availability} onClose={() => setPaletteOpen(false)} onInvoke={invokeAction} />
       {actionError && <ActionError failure={actionError} onDismiss={() => setActionError(undefined)} />}
     </>

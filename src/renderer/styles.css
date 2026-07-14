@@ -106,6 +106,19 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .task-page { display: flex; flex-direction: column; width: min(760px, 100%); min-height: 100%; margin: 0 auto; }
 .task-topbar { align-items: center; padding-bottom: 38px; }
 .execution-location { display: block; margin-top: 6px; color: #686864; font-size: 11px; }
+.worktree-setup { display: grid; gap: 10px; margin-bottom: 18px; padding: 14px 0; border-top: 1px solid #d8d8d4; border-bottom: 1px solid #d8d8d4; }
+.worktree-setup header { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
+.worktree-setup h2 { margin: 0 0 3px; font-size: 14px; }
+.worktree-setup header p { margin: 0; color: #686864; font-size: 11px; line-height: 1.5; }
+.worktree-setup header > span { flex: none; padding: 3px 7px; border: 1px solid #c8c8c4; border-radius: 4px; color: #5f605b; font-size: 11px; font-weight: 650; }
+.worktree-setup.setup-running header > span { border-color: #7d91aa; color: #315d91; }
+.worktree-setup:is(.setup-failed, .setup-aborted, .setup-interrupted) header > span { border-color: #b98c8c; color: #912f2f; }
+.worktree-setup > code { overflow-wrap: anywhere; color: #555651; font: 11px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.worktree-setup pre { max-height: 180px; margin: 0; padding: 10px; background: #efefed; overflow: auto; font: 11px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.worktree-setup-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.worktree-setup-actions:empty { display: none; }
+.worktree-setup-actions button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 5px 8px; color: inherit; background: #fdfdfc; cursor: pointer; font-size: 11px; }
+.worktree-setup-actions button:hover { background: #ededeb; }
 .run-timeline { flex: 1; padding: 18px 0 36px; border-top: 1px solid #d8d8d4; }
 .timeline-heading, .run-heading { display: flex; align-items: center; justify-content: space-between; }
 .timeline-heading { padding-bottom: 10px; }
@@ -295,6 +308,33 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .composer-controls .composer-action:hover { filter: brightness(.9); }
 .composer-controls .composer-action:active { transform: translateY(1px); }
 .composer-controls button:disabled { cursor: not-allowed; opacity: .52; filter: grayscale(1); }
+.task-creation-dialog { width: min(560px, calc(100% - 32px)); max-height: calc(100% - 48px); margin: auto; padding: 0; border: 1px solid #c8c8c4; border-radius: 8px; color: inherit; background: #f7f7f6; overflow: auto; }
+.task-creation-dialog::backdrop { background: rgb(20 20 19 / 52%); }
+.task-creation-dialog form { display: grid; gap: 20px; padding: 24px; }
+.task-creation-dialog header p { margin: 0; color: #686864; font-size: 12px; line-height: 1.5; }
+.task-creation-note { margin: -8px 0 0; padding: 9px 10px; border: 1px solid #dededb; border-radius: 5px; color: #686864; background: #f1f1ef; font-size: 11px; line-height: 1.45; }
+.task-creation-dialog fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; padding: 0; border: 0; }
+.task-creation-dialog legend { grid-column: 1 / -1; margin-bottom: 2px; font-size: 12px; font-weight: 650; }
+.task-creation-dialog fieldset label { display: flex; align-items: start; gap: 9px; padding: 12px; border: 1px solid #c8c8c4; border-radius: 6px; cursor: pointer; }
+.task-creation-dialog fieldset label:has(input:checked) { border-color: #526c89; background: #edf1f5; }
+.task-creation-dialog fieldset input { margin: 2px 0 0; accent-color: #1668d4; }
+.task-creation-dialog fieldset span { display: grid; gap: 3px; }
+.task-creation-dialog fieldset strong { font-size: 13px; }
+.task-creation-dialog fieldset small { color: #686864; font-size: 11px; line-height: 1.4; }
+.worktree-options { display: grid; gap: 10px; }
+.worktree-options > label { display: grid; gap: 6px; color: #686864; font-size: 12px; font-weight: 650; }
+.worktree-options input, .worktree-options textarea { width: 100%; min-height: 34px; border: 1px solid #c8c8c4; border-radius: 4px; padding: 6px 8px; color: inherit; background: #fff; font: inherit; resize: vertical; }
+.worktree-options label small { color: #686864; font-size: 10px; font-weight: 400; line-height: 1.45; }
+.worktree-options .optional { color: #686864; font-size: 10px; font-weight: 400; }
+.worktree-boundary, .worktree-dirty { margin: 0; font-size: 11px; line-height: 1.5; }
+.worktree-boundary { padding: 10px; border: 1px solid #d7c49f; border-radius: 5px; color: #67430c; background: #f7f3e9; }
+.worktree-dirty { color: #805814; }
+.task-creation-dialog > form > .error { margin: 0; font-size: 12px; }
+.task-creation-dialog footer { display: flex; justify-content: end; gap: 7px; padding-top: 16px; border-top: 1px solid #dededb; }
+.task-creation-dialog footer button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #fdfdfc; cursor: pointer; }
+.task-creation-dialog footer button:disabled { cursor: wait; opacity: .55; }
+.task-creation-dialog footer .primary-action { border-color: #1668d4; color: #fff; background: #1668d4; }
+
 .project-access-dialog { width: min(680px, calc(100% - 32px)); max-height: calc(100% - 48px); margin: auto; padding: 24px; border: 1px solid #c8c8c4; border-radius: 8px; color: inherit; background: #f7f7f6; overflow: auto; }
 .project-access-dialog::backdrop { background: rgb(20 20 19 / 52%); }
 .dialog-close { position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; font-size: 18px; }
@@ -513,12 +553,27 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
 :root[data-appearance="dark"] :is(.task-nav-list li, .nav-footer, .project-list small, .pending-queue .queue-empty span) { color: #aaa9a4; }
 :root[data-appearance="dark"] .project-list button:hover, :root[data-appearance="dark"] .project-list button[aria-current="page"], :root[data-appearance="dark"] .settings-navigation nav button:hover, :root[data-appearance="dark"] .settings-navigation nav button[aria-current="page"], :root[data-appearance="dark"] .back-button:hover, :root[data-appearance="dark"] .settings-button:hover, :root[data-appearance="dark"] .command-center:hover { color: #e8e8e5; background: #343532; }
 :root[data-appearance="dark"] .readiness { border-color: #40413d; background: #242523; }
-:root[data-appearance="dark"] .project-access-dialog { border-color: #50514d; background: #242523; }
+:root[data-appearance="dark"] .project-access-dialog, :root[data-appearance="dark"] .task-creation-dialog { border-color: #50514d; background: #242523; }
+:root[data-appearance="dark"] .task-creation-dialog header p, :root[data-appearance="dark"] .task-creation-note, :root[data-appearance="dark"] .task-creation-dialog fieldset small, :root[data-appearance="dark"] .worktree-options > label, :root[data-appearance="dark"] .worktree-options label small, :root[data-appearance="dark"] .worktree-options .optional { color: #aaa9a4; }
+:root[data-appearance="dark"] .task-creation-note { border-color: #50514d; background: #30312e; }
+:root[data-appearance="dark"] .task-creation-dialog fieldset label, :root[data-appearance="dark"] .task-creation-dialog footer, :root[data-appearance="dark"] .worktree-options input, :root[data-appearance="dark"] .worktree-options textarea { border-color: #50514d; }
+:root[data-appearance="dark"] .task-creation-dialog fieldset label:has(input:checked) { border-color: #7d91aa; background: #293747; }
+:root[data-appearance="dark"] .worktree-options input, :root[data-appearance="dark"] .worktree-options textarea { color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] .worktree-boundary { border-color: #9b702c; color: #f1c46b; background: #332f24; }
+:root[data-appearance="dark"] .worktree-dirty { color: #f1c46b; }
+:root[data-appearance="dark"] .task-creation-dialog footer button { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] .task-creation-dialog footer .primary-action { border-color: #438eea; background: #1668d4; }
 :root[data-appearance="dark"] .project-actions summary, :root[data-appearance="dark"] .project-actions-menu, :root[data-appearance="dark"] .new-task-button, :root[data-appearance="dark"] .task-composer, :root[data-appearance="dark"] .composer-controls button, :root[data-appearance="dark"] .jump-latest { border-color: #50514d; background: #30312e; }
 :root[data-appearance="dark"] .composer-controls .send-action { border-color: #438eea; background: #1668d4; }
 :root[data-appearance="dark"] .composer-controls .stop-action { border-color: #c46c6c; color: #ff9b9b; background: #30312e; }
 :root[data-appearance="dark"] .model-search input { border-color: #50514d; color: #e8e8e5; background: #242523; }
-:root[data-appearance="dark"] :is(.timeline-heading button) { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] :is(.timeline-heading button, .worktree-setup-actions button) { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+:root[data-appearance="dark"] .worktree-setup { border-color: #40413d; }
+:root[data-appearance="dark"] .worktree-setup header p, :root[data-appearance="dark"] .worktree-setup > code { color: #aaa9a4; }
+:root[data-appearance="dark"] .worktree-setup header > span { border-color: #50514d; color: #bbbcb7; }
+:root[data-appearance="dark"] .worktree-setup.setup-running header > span { border-color: #7d91aa; color: #9bc3f0; }
+:root[data-appearance="dark"] .worktree-setup:is(.setup-failed, .setup-aborted, .setup-interrupted) header > span { border-color: #c46c6c; color: #ff9b9b; }
+:root[data-appearance="dark"] .worktree-setup pre { background: #292a27; }
 :root[data-appearance="dark"] :is(.error, .run-status.failed, .run-status.aborted, .run-status.interrupted, .tool-evidence.failed summary span:last-child, .run-notice.error summary, .lifecycle-evidence.failed strong, .lifecycle-evidence.failed summary span) { color: #ff9b9b; }
 :root[data-appearance="dark"] :is(.success, .connected, .ready-mark) { color: #7fd19c; }
 :root[data-appearance="dark"] :is(.output-bound, .run-notice summary, .model-fallback, .gap-mark, .tool-evidence.interrupted summary span:last-child, .command-block.interrupted header span) { color: #f1c46b; }
@@ -584,12 +639,27 @@ dt { color: #6b6b67; } dd { margin: 0; font-weight: 600; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) :is(.task-nav-list li, .nav-footer, .project-list small, .pending-queue .queue-empty span) { color: #aaa9a4; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-list button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-navigation nav button[aria-current="page"], :root:is(:not([data-appearance]), [data-appearance="system"]) .back-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .settings-button:hover, :root:is(:not([data-appearance]), [data-appearance="system"]) .command-center:hover { color: #e8e8e5; background: #343532; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .readiness { border-color: #40413d; background: #242523; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access-dialog { border-color: #50514d; background: #242523; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .project-access-dialog, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog { border-color: #50514d; background: #242523; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog header p, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-note, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog fieldset small, :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-options > label, :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-options label small, :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-options .optional { color: #aaa9a4; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-note { border-color: #50514d; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog fieldset label, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog footer, :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-options input, :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-options textarea { border-color: #50514d; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog fieldset label:has(input:checked) { border-color: #7d91aa; background: #293747; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-options input, :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-options textarea { color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-boundary { border-color: #9b702c; color: #f1c46b; background: #332f24; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-dirty { color: #f1c46b; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog footer button { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .task-creation-dialog footer .primary-action { border-color: #438eea; background: #1668d4; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions summary, :root:is(:not([data-appearance]), [data-appearance="system"]) .project-actions-menu, :root:is(:not([data-appearance]), [data-appearance="system"]) .new-task-button, :root:is(:not([data-appearance]), [data-appearance="system"]) .task-composer, :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls button, :root:is(:not([data-appearance]), [data-appearance="system"]) .jump-latest { border-color: #50514d; background: #30312e; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .send-action { border-color: #438eea; background: #1668d4; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .composer-controls .stop-action { border-color: #c46c6c; color: #ff9b9b; background: #30312e; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) .model-search input { border-color: #50514d; color: #e8e8e5; background: #242523; }
-  :root:is(:not([data-appearance]), [data-appearance="system"]) :is(.timeline-heading button) { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) :is(.timeline-heading button, .worktree-setup-actions button) { border-color: #50514d; color: #e8e8e5; background: #30312e; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-setup { border-color: #40413d; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-setup header p, :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-setup > code { color: #aaa9a4; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-setup header > span { border-color: #50514d; color: #bbbcb7; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-setup.setup-running header > span { border-color: #7d91aa; color: #9bc3f0; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-setup:is(.setup-failed, .setup-aborted, .setup-interrupted) header > span { border-color: #c46c6c; color: #ff9b9b; }
+  :root:is(:not([data-appearance]), [data-appearance="system"]) .worktree-setup pre { background: #292a27; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) :is(.error, .run-status.failed, .run-status.aborted, .run-status.interrupted, .tool-evidence.failed summary span:last-child, .run-notice.error summary, .lifecycle-evidence.failed strong, .lifecycle-evidence.failed summary span) { color: #ff9b9b; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) :is(.success, .connected, .ready-mark) { color: #7fd19c; }
   :root:is(:not([data-appearance]), [data-appearance="system"]) :is(.output-bound, .run-notice summary, .model-fallback, .gap-mark, .tool-evidence.interrupted summary span:last-child, .command-block.interrupted header span) { color: #f1c46b; }

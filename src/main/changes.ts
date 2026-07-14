@@ -307,5 +307,5 @@ export async function openTaskPathInApplication(userDataDir: string, agentDir: s
       throw new Error("Changed files must stay within the Execution location");
     }
   }
-  await launchApplication(application, requestedTarget, canonicalExecutionPath, getConfiguredEditor(agentDir, canonicalExecutionPath));
+  await launchApplication(application, requestedTarget, canonicalExecutionPath, getConfiguredEditor(agentDir, canonicalExecutionPath, projectPath));
 }

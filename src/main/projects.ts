@@ -1,16 +1,18 @@
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ProjectAccess, ProjectsState } from "../shared/projects.js";
-import { createLocalTask, discoverTasks, setTaskLifecycle } from "./tasks.js";
+import type { ProjectAccess, ProjectsState, TaskCreationRequest, TaskExecutionLocation } from "../shared/projects.js";
+import { createTaskAtExecution, discoverTasks, setTaskLifecycle } from "./tasks.js";
+import { getTaskCreationState, withManagedWorktree } from "./worktrees.js";
 
 type SavedProjects = {
   recentProjects: string[];
   selectedProject?: string;
   executionConsent: Record<string, boolean>;
+  setupCommands: Record<string, string>;
 };
 
-const defaults: SavedProjects = { recentProjects: [], executionConsent: {} };
+const defaults: SavedProjects = { recentProjects: [], executionConsent: {}, setupCommands: {} };
 
 async function load(directory: string): Promise<SavedProjects> {
   try {
@@ -19,6 +21,9 @@ async function load(directory: string): Promise<SavedProjects> {
       recentProjects: Array.isArray(saved.recentProjects) ? saved.recentProjects.filter((item): item is string => typeof item === "string") : [],
       selectedProject: typeof saved.selectedProject === "string" ? saved.selectedProject : undefined,
       executionConsent: saved.executionConsent && typeof saved.executionConsent === "object" ? saved.executionConsent : {},
+      setupCommands: saved.setupCommands && typeof saved.setupCommands === "object"
+        ? Object.fromEntries(Object.entries(saved.setupCommands).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+        : {},
     };
   } catch {
     return structuredClone(defaults);
@@ -111,17 +116,57 @@ export async function removeProject(directory: string, agentDir: string, project
   const canonical = await normalize(projectPath);
   saved.recentProjects = saved.recentProjects.filter((item) => item !== canonical);
   delete saved.executionConsent[canonical];
+  delete saved.setupCommands[canonical];
   if (saved.selectedProject === canonical) saved.selectedProject = saved.recentProjects[0];
   await save(directory, saved);
   return getProjectsState(directory, agentDir);
 }
 
-export async function createTask(directory: string, agentDir: string, projectPath: string) {
+export async function getTaskCreation(directory: string, agentDir: string, projectPath: string) {
   const saved = await load(directory);
   const canonical = await canonicalize(projectPath);
   if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this Project before creating a Task");
   if (saved.executionConsent[canonical] !== true) throw new Error("Agent execution consent is required for this Project");
-  return createLocalTask(agentDir, canonical);
+  return { ...await getTaskCreationState(canonical), setupCommand: saved.setupCommands[canonical] ?? "" };
+}
+
+function normalizedSetupCommand(value?: string) {
+  const command = value?.trim() ?? "";
+  if (command.length > 20_000 || command.includes("\0")) throw new Error("Project setup commands must be 20,000 characters or fewer");
+  return command;
+}
+
+type TaskExecutionPlan = { execution: TaskExecutionLocation; setupCommand?: string };
+
+export async function withTaskExecution<T>(
+  directory: string,
+  agentDir: string,
+  projectPath: string,
+  request: TaskCreationRequest,
+  operation: (plan: TaskExecutionPlan) => Promise<T>,
+) {
+  const saved = await load(directory);
+  const canonical = await canonicalize(projectPath);
+  if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this Project before creating a Task");
+  if (saved.executionConsent[canonical] !== true) throw new Error("Agent execution consent is required for this Project");
+  if (!request || (request.kind !== "local" && request.kind !== "worktree")) throw new Error("Choose an Execution location");
+  if (request.kind === "local") return operation({ execution: { kind: "local", path: canonical } });
+
+  const command = normalizedSetupCommand(request.setupCommand);
+  if (command && new ProjectTrustStore(agentDir).getEntry(canonical)?.decision !== true) {
+    throw new Error("Trust Project resources before saving a setup command");
+  }
+  if (command) saved.setupCommands[canonical] = command;
+  else delete saved.setupCommands[canonical];
+  remember(saved, canonical);
+  await save(directory, saved);
+  return withManagedWorktree(directory, canonical, request.ref, (execution) =>
+    operation({ execution, ...(command ? { setupCommand: command } : {}) }));
+}
+
+export function createTask(directory: string, agentDir: string, projectPath: string, request: TaskCreationRequest) {
+  return withTaskExecution(directory, agentDir, projectPath, request, ({ execution, setupCommand }) =>
+    createTaskAtExecution(agentDir, projectPath, execution, setupCommand));
 }
 
 export async function setTaskArchived(
