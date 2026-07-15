@@ -3088,6 +3088,221 @@ test("restores PiLot-owned desktop preferences without polluting Pi settings", a
   }
 });
 
+test("defaults only for a missing Project-state file and surfaces other load failures", async () => {
+  const environment = await fixture();
+  const userData = path.join(environment.root, "pilot-user-data");
+  const projectsFile = path.join(userData, "projects.json");
+  await mkdir(userData, { recursive: true });
+  const app = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+  const loadError = () => app.window.evaluate(async () => {
+    try {
+      await (window as any).pilot.getProjects();
+      return "";
+    } catch (reason) {
+      return reason instanceof Error ? reason.message : String(reason);
+    }
+  });
+
+  try {
+    expect(await app.window.evaluate(() => (window as any).pilot.getProjects())).toEqual({ projects: [] });
+    await expect(readFile(projectsFile)).rejects.toMatchObject({ code: "ENOENT" });
+
+    await writeFile(projectsFile, '{"recentProjects": [');
+    await expect(loadError()).resolves.toMatch(/Project state.*projects\.json.*malformed JSON.*repair.*delete.*retry/i);
+
+    await writeFile(projectsFile, "[]");
+    await expect(loadError()).resolves.toMatch(/Project state.*projects\.json.*object.*repair.*delete.*retry/i);
+
+    await writeFile(projectsFile, JSON.stringify({
+      recentProjects: [],
+      executionConsent: { "/fixture": "yes" },
+      setupCommands: {},
+      environmentOverrides: {},
+    }));
+    await expect(loadError()).resolves.toMatch(/Project state.*projects\.json.*executionConsent.*boolean.*repair.*delete.*retry/i);
+
+    for (const [saved, field] of [
+      [{ recentProjects: [42] }, "recentProjects"],
+      [{ selectedProject: false }, "selectedProject"],
+      [{ setupCommands: { "/fixture": false } }, "setupCommands"],
+      [{ setupCommands: { "/fixture": "x".repeat(20_001) } }, "setupCommands"],
+      [{ environmentOverrides: { "/fixture": { "INVALID-NAME": "value" } } }, "environmentOverrides"],
+      [{ environmentOverrides: { "/fixture": { VALID_NAME: "value\0" } } }, "environmentOverrides"],
+      [{ environmentOverrides: { "/fixture": Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`VALUE_${index}`, "value"])) } }, "environmentOverrides"],
+    ] as const) {
+      await writeFile(projectsFile, JSON.stringify(saved));
+      await expect(loadError()).resolves.toMatch(new RegExp(`Project state.*projects\\.json.*${field}.*repair.*delete.*retry`, "i"));
+    }
+
+    await rm(projectsFile);
+    await mkdir(projectsFile);
+    await expect(loadError()).resolves.toMatch(/Project state.*projects\.json.*read.*repair.*delete.*retry/i);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("retries Project state after the file is repaired without restarting", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const userData = path.join(environment.root, "pilot-user-data");
+  const projectsFile = path.join(userData, "projects.json");
+  await mkdir(userData, { recursive: true });
+  await writeFile(projectsFile, "not JSON");
+  const app = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+
+  try {
+    const alert = app.window.getByRole("alert");
+    await expect(alert).toContainText(/Project state.*projects\.json.*malformed JSON/i);
+    await expect(alert).toContainText(/repair.*delete.*reset.*retry/i);
+    const retry = alert.getByRole("button", { name: "Retry Project state" });
+    await expect(retry).toBeVisible({ timeout: 2_000 });
+
+    await writeFile(projectsFile, JSON.stringify({
+      recentProjects: [project],
+      selectedProject: project,
+      executionConsent: { [project]: true },
+      setupCommands: {},
+      environmentOverrides: {},
+    }));
+    await retry.click();
+    await expect(app.window.getByRole("navigation", { name: "Projects and tasks" })).toContainText("fixture-project");
+    await expect(alert).toHaveCount(0);
+    expect(app.process.exitCode).toBeNull();
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("does not misidentify Pi trust failures as unreadable Project state", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const userData = path.join(environment.root, "pilot-user-data");
+  await mkdir(userData);
+  await writeFile(path.join(userData, "projects.json"), JSON.stringify({
+    recentProjects: [project],
+    selectedProject: project,
+    executionConsent: { [project]: true },
+    setupCommands: {},
+    environmentOverrides: {},
+  }));
+  await writeFile(path.join(environment.agentDir, "trust.json"), "not JSON");
+  const app = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+
+  try {
+    const alert = app.window.getByRole("alert");
+    await expect(alert).toBeVisible();
+    await expect(alert.getByRole("button", { name: "Retry Project state" })).toHaveCount(0);
+    await expect(alert).not.toContainText(/delete.*recent Projects/i);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("keeps readable Project state when restoring recent selection fails", async () => {
+  const environment = await fixture();
+  const firstProject = await realpath(environment.project);
+  const secondProjectDirectory = path.join(environment.root, "second-project");
+  await mkdir(secondProjectDirectory);
+  const secondProject = await realpath(secondProjectDirectory);
+  const userData = path.join(environment.root, "pilot-user-data");
+  await mkdir(userData);
+  await writeFile(path.join(userData, "projects.json"), JSON.stringify({
+    recentProjects: [firstProject, secondProject],
+    selectedProject: firstProject,
+    executionConsent: { [firstProject]: true, [secondProject]: true },
+    setupCommands: {},
+    environmentOverrides: {},
+  }));
+  await writeFile(path.join(userData, "preferences.json"), JSON.stringify({
+    recentSelection: { projectPath: secondProject },
+  }));
+  await mkdir(path.join(userData, "projects.json.tmp"));
+  const app = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+
+  try {
+    await expect(app.window.getByRole("alert")).toBeVisible();
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    await expect(navigation).toContainText("fixture-project");
+    await expect(navigation).toContainText("second-project");
+    expect(await app.window.evaluate(() => (window as any).pilot.getProjects())).toMatchObject({
+      selected: { path: firstProject },
+    });
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("blocks Project-state mutations after a failed load and recovers after repair", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const userData = path.join(environment.root, "pilot-user-data");
+  const projectsFile = path.join(userData, "projects.json");
+  const trustFile = path.join(environment.agentDir, "trust.json");
+  const taskFile = path.join(environment.agentDir, "sessions", "fixture", "task.jsonl");
+  const repairedState = Buffer.from(JSON.stringify({
+    recentProjects: [project],
+    selectedProject: project,
+    executionConsent: { [project]: true },
+    setupCommands: {},
+    environmentOverrides: {},
+  }, null, 2));
+  await mkdir(userData, { recursive: true });
+  await writeFile(projectsFile, repairedState);
+  await writeFile(trustFile, JSON.stringify({ [project]: true }, null, 2));
+  const app = await launch(environment.agentDir, false, {
+    PILOT_USER_DATA_DIR: userData,
+    PILOT_TEST_PROJECT_DIR: environment.project,
+  });
+
+  try {
+    await expect(app.window.getByRole("navigation", { name: "Projects and tasks" })).toContainText("fixture-project");
+    const originalTask = await readFile(taskFile);
+    const originalTrust = await readFile(trustFile);
+    const unreadableState = Buffer.from('{"recentProjects": [\n');
+    await writeFile(projectsFile, unreadableState);
+
+    for (const operation of ["admission", "selection", "removal", "Task lifecycle", "trust", "consent"] as const) {
+      const message = await app.window.evaluate(async ({ action, projectPath, taskPath }) => {
+        const pilot = (window as any).pilot;
+        try {
+          if (action === "admission") await pilot.addProject();
+          if (action === "selection") await pilot.selectProject(projectPath);
+          if (action === "removal") await pilot.removeProject(projectPath);
+          if (action === "Task lifecycle") await pilot.setTaskArchived(projectPath, taskPath, true);
+          if (action === "trust") await pilot.setResourceTrust(projectPath, false);
+          if (action === "consent") await pilot.setExecutionConsent(projectPath, false);
+          return "";
+        } catch (reason) {
+          return reason instanceof Error ? reason.message : String(reason);
+        }
+      }, { action: operation, projectPath: project, taskPath: taskFile });
+      expect(message, operation).toMatch(/Project state.*projects\.json.*malformed JSON/i);
+      expect(await readFile(projectsFile), operation).toEqual(unreadableState);
+      expect(await readFile(taskFile), operation).toEqual(originalTask);
+      expect(await readFile(trustFile), operation).toEqual(originalTrust);
+    }
+
+    await writeFile(projectsFile, repairedState);
+    const recovered = await app.window.evaluate(async (projectPath) => {
+      const pilot = (window as any).pilot;
+      await pilot.selectProject(projectPath);
+      return pilot.getProjects();
+    }, project);
+    expect(recovered.selected.path).toBe(project);
+    expect(recovered.selected.executionConsent).toBe(true);
+    expect(await readFile(taskFile)).toEqual(originalTask);
+    expect(await readFile(trustFile)).toEqual(originalTrust);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("admits a Project before presenting its existing Pi sessions as Tasks", async () => {
   const environment = await fixture();
   const canonicalProject = await realpath(environment.project);
