@@ -1,5 +1,5 @@
-import { DefaultResourceLoader, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { readdir } from "node:fs/promises";
+import { DefaultPackageManager, DefaultResourceLoader, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { access, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { TaskResourceState } from "../shared/projects.js";
 import { assertRunnableTask } from "./tasks.js";
@@ -15,7 +15,34 @@ export async function loadTaskResources(agentDir: string, projectPath: string, e
     noThemes: true,
   });
   await loader.reload();
-  return { loader, settings };
+  const settingsErrors = settings.drainErrors();
+  if (settingsErrors.length) {
+    const first = settingsErrors[0];
+    const settingsPath = first.scope === "global" ? path.join(agentDir, "settings.json") : path.join(executionPath, ".pi", "settings.json");
+    throw new Error(`Pi ${first.scope} settings could not be read from ${settingsPath}: ${first.error.message}`);
+  }
+
+  const resolved = await new DefaultPackageManager({ cwd: executionPath, agentDir, settingsManager: settings })
+    .resolve(async () => "skip");
+  const unsupported = [
+    ...resolved.extensions.filter(({ enabled }) => enabled).map(({ path: resourcePath, metadata }) => ({
+      kind: "extension" as const,
+      path: resourcePath,
+      scope: metadata.scope,
+    })),
+    ...resolved.themes.filter(({ enabled }) => enabled).map(({ path: resourcePath, metadata }) => ({
+      kind: "theme" as const,
+      path: resourcePath,
+      scope: metadata.scope,
+    })),
+    ...await access(path.join(agentDir, "keybindings.json")).then(() => [{
+      kind: "keybindings" as const,
+      path: path.join(agentDir, "keybindings.json"),
+      scope: "user" as const,
+    }]).catch(() => []),
+  ].filter((resource, index, resources) => resources.findIndex((candidate) => candidate.kind === resource.kind && candidate.path === resource.path) === index)
+    .sort((left, right) => left.kind.localeCompare(right.kind) || left.path.localeCompare(right.path));
+  return { loader, settings, unsupported };
 }
 
 async function projectFiles(project: string) {
@@ -70,6 +97,7 @@ export async function getTaskResources(agentDir: string, projectPath: string, ta
       severity: "error",
       message: loaded.error instanceof Error ? loaded.error.message : String(loaded.error),
     }, ...discovered.diagnostics],
+    unsupported: [],
   };
   const skills = loaded.value.loader.getSkills();
   const prompts = loaded.value.loader.getPrompts();
@@ -96,5 +124,6 @@ export async function getTaskResources(agentDir: string, projectPath: string, ta
       ...skills.diagnostics.map((diagnostic) => ({ severity: diagnostic.type === "error" ? "error" as const : "warning" as const, message: diagnostic.message, path: diagnostic.path })),
       ...discovered.diagnostics,
     ],
+    unsupported: loaded.value.unsupported,
   };
 }

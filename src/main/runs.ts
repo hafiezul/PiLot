@@ -3,6 +3,7 @@ import {
   createAgentSession,
   ModelRegistry,
   resizeImage,
+  resolveModelScopeWithDiagnostics,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
@@ -1137,6 +1138,10 @@ export class RunCoordinator {
   private async createSession(projectPath: string, executionPath: string, file: string, auth: AuthStorage, models: ModelRegistry) {
     const { loader: resources, settings } = await loadTaskResources(this.agentDir, projectPath, executionPath);
     const manager = guardTaskManager(file, SessionManager.open(file));
+    const configuredScope = settings.getEnabledModels();
+    const { scopedModels } = Array.isArray(configuredScope) && configuredScope.length
+      ? await resolveModelScopeWithDiagnostics(configuredScope, models)
+      : { scopedModels: [] };
     const { session } = await createAgentSession({
       cwd: executionPath,
       agentDir: this.agentDir,
@@ -1145,6 +1150,7 @@ export class RunCoordinator {
       settingsManager: settings,
       resourceLoader: resources,
       sessionManager: manager,
+      scopedModels,
       ...getTaskSessionSelection(manager, models),
     });
     return { session, manager };

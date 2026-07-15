@@ -1,4 +1,4 @@
-import { AuthStorage, CURRENT_SESSION_VERSION, estimateTokens, ModelRegistry, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, createAgentSession, CURRENT_SESSION_VERSION, DefaultResourceLoader, estimateTokens, ModelRegistry, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -6,7 +6,7 @@ import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
-import type { ProjectDiagnostic, RunStatus, TaskExecutionLocation, TaskModelState, TaskSetupState, TaskSetupStatus, TaskSummary, ThinkingLevel } from "../shared/projects.js";
+import { thinkingLevels, type ProjectDiagnostic, type RunStatus, type TaskExecutionLocation, type TaskModelState, type TaskSetupState, type TaskSetupStatus, type TaskSummary, type ThinkingLevel } from "../shared/projects.js";
 import { BUILT_IN_PROVIDER_IDS } from "../shared/providers.js";
 import { guardTaskManager, taskSnapshot } from "./continuity.js";
 
@@ -596,11 +596,9 @@ export async function discoverTasks(agentDir: string, projectPath: string) {
 
 type RegisteredModel = ReturnType<ModelRegistry["getAll"]>[number];
 
-const allThinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
 function supportedThinkingLevels(model: RegisteredModel): ThinkingLevel[] {
   if (!model.reasoning) return ["off"];
-  return allThinkingLevels.filter((level) => {
+  return thinkingLevels.filter((level) => {
     const mapped = model.thinkingLevelMap?.[level];
     return mapped !== null && ((level !== "xhigh" && level !== "max") || mapped !== undefined);
   });
@@ -609,9 +607,9 @@ function supportedThinkingLevels(model: RegisteredModel): ThinkingLevel[] {
 function clampThinkingLevel(model: RegisteredModel, requested: ThinkingLevel) {
   const supported = supportedThinkingLevels(model);
   if (supported.includes(requested)) return requested;
-  const index = allThinkingLevels.indexOf(requested);
-  return allThinkingLevels.slice(index).find((level) => supported.includes(level))
-    ?? allThinkingLevels.slice(0, index).reverse().find((level) => supported.includes(level))
+  const index = thinkingLevels.indexOf(requested);
+  return thinkingLevels.slice(index).find((level) => supported.includes(level))
+    ?? thinkingLevels.slice(0, index).reverse().find((level) => supported.includes(level))
     ?? "off";
 }
 
@@ -620,7 +618,14 @@ function modelServices(agentDir: string, projectPath: string, executionPath = pr
   const models = ModelRegistry.create(auth, path.join(agentDir, "models.json"));
   if (models.getError()) throw new Error(`Fix models.json before configuring this Task: ${models.getError()}`);
   const trusted = new ProjectTrustStore(agentDir).getEntry(projectPath)?.decision === true;
-  return { auth, models, settings: SettingsManager.create(executionPath, agentDir, { projectTrusted: trusted }) };
+  const settings = SettingsManager.create(executionPath, agentDir, { projectTrusted: trusted });
+  const settingsErrors = settings.drainErrors();
+  if (settingsErrors.length) {
+    const first = settingsErrors[0];
+    const settingsPath = first.scope === "global" ? path.join(agentDir, "settings.json") : path.join(executionPath, ".pi", "settings.json");
+    throw new Error(`Fix Pi ${first.scope} settings before configuring this Task: ${settingsPath}: ${first.error.message}`);
+  }
+  return { auth, models, settings };
 }
 
 function usage(manager: SessionManager, model?: RegisteredModel): TaskModelState["usage"] {
@@ -695,7 +700,42 @@ function customEndpointProviders(agentDir: string) {
   }
 }
 
-function taskModelState(file: string, projectPath: string, executionPath: string, agentDir: string, manager: SessionManager): TaskModelState {
+/** Resolve Pi's automatic default through the pinned SDK without mutating the Task. */
+async function resolveAutomaticModel(
+  agentDir: string,
+  executionPath: string,
+  auth: AuthStorage,
+  models: ModelRegistry,
+  settings: SettingsManager,
+) {
+  const resources = new DefaultResourceLoader({
+    cwd: executionPath,
+    agentDir,
+    settingsManager: settings,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+  const { session } = await createAgentSession({
+    cwd: executionPath,
+    agentDir,
+    authStorage: auth,
+    modelRegistry: models,
+    settingsManager: settings,
+    resourceLoader: resources,
+    sessionManager: SessionManager.inMemory(executionPath),
+    noTools: "all",
+  });
+  try {
+    return session.model;
+  } finally {
+    session.dispose();
+  }
+}
+
+async function taskModelState(file: string, projectPath: string, executionPath: string, agentDir: string, manager: SessionManager): Promise<TaskModelState> {
   const { auth, models, settings } = modelServices(agentDir, projectPath, executionPath);
   const customEndpoints = customEndpointProviders(agentDir);
   const available = models.getAvailable();
@@ -706,7 +746,7 @@ function taskModelState(file: string, projectPath: string, executionPath: string
   const configuredDefault = settings.getDefaultProvider() && settings.getDefaultModel()
     ? availableByKey.get(`${settings.getDefaultProvider()}/${settings.getDefaultModel()}`)
     : undefined;
-  const selected = saved ?? configuredDefault ?? available[0];
+  const selected = saved ?? configuredDefault ?? await resolveAutomaticModel(agentDir, executionPath, auth, models, settings);
   const hasThinkingEntry = manager.getBranch().some((entry) => entry.type === "thinking_level_change");
   const requested = (hasThinkingEntry ? context.thinkingLevel : settings.getDefaultThinkingLevel() ?? "medium") as ThinkingLevel;
   const thinkingLevel = selected ? clampThinkingLevel(selected, requested) : "off";
@@ -751,7 +791,7 @@ export async function setTaskModel(agentDir: string, projectPath: string, taskPa
   const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
   return withTaskWrite(file, async () => {
     const manager = guardTaskManager(file, SessionManager.open(file));
-    const before = taskModelState(file, project, executionPath, agentDir, manager);
+    const before = await taskModelState(file, project, executionPath, agentDir, manager);
     const { models } = modelServices(agentDir, project, executionPath);
     const model = models.getAvailable().find((candidate) => candidate.provider === provider && candidate.id === modelId);
     if (!model) throw new Error("Connect this model's provider in Settings before selecting it");
@@ -764,11 +804,11 @@ export async function setTaskModel(agentDir: string, projectPath: string, taskPa
 }
 
 export async function setTaskThinking(agentDir: string, projectPath: string, taskPath: string, requested: ThinkingLevel) {
-  if (!allThinkingLevels.includes(requested)) throw new Error("Choose a valid thinking level");
+  if (!thinkingLevels.includes(requested)) throw new Error("Choose a valid thinking level");
   const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
   return withTaskWrite(file, async () => {
     const manager = guardTaskManager(file, SessionManager.open(file));
-    const before = taskModelState(file, project, executionPath, agentDir, manager);
+    const before = await taskModelState(file, project, executionPath, agentDir, manager);
     if (!before.selected) throw new Error("Connect a provider before choosing a thinking level");
     const { models } = modelServices(agentDir, project, executionPath);
     const model = models.find(before.selected.provider, before.selected.id);

@@ -80,7 +80,8 @@ export type ProjectsState = {
 
 export type RunStatus = "queued" | "preparing" | "running" | "retrying" | "compacting" | "settled" | "failed" | "aborted" | "interrupted";
 export type LiveInputMode = "steer" | "followUp";
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = typeof thinkingLevels[number];
 
 export type TaskModelState = {
   taskPath: string;
@@ -255,6 +256,12 @@ export type TaskHistoryTaskResult = {
   draft?: string;
 };
 
+export type UnsupportedTaskResource = {
+  kind: "extension" | "theme" | "keybindings";
+  path: string;
+  scope: "user" | "project" | "temporary";
+};
+
 export type TaskResourceState = {
   taskPath: string;
   commands: Array<{
@@ -271,6 +278,7 @@ export type TaskResourceState = {
   }>;
   files: string[];
   diagnostics: Array<{ severity: "warning" | "error"; message: string; path?: string }>;
+  unsupported: UnsupportedTaskResource[];
 };
 
 export type ChangedFile = {

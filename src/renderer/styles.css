@@ -248,6 +248,15 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .composer-completions strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .composer-completions small { color: #686864; font-size: 10px; }
 .composer-completions button > small { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.unsupported-resources { padding: 8px 9px; border: 1px solid var(--change-border); border-radius: 4px; background: var(--change-subtle); }
+.unsupported-resources header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.unsupported-resources header strong { font-size: 11px; }
+.unsupported-resources header span { flex: none; color: var(--change-muted); font-size: 10px; font-weight: 650; }
+.unsupported-resources p { margin: 4px 0 7px; color: var(--change-muted); font-size: 10px; line-height: 1.45; }
+.unsupported-resources ul { max-height: 76px; list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+.unsupported-resources li { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 7px; padding: 3px 0; border-top: 1px solid var(--change-border); font-size: 10px; }
+.unsupported-resources li span { color: var(--change-muted); }
+.unsupported-resources code { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .resource-diagnostics { max-height: 90px; padding: 6px 8px; border: 1px solid #d7c49f; border-radius: 4px; background: #f7f3e9; overflow-y: auto; }
 .resource-diagnostics p { margin: 2px 0; color: #805814; font-size: 10px; line-height: 1.4; }
 .resource-diagnostics code { display: block; color: inherit; overflow-wrap: anywhere; }
@@ -421,13 +430,47 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .back-button { display: flex; align-items: center; gap: 5px; padding: 5px 8px; color: #5f605b; font-size: 12px; }
 .back-button:first-letter { font-size: 18px; }
 .settings-main { padding: 54px max(42px, calc((100% - 720px) / 2)); }
-.general-settings, .provider-setup { max-width: 720px; }
+.general-settings, .agent-settings, .provider-setup { max-width: 720px; }
 .general-settings > .muted { margin: 0 0 32px; font-size: 13px; }
+.settings-page-heading { display: flex; align-items: start; justify-content: space-between; gap: 24px; }
+.settings-page-heading h2 { margin-bottom: 0; }
+.settings-page-heading button, .agent-settings-group button { border: 1px solid var(--change-button-border); border-radius: 5px; padding: 6px 10px; color: inherit; background: var(--change-surface); cursor: pointer; font-size: 12px; }
+.settings-page-heading button:hover:not(:disabled), .agent-settings-group button:hover:not(:disabled) { background: var(--change-subtle); }
+.settings-page-heading button:disabled, .agent-settings-group button:disabled { cursor: not-allowed; opacity: .55; }
+.agent-settings[aria-busy="true"] .settings-page-heading button:disabled, .agent-settings[aria-busy="true"] .agent-settings-group button:disabled { cursor: wait; }
+.settings-introduction { max-width: 68ch; margin: 12px 0 8px; color: var(--change-muted); font-size: 13px; line-height: 1.55; }
+.settings-source { margin: 0; color: var(--change-muted); font-size: 11px; }
+.settings-source code { overflow-wrap: anywhere; color: inherit; }
+.agent-settings-group { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--change-border); }
+.agent-settings-group > header { margin-bottom: 12px; }
+.agent-settings-group h3 { margin: 0; font-size: 13px; }
+.agent-settings-group header p { max-width: 68ch; margin: 4px 0 0; color: var(--change-muted); font-size: 11px; line-height: 1.5; }
+.agent-select-setting { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(0, 1.5fr); align-items: center; gap: 6px 18px; min-height: 54px; padding: 9px 0; border-top: 1px solid var(--change-border); color: inherit; font-size: 12px; font-weight: 650; }
+.agent-select-setting:last-child { border-bottom: 1px solid var(--change-border); }
+.agent-select-setting select { width: 100%; min-height: 34px; border: 1px solid var(--change-button-border); border-radius: 4px; padding: 6px 8px; color: inherit; background: var(--change-surface); font: inherit; font-weight: 400; }
+.agent-select-setting small { grid-column: 2; color: var(--change-muted); font-size: 10px; font-weight: 400; line-height: 1.4; }
+.model-scope-setting textarea { width: 100%; min-height: 86px; resize: vertical; border: 1px solid var(--change-button-border); border-radius: 4px; padding: 8px 9px; color: inherit; background: var(--change-surface); font: 11px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.model-scope-setting textarea::placeholder { color: var(--change-muted); opacity: 1; }
+.scope-diagnostics { margin: 8px 0 0; padding-left: 18px; color: var(--history-summary); font-size: 10px; line-height: 1.5; }
+.settings-save-row { display: flex; align-items: center; justify-content: end; gap: 12px; margin-top: 8px; }
+.settings-save-row span { color: var(--change-muted); font-size: 10px; }
+.runtime-defaults form { padding: 14px 10px; border-top: 1px solid var(--change-border); }
+.runtime-defaults form:last-of-type { border-bottom: 1px solid var(--change-border); }
+.runtime-defaults .runtime-toggle { display: flex; align-items: center; gap: 12px; cursor: pointer; }
+.runtime-defaults .runtime-toggle input { width: 16px; height: 16px; flex: none; margin: 0; accent-color: var(--focus-ring); }
+.runtime-defaults .runtime-toggle span { display: grid; gap: 3px; }
+.runtime-defaults .runtime-toggle strong { font-size: 13px; }
+.runtime-defaults .runtime-toggle small { color: var(--change-muted); font-size: 11px; }
+.runtime-number-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0 0 28px; }
+.runtime-number-settings label { display: grid; gap: 6px; color: var(--change-muted); font-size: 10px; cursor: text; }
+.runtime-number-settings input { width: 100%; min-height: 34px; border: 1px solid var(--change-button-border); border-radius: 4px; padding: 6px 8px; color: var(--change-text); background: var(--change-surface); font: 12px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
+.runtime-defaults .settings-save-row { margin-left: 28px; }
+.settings-feedback { margin: 16px 0 0; font-size: 12px; line-height: 1.45; }
 .general-settings fieldset { margin: 0; padding: 0; border: 0; }
-.general-settings .run-cap-setting, .general-settings .terminal-setting, .general-settings .thinking-setting { margin-top: 30px; }
+.general-settings .run-cap-setting, .general-settings .notification-setting, .general-settings .terminal-setting, .general-settings .thinking-setting { margin-top: 30px; }
 .general-settings legend { margin-bottom: 10px; font-size: 12px; font-weight: 650; }
 .general-settings label { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 9px 10px; border-top: 1px solid #dededb; cursor: pointer; }
-.general-settings label:last-child, .general-settings .terminal-setting label:last-of-type { border-bottom: 1px solid #dededb; }
+.general-settings label:last-child, .general-settings .notification-setting label:last-of-type, .general-settings .terminal-setting label:last-of-type { border-bottom: 1px solid #dededb; }
 .general-settings input { width: 16px; height: 16px; margin: 0; accent-color: #1668d4; }
 .general-settings .run-cap-setting label { justify-content: space-between; cursor: default; }
 .general-settings .run-cap-setting input { width: 72px; height: 32px; flex: none; border: 1px solid #c8c8c4; border-radius: 4px; padding: 4px 6px; color: inherit; background: #fdfdfc; font: inherit; font-variant-numeric: tabular-nums; }

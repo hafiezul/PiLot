@@ -603,6 +603,7 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     mkdir(path.dirname(projectPrompt), { recursive: true }),
     mkdir(path.dirname(projectSkill), { recursive: true }),
     mkdir(path.join(environment.project, ".pi", "extensions"), { recursive: true }),
+    mkdir(path.join(environment.project, ".pi", "themes"), { recursive: true }),
     mkdir(path.join(environment.project, "src", "nested"), { recursive: true }),
     mkdir(path.join(environment.agentDir, "prompts"), { recursive: true }),
   ]);
@@ -614,6 +615,8 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     writeFile(path.join(environment.project, "src", "nested", "context.txt"), "Project-only context"),
     writeFile(path.join(environment.root, "outside-secret.txt"), "outside"),
     writeFile(path.join(environment.project, ".pi", "extensions", "must-not-run.ts"), `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(extensionMarker)}, "ran");\nexport default function () {}`),
+    writeFile(path.join(environment.project, ".pi", "themes", "terminal-only.json"), JSON.stringify({ name: "terminal-only", colors: {} })),
+    writeFile(path.join(environment.agentDir, "keybindings.json"), JSON.stringify({ "app.model.select": "ctrl+m" })),
     writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
       providers: {
         fixture: {
@@ -644,6 +647,13 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     const prompt = composer.getByRole("combobox", { name: "Prompt" });
     const diagnostics = composer.getByRole("region", { name: "Pi resource diagnostics" });
     await expect(diagnostics).toContainText(/description/i);
+    const unsupported = composer.getByRole("region", { name: "Unsupported Pi resources" });
+    await expect(unsupported).toContainText("1 extension not executed");
+    await expect(unsupported).toContainText("1 TUI theme ignored");
+    await expect(unsupported).toContainText("TUI keybindings ignored");
+    await expect(unsupported).toContainText("must-not-run.ts");
+    await expect(unsupported).toContainText("terminal-only.json");
+    await expect(unsupported).toContainText("keybindings.json");
     expect(await readFile(extensionMarker, "utf8").catch(() => "")).toBe("");
 
     await prompt.fill("/project");
@@ -2821,16 +2831,179 @@ test("configures providers on a dedicated settings page without exposing secrets
   }
 });
 
-test("applies and persists PiLot appearance preferences", async () => {
+test("projects Pi's automatic model before the first Run", async () => {
   const environment = await fixture();
-  const userData = path.join(environment.root, "pilot-user-data");
-  const first = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+  const provider = await deterministicProvider(environment.root);
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      anthropic: {
+        baseUrl: provider.baseUrl,
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [
+          { id: "claude-fable-5", name: "First registry model", contextWindow: 32_000, maxTokens: 1_000 },
+          { id: "claude-opus-4-8", name: "Canonical Anthropic default", contextWindow: 32_000, maxTokens: 1_000 },
+        ],
+      },
+    },
+  }));
+  await writeFile(path.join(environment.agentDir, "settings.json"), "{}");
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
 
   try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await expect(composer.getByRole("button", { name: /Provider and model/ })).toContainText("Canonical Anthropic default");
+    const taskPath = await app.window.evaluate(async () => {
+      const state = await (window as any).pilot.getProjects();
+      return [...state.selected.tasks].sort((left: { modified: string }, right: { modified: string }) => right.modified.localeCompare(left.modified))[0].path as string;
+    });
+    expect((await readFile(taskPath, "utf8")).includes('"type":"model_change"')).toBe(false);
+
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("confirm automatic model");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.getByRole("region", { name: "Run timeline" })).toContainText("Settled");
+    expect(provider.requests.some((body) => JSON.parse(body).model === "claude-opus-4-8")).toBe(true);
+    expect((await readFile(taskPath, "utf8")).split("\n").some((line) => line && JSON.parse(line).type === "model_change" && JSON.parse(line).modelId === "claude-opus-4-8")).toBe(true);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("reads and durably writes canonical Pi agent defaults", async () => {
+  const environment = await fixture();
+  const settingsPath = path.join(environment.agentDir, "settings.json");
+  await writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: "http://127.0.0.1:11434/v1",
+        api: "openai-completions",
+        apiKey: "fixture-key",
+        models: [
+          { id: "basic-model", name: "Basic model", contextWindow: 32_000, maxTokens: 1_000 },
+          { id: "reasoning-model", name: "Reasoning model", reasoning: true, contextWindow: 32_000, maxTokens: 1_000 },
+        ],
+      },
+    },
+  }));
+  await writeFile(settingsPath, JSON.stringify({
+    defaultProvider: "fixture",
+    defaultModel: "basic-model",
+    defaultThinkingLevel: "low",
+    enabledModels: ["fixture/basic-model:off"],
+    retry: { enabled: false, maxRetries: 5, baseDelayMs: 750, provider: { maxRetries: 1, maxRetryDelayMs: 45_000 } },
+    compaction: { enabled: false, reserveTokens: 4_096, keepRecentTokens: 8_192 },
+    theme: "terminal-only",
+  }));
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    await app.window.getByRole("button", { name: "Agent" }).click();
+    const settings = app.window.getByRole("region", { name: "Agent defaults" });
+    const defaultModel = settings.getByRole("combobox", { name: "Default model" });
+    const defaultThinking = settings.getByRole("combobox", { name: "Default thinking level" });
+    const modelScope = settings.getByRole("textbox", { name: "Scoped model patterns" });
+    const retry = settings.getByRole("checkbox", { name: "Automatic retry" });
+    const maxRetries = settings.getByRole("spinbutton", { name: "Maximum retries" });
+    const retryDelay = settings.getByRole("spinbutton", { name: "Base delay (milliseconds)" });
+    const compaction = settings.getByRole("checkbox", { name: "Automatic compaction" });
+    const recentTokens = settings.getByRole("spinbutton", { name: "Recent tokens to keep" });
+    const reserveTokens = settings.getByRole("spinbutton", { name: "Reserved tokens" });
+
+    await expect(defaultModel).toHaveValue("fixture/basic-model");
+    await expect(defaultThinking).toHaveValue("low");
+    await expect(modelScope).toHaveValue("fixture/basic-model:off");
+    await expect(retry).not.toBeChecked();
+    await expect(maxRetries).toHaveValue("5");
+    await expect(retryDelay).toHaveValue("750");
+    await expect(compaction).not.toBeChecked();
+    await expect(recentTokens).toHaveValue("8192");
+    await expect(reserveTokens).toHaveValue("4096");
+    await expect(settings).toContainText(settingsPath);
+
+    await defaultModel.selectOption("fixture/reasoning-model");
+    await defaultThinking.selectOption("high");
+    await modelScope.fill("fixture/reasoning-model:high\nfixture/basic-model");
+    await settings.getByRole("button", { name: "Save model scope" }).click();
+
+    await retry.check();
+    await maxRetries.fill("7");
+    await retryDelay.fill("1250");
+    await mkdir(`${settingsPath}.lock`);
+    await settings.getByRole("button", { name: "Save retry defaults" }).click();
+    const error = settings.getByRole("alert");
+    await expect(error).toContainText("Pi settings are locked by another process");
+    await expect(retry).not.toBeChecked();
+    await rm(`${settingsPath}.lock`, { recursive: true, force: true });
+    await retry.check();
+    await maxRetries.fill("7");
+    await retryDelay.fill("1250");
+    await settings.getByRole("button", { name: "Save retry defaults" }).click();
+    await expect(error).toHaveCount(0);
+    await compaction.check();
+    await recentTokens.fill("12000");
+    await reserveTokens.fill("6000");
+    await settings.getByRole("button", { name: "Save compaction defaults" }).click();
+
+    const saved = JSON.parse(await readFile(settingsPath, "utf8"));
+    expect(saved).toMatchObject({
+      defaultProvider: "fixture",
+      defaultModel: "reasoning-model",
+      defaultThinkingLevel: "high",
+      enabledModels: ["fixture/reasoning-model:high", "fixture/basic-model"],
+      retry: { enabled: true, maxRetries: 7, baseDelayMs: 1_250, provider: { maxRetries: 1, maxRetryDelayMs: 45_000 } },
+      compaction: { enabled: true, reserveTokens: 6_000, keepRecentTokens: 12_000 },
+      theme: "terminal-only",
+    });
+    const desktopPreferences = JSON.parse(await readFile(path.join(environment.agentDir, "pilot-user-data", "preferences.json"), "utf8").catch(() => "{}"));
+    expect(desktopPreferences).not.toHaveProperty("defaultModel");
+    expect(desktopPreferences).not.toHaveProperty("enabledModels");
+    expect(desktopPreferences).not.toHaveProperty("retry");
+    expect(desktopPreferences).not.toHaveProperty("compaction");
+
+    await writeFile(settingsPath, "{ malformed");
+    await settings.getByRole("button", { name: "Reload Pi settings" }).click();
+    await expect(error).toContainText("Pi settings could not be read");
+    await expect(error).toContainText("settings.json");
+    await writeFile(settingsPath, JSON.stringify(saved));
+    await settings.getByRole("button", { name: "Reload Pi settings" }).click();
+    await expect(error).toHaveCount(0);
+
+    await app.window.getByRole("button", { name: "Back to command center" }).click();
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await expect(composer.getByRole("button", { name: /Provider and model/ })).toContainText("Reasoning model");
+    await expect(composer.getByRole("button", { name: /Thinking level/ })).toContainText("Thinking · High");
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("restores PiLot-owned desktop preferences without polluting Pi settings", async () => {
+  const environment = await fixture();
+  const userData = path.join(environment.root, "pilot-user-data");
+  await mkdir(userData, { recursive: true });
+  await writeFile(path.join(userData, "preferences.json"), JSON.stringify({
+    window: { width: 860, height: 620, maximized: false },
+  }));
+  const first = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData, PILOT_TEST_PROJECT_DIR: environment.project });
+  let taskPath = "";
+
+  try {
+    await expect.poll(() => first.window.evaluate(() => [window.outerWidth, window.outerHeight])).toEqual([860, 620]);
     await first.window.getByRole("button", { name: "Settings" }).click();
     const settings = first.window.getByRole("main", { name: "Settings" });
     await expect(settings.getByRole("group", { name: "Appearance" }).getByRole("radio", { name: "System" })).toBeChecked();
     await settings.getByRole("radio", { name: "Dark" }).check();
+    await settings.getByRole("checkbox", { name: "Run completed" }).check();
     await expect.poll(() => first.window.evaluate(() => getComputedStyle(document.documentElement).color)).toBe("rgb(232, 232, 229)");
     await expect(first.window.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page");
     await first.window.getByRole("button", { name: "Providers" }).click();
@@ -2839,15 +3012,47 @@ test("applies and persists PiLot appearance preferences", async () => {
       const background = (selector: string) => getComputedStyle(document.querySelector(selector)!).backgroundColor;
       return background(".provider-setup") === background(".settings-main");
     })).toBe(true);
+    await first.window.getByRole("button", { name: "Back to command center" }).click();
+
+    await first.window.getByRole("button", { name: "Add project" }).click();
+    await first.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await first.window.getByRole("button", { name: "New Task" }).click();
+    await expect.poll(async () => JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8")).recentSelection?.taskPath ?? "").not.toBe("");
+    taskPath = JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8")).recentSelection.taskPath;
+
+    await first.window.evaluate(() => window.resizeTo(900, 640));
+    await expect.poll(() => first.window.evaluate(() => [window.outerWidth, window.outerHeight])).toEqual([900, 640]);
+    await first.window.getByRole("button", { name: "Command Palette" }).click();
+    const palette = first.window.getByRole("dialog", { name: "Command Palette" });
+    await palette.getByRole("combobox", { name: "Search actions" }).fill("show details");
+    await palette.getByRole("option", { name: /Show Details/ }).click();
+    const inspector = first.window.getByRole("complementary", { name: "Inspector" });
+    await expect(inspector).toBeVisible();
+    await inspector.getByRole("tab", { name: /Changes/ }).click();
+
+    await expect.poll(async () => JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toMatchObject({
+      appearance: "dark",
+      globalRunCap: 4,
+      notifications: { runCompleted: true, runFailed: true, attentionRequired: true },
+      panes: { inspectorVisible: true, inspectorView: "changes" },
+      recentSelection: { projectPath: await realpath(environment.project), taskPath },
+      window: { width: 900, height: 640, maximized: false },
+    });
   } finally {
     await close(first);
   }
 
   const second = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
   try {
+    await expect.poll(() => second.window.evaluate(() => [window.outerWidth, window.outerHeight])).toEqual([900, 640]);
+    await second.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("button", { name: "fixture-project", exact: true }).click();
+    await expect(second.window.getByRole("form", { name: "Task composer" })).toBeVisible();
+    const inspector = second.window.getByRole("complementary", { name: "Inspector" });
+    await expect(inspector).toBeVisible();
+    await expect(inspector.getByRole("tab", { name: /Changes/ })).toHaveAttribute("aria-selected", "true");
     await second.window.getByRole("button", { name: "Settings" }).click();
     await expect(second.window.getByRole("radio", { name: "Dark" })).toBeChecked();
-    expect(JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8"))).toEqual({ appearance: "dark", expandThinking: false, globalRunCap: 4, preferredTerminal: "system" });
+    await expect(second.window.getByRole("checkbox", { name: "Run completed" })).toBeChecked();
     expect(JSON.parse(await readFile(path.join(environment.agentDir, "settings.json"), "utf8").catch(() => "{}"))).toEqual({});
   } finally {
     await close(second);

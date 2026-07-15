@@ -1,10 +1,11 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, type MenuItemConstructorOptions } from "electron";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPreferences, saveAppearance, saveExpandThinking, saveGlobalRunCap, savePreferredApplication, savePreferredTerminal } from "./preferences.js";
+import { loadPreferences, saveAppearance, saveExpandThinking, saveGlobalRunCap, saveNotificationPreferences, savePanePreferences, savePreferredApplication, savePreferredTerminal, saveRecentSelection, saveWindowPreference } from "./preferences.js";
+import { getAgentSettings, saveAgentCompaction, saveAgentModelScope, saveAgentRetry, saveDefaultAgentModel, saveDefaultAgentThinking } from "./agent-settings.js";
 import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectsState, getTaskCreation, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { RunCoordinator } from "./runs.js";
@@ -16,7 +17,7 @@ import { getApplicationState, getConfiguredEditor, getTerminalState } from "./ed
 import { createTaskWorktreeBranch, getTaskWorktreeState, openTaskWorktreeTerminal, removeManagedWorktree, WorktreeSetupCoordinator } from "./worktrees.js";
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
 import { applicationIds, type ApplicationId } from "../shared/editors.js";
-import { DEFAULT_GLOBAL_RUN_CAP, type Appearance, type Preferences } from "../shared/preferences.js";
+import { type Appearance, type Preferences } from "../shared/preferences.js";
 import { CHANGE_STATUSES, type ChangeStatus, type ImageAttachment, type TaskCreationRequest, type TaskWorktreeFile, type ThinkingLevel } from "../shared/projects.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -29,7 +30,7 @@ const changeStatuses = new Set<ChangeStatus>(CHANGE_STATUSES);
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
 
-let preferences: Preferences = { appearance: "system", expandThinking: false, globalRunCap: DEFAULT_GLOBAL_RUN_CAP, preferredTerminal: "system" };
+let preferences: Preferences;
 const actionMenuItems = new Map<DesktopActionId, Electron.MenuItem>();
 
 function invokeRendererAction(id: DesktopActionId, target?: Electron.BaseWindow) {
@@ -123,11 +124,29 @@ function updateWindowChrome() {
   }
 }
 
+function restoredWindowBounds() {
+  const saved = preferences.window;
+  if (!saved) return { width: 1180, height: 760 };
+  const positioned = saved.x !== undefined && saved.y !== undefined;
+  const display = positioned
+    ? screen.getDisplayMatching({ x: saved.x!, y: saved.y!, width: saved.width, height: saved.height })
+    : screen.getPrimaryDisplay();
+  const width = Math.max(680, Math.min(saved.width, display.workArea.width));
+  const height = Math.max(520, Math.min(saved.height, display.workArea.height));
+  return {
+    width,
+    height,
+    ...(positioned ? {
+      x: Math.max(display.workArea.x, Math.min(saved.x!, display.workArea.x + display.workArea.width - width)),
+      y: Math.max(display.workArea.y, Math.min(saved.y!, display.workArea.y + display.workArea.height - height)),
+    } : {}),
+  };
+}
+
 function createWindow() {
   const colors = chromeColors();
   const window = new BrowserWindow({
-    width: 1180,
-    height: 760,
+    ...restoredWindowBounds(),
     minWidth: 680,
     minHeight: 520,
     backgroundColor: colors.background,
@@ -144,7 +163,30 @@ function createWindow() {
     },
   });
 
+  if (preferences.window?.maximized) window.maximize();
   if (!testWindowHidden) window.once("ready-to-show", () => window.show());
+
+  let geometryTimer: NodeJS.Timeout | undefined;
+  const persistGeometry = () => {
+    geometryTimer = undefined;
+    const bounds = window.getNormalBounds();
+    void saveWindowPreference(app.getPath("userData"), { ...bounds, maximized: window.isMaximized() }).then((next) => { preferences = next; })
+      .catch((error) => console.error("Could not save PiLot window geometry:", error));
+  };
+  const scheduleGeometry = () => {
+    if (geometryTimer) clearTimeout(geometryTimer);
+    geometryTimer = setTimeout(persistGeometry, 150);
+  };
+  window.on("move", scheduleGeometry);
+  window.on("resize", scheduleGeometry);
+  window.on("maximize", scheduleGeometry);
+  window.on("unmaximize", scheduleGeometry);
+  window.on("close", () => {
+    if (geometryTimer) clearTimeout(geometryTimer);
+    persistGeometry();
+  });
+  window.on("closed", () => { if (geometryTimer) clearTimeout(geometryTimer); });
+
   void (developmentRenderer
     ? window.loadURL(developmentRenderer)
     : window.loadFile(path.join(directory, "../../renderer/index.html")));
@@ -190,6 +232,29 @@ app.whenReady().then(async () => {
     runs.setRunLimit(preferences.globalRunCap);
     return preferences;
   });
+  ipcMain.handle("preferences:set-notifications", async (_event, notifications: unknown) => {
+    preferences = await saveNotificationPreferences(app.getPath("userData"), notifications);
+    return preferences;
+  });
+  ipcMain.handle("preferences:set-panes", async (_event, panes: unknown) => {
+    preferences = await savePanePreferences(app.getPath("userData"), panes);
+    return preferences;
+  });
+  ipcMain.handle("preferences:set-recent-selection", async (_event, projectPath: unknown, taskPath: unknown) => {
+    preferences = await saveRecentSelection(app.getPath("userData"), projectPath, taskPath);
+    return preferences;
+  });
+  ipcMain.handle("agent-settings:get", () => getAgentSettings(getAgentDir()));
+  ipcMain.handle("agent-settings:set-default-model", (_event, provider: unknown, modelId: unknown) =>
+    saveDefaultAgentModel(getAgentDir(), provider, modelId));
+  ipcMain.handle("agent-settings:set-default-thinking", (_event, level: unknown) =>
+    saveDefaultAgentThinking(getAgentDir(), level));
+  ipcMain.handle("agent-settings:set-model-scope", (_event, patterns: unknown) =>
+    saveAgentModelScope(getAgentDir(), patterns));
+  ipcMain.handle("agent-settings:set-retry", (_event, settings: unknown) =>
+    saveAgentRetry(getAgentDir(), settings));
+  ipcMain.handle("agent-settings:set-compaction", (_event, settings: unknown) =>
+    saveAgentCompaction(getAgentDir(), settings));
   ipcMain.handle("terminals:get", () => getTerminalState(preferences.preferredTerminal));
   ipcMain.handle("terminals:set-preferred", async (_event, terminal: unknown) => {
     preferences = await savePreferredTerminal(app.getPath("userData"), terminal);

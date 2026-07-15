@@ -2,10 +2,11 @@ import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, us
 import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
 import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
-import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance } from "../shared/preferences";
+import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type RecentSelection } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
+import { AgentSettings } from "./agent-settings";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
 
@@ -381,7 +382,7 @@ function RunBlock({ run, index, expandThinking, changePaths, onOpenChange }: { r
   </article>;
 }
 
-type InspectorView = "details" | "changes" | "history";
+type InspectorView = PreferenceInspectorView;
 type DiffRow = { kind: "hunk"; text: string } | { kind: "line"; line: DiffLine };
 
 const changeStatusLabels: Record<ChangedFile["status"], string> = {
@@ -904,7 +905,7 @@ function HistoryPanel({ project, task, history, loadError, disabled, readOnly = 
       {selected && !readOnly && <section className="history-actions" aria-label={`Actions for ${selected.title}`}>
         {selected.kind === "prompt" && <button className="history-fork" type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "fork", entryId: selected.id })}>Fork from prompt</button>}
         <form onSubmit={(event) => { event.preventDefault(); void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id, label); onChange(next); setNotice("Label saved"); }); }}>
-          <label>History label<input aria-label="History label" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} /></label>
+          <label>History label<input aria-label="History label" value={label} maxLength={80} disabled={disabled || busy} onChange={(event) => setLabel(event.target.value)} /></label>
           <div><button type="submit" disabled={disabled || busy || !label.trim()}>Save label</button><button type="button" disabled={disabled || busy || !selected.label} onClick={() => void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id); onChange(next); setLabel(""); setNotice("Label cleared"); })}>Clear label</button></div>
         </form>
         <fieldset disabled={disabled || busy || selected.current}>
@@ -966,6 +967,31 @@ function resourceProvenance(resource: TaskResourceState["commands"][number]) {
   const scope = resource.provenance.scope[0].toUpperCase() + resource.provenance.scope.slice(1);
   const source = resource.provenance.source;
   return source === "auto" || source === "local" ? scope : `${scope} · ${source}`;
+}
+
+function UnsupportedResourceNotice({ resources }: { resources: TaskResourceState["unsupported"] }) {
+  if (!resources.length) return null;
+  const extensions = resources.filter(({ kind }) => kind === "extension");
+  const themes = resources.filter(({ kind }) => kind === "theme");
+  const keybindings = resources.filter(({ kind }) => kind === "keybindings");
+  const summaries = [
+    extensions.length ? `${extensions.length} extension${extensions.length === 1 ? "" : "s"} not executed` : "",
+    themes.length ? `${themes.length} TUI theme${themes.length === 1 ? "" : "s"} ignored` : "",
+    keybindings.length ? "TUI keybindings ignored" : "",
+  ].filter(Boolean);
+  const labels = {
+    extension: "Extension",
+    theme: "TUI theme",
+    keybindings: "TUI keybindings",
+  } as const;
+
+  return <section className="unsupported-resources" aria-label="Unsupported Pi resources">
+    <header><strong>Terminal-only Pi resources</strong><span>Not used by PiLot</span></header>
+    <p>{summaries.join(" · ")}. PiLot keeps its desktop controls predictable and does not execute or approximate these resources.</p>
+    <ul>{resources.map((resource) => <li key={`${resource.kind}:${resource.path}`}>
+      <span>{labels[resource.kind]} · {resource.scope}</span><code>{resource.path}</code>
+    </li>)}</ul>
+  </section>;
 }
 
 function modelSearchScore(provider: TaskProvider, model: TaskModel, query: string) {
@@ -1282,7 +1308,11 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     void window.pilot.getTaskResources(project.path, task.path).then((taskResources) => {
       if (!cancelled) {
         setResources(taskResources);
-        if (reloadToken) setActionNotice("Pi resources reloaded");
+        if (reloadToken) {
+          const failure = taskResources.diagnostics.find(({ severity }) => severity === "error");
+          if (failure) onError(new Error(failure.message), "Fix the reported Pi resource or settings file, then reload resources again.");
+          else setActionNotice("Pi resources reloaded");
+        }
       }
     }).catch((reason) => {
       if (!cancelled && reloadToken) onError(reason, "Fix the reported Pi resource, then reload resources again.");
@@ -1291,6 +1321,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
         commands: [],
         files: [],
         diagnostics: [{ severity: "error", message: reason instanceof Error ? reason.message : String(reason) }],
+        unsupported: [],
       });
     });
     return () => { cancelled = true; unsubscribe(); };
@@ -1546,6 +1577,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     }} onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
       {imageDragActive && <div className="image-drop-feedback" aria-hidden="true"><span>＋</span> Drop images to attach</div>}
       <label htmlFor="task-prompt">{externallyChanged ? "Prompts paused — choose Reload or Fork" : waitingForCapacity ? "Run waiting for capacity" : setupBlocked ? "Finish Worktree setup before the first Run" : live ? "Guide the active Run" : "Prompt or inline command"}</label>
+      <UnsupportedResourceNotice resources={resources?.unsupported ?? []} />
       {resources?.diagnostics.length ? <section className="resource-diagnostics" aria-label="Pi resource diagnostics">
         {resources.diagnostics.map((diagnostic, index) => <p key={`${diagnostic.path ?? "resource"}-${index}`} className={diagnostic.severity}><strong>Pi resource {diagnostic.severity}:</strong> {diagnostic.message}{diagnostic.path && <code>{diagnostic.path}</code>}</p>)}
       </section> : null}
@@ -1787,6 +1819,9 @@ function GeneralSettings() {
   const [savedGlobalRunCap, setSavedGlobalRunCap] = useState(4);
   const [runCapSaving, setRunCapSaving] = useState(false);
   const [runCapError, setRunCapError] = useState("");
+  const [notifications, setNotifications] = useState<NotificationPreferences>();
+  const [notificationSaving, setNotificationSaving] = useState(false);
+  const [notificationError, setNotificationError] = useState("");
   const [terminals, setTerminals] = useState<TerminalState>();
   const [terminalSaving, setTerminalSaving] = useState(false);
   const [terminalError, setTerminalError] = useState("");
@@ -1796,10 +1831,23 @@ function GeneralSettings() {
       setExpandThinking(value.expandThinking);
       setGlobalRunCap(String(value.globalRunCap));
       setSavedGlobalRunCap(value.globalRunCap);
+      setNotifications(value.notifications);
       applyAppearance(value.appearance);
     });
     void window.pilot.getTerminalState().then(setTerminals).catch((reason) => setTerminalError(reason instanceof Error ? reason.message : String(reason)));
   }, []);
+  const saveNotification = (key: keyof NotificationPreferences, enabled: boolean) => {
+    if (!notifications || notificationSaving) return;
+    const previous = notifications;
+    const next = { ...notifications, [key]: enabled };
+    setNotificationError("");
+    setNotificationSaving(true);
+    setNotifications(next);
+    void window.pilot.setNotificationPreferences(next).then((saved) => setNotifications(saved.notifications)).catch((reason) => {
+      setNotifications(previous);
+      setNotificationError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => setNotificationSaving(false));
+  };
   const saveRunCap = () => {
     const limit = Number(globalRunCap);
     if (!Number.isInteger(limit) || limit < MINIMUM_GLOBAL_RUN_CAP || limit > MAXIMUM_GLOBAL_RUN_CAP) {
@@ -1842,6 +1890,18 @@ function GeneralSettings() {
       </label>
       {runCapError && <p className="error run-cap-error" role="alert">Could not update the active Run limit: {runCapError}</p>}
     </fieldset>
+    <fieldset className="notification-setting" disabled={!notifications || notificationSaving} aria-busy={notificationSaving}>
+      <legend>Notifications</legend>
+      {notifications && ([
+        ["runCompleted", "Run completed", "Notify when a background Run settles successfully."],
+        ["runFailed", "Run failed", "Notify when a background Run fails or is interrupted."],
+        ["attentionRequired", "Attention required", "Notify when Pi needs a decision or input."],
+      ] as const).map(([key, label, detail]) => <label key={key}>
+        <input type="checkbox" aria-label={label} checked={notifications[key]} onChange={(event) => saveNotification(key, event.target.checked)} />
+        <span><strong>{label}</strong><small>{detail}</small></span>
+      </label>)}
+      {notificationError && <p className="error terminal-setting-notice" role="alert">Could not update notification preferences: {notificationError}</p>}
+    </fieldset>
     <fieldset className="terminal-setting" disabled={!terminals || terminalSaving}>
       <legend>External terminal</legend>
       {terminals?.available.map((terminal) => <label key={terminal.id}>
@@ -1874,8 +1934,8 @@ function GeneralSettings() {
   </section>;
 }
 
-function SettingsPage({ initialDestination, onChange, onClose }: { initialDestination: "general" | "providers"; onChange(): void; onClose(): void }) {
-  const [destination, setDestination] = useState<"general" | "providers">(initialDestination);
+function SettingsPage({ initialDestination, onChange, onClose }: { initialDestination: "general" | "agent" | "providers"; onChange(): void; onClose(): void }) {
+  const [destination, setDestination] = useState<"general" | "agent" | "providers">(initialDestination);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus();
@@ -1890,11 +1950,12 @@ function SettingsPage({ initialDestination, onChange, onClose }: { initialDestin
       <h1 id="settings-title" ref={heading} tabIndex={-1}>Settings</h1>
       <nav aria-label="Settings">
         <button aria-current={destination === "general" ? "page" : undefined} onClick={() => setDestination("general")}>General</button>
+        <button aria-current={destination === "agent" ? "page" : undefined} onClick={() => setDestination("agent")}>Agent</button>
         <button aria-current={destination === "providers" ? "page" : undefined} onClick={() => setDestination("providers")}>Providers</button>
       </nav>
     </aside>
     <main className="settings-main" aria-label="Settings">
-      {destination === "general" ? <GeneralSettings /> : <ProviderSettings onChange={onChange} />}
+      {destination === "general" ? <GeneralSettings /> : destination === "agent" ? <AgentSettings /> : <ProviderSettings onChange={onChange} />}
     </main>
   </div>;
 }
@@ -2023,9 +2084,11 @@ function App() {
   const [projects, setProjects] = useState<ProjectsState>();
   const [selectedTaskPath, setSelectedTaskPath] = useState<string>();
   const [showHome, setShowHome] = useState(true);
+  const [recentSelection, setRecentSelection] = useState<RecentSelection>({});
+  const [desktopPreferencesLoaded, setDesktopPreferencesLoaded] = useState(false);
   const [runStates, setRunStates] = useState<Record<string, TaskRunState>>({});
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsDestination, setSettingsDestination] = useState<"general" | "providers">("general");
+  const [settingsDestination, setSettingsDestination] = useState<"general" | "agent" | "providers">("general");
   const [showProjectAccess, setShowProjectAccess] = useState(false);
   const [taskCreation, setTaskCreation] = useState<TaskCreationState>();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -2265,9 +2328,47 @@ function App() {
     setRunStates((current) => ({ ...current, [next.taskPath]: next }));
   }), []);
   useEffect(() => {
-    refresh();
-    void window.pilot.getPreferences().then((value) => applyAppearance(value.appearance));
+    let cancelled = false;
+    void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects(), window.pilot.getPreferences()]).then(async ([startup, projectState, saved]) => {
+      let nextProjects = projectState;
+      const recentProject = saved.recentSelection.projectPath;
+      if (recentProject && projectState.projects.some(({ path }) => path === recentProject) && projectState.selected?.path !== recentProject) {
+        nextProjects = await window.pilot.selectProject(recentProject);
+      }
+      if (cancelled) return;
+      setState(startup);
+      setProjects(nextProjects);
+      setRecentSelection(saved.recentSelection);
+      const recentTask = nextProjects.selected?.tasks.find(({ path }) => path === saved.recentSelection.taskPath);
+      setSelectedTaskPath(recentTask?.path);
+      setShowDetails(saved.panes.inspectorVisible);
+      setInspectorView(saved.panes.inspectorView);
+      applyAppearance(saved.appearance);
+      setDesktopPreferencesLoaded(true);
+    }).catch((reason) => {
+      if (!cancelled) {
+        refresh();
+        setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery: "Check PiLot preference-file access and reopen the app." });
+      }
+    });
+    return () => { cancelled = true; };
   }, []);
+  useEffect(() => {
+    if (!desktopPreferencesLoaded) return;
+    const timer = window.setTimeout(() => {
+      void window.pilot.setPanePreferences({ inspectorVisible: showDetails, inspectorView })
+        .catch((reason) => reportActionError(reason, "Check PiLot preference-file access and try changing the Inspector again."));
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [desktopPreferencesLoaded, showDetails, inspectorView, reportActionError]);
+  useEffect(() => {
+    if (!desktopPreferencesLoaded || showHome || !selectedProject) return;
+    const taskPath = selectedProject.tasks.some(({ path }) => path === selectedTaskPath) ? selectedTaskPath : undefined;
+    const next = { projectPath: selectedProject.path, ...(taskPath ? { taskPath } : {}) };
+    setRecentSelection(next);
+    void window.pilot.setRecentSelection(next.projectPath, next.taskPath)
+      .catch((reason) => reportActionError(reason, "Check PiLot preference-file access and select the Project or Task again."));
+  }, [desktopPreferencesLoaded, showHome, selectedProject?.path, selectedTaskPath, reportActionError]);
   useEffect(() => setActionError(undefined), [selectedProject?.path, selectedTask?.path, showSettings]);
 
   if (showSettings) return <>
@@ -2300,8 +2401,12 @@ function App() {
               {projects.projects.map((project) => (
                 <li key={project.path}>
                   <button aria-label={project.name} aria-current={!showHome && projects.selected?.path === project.path ? "page" : undefined} onClick={() => {
+                    const reopeningCurrentProject = !showHome && projects.selected?.path === project.path;
+                    const recentTask = !reopeningCurrentProject && recentSelection.projectPath === project.path
+                      ? project.tasks.find(({ path }) => path === recentSelection.taskPath)
+                      : undefined;
                     setShowHome(false);
-                    setSelectedTaskPath(undefined);
+                    setSelectedTaskPath(recentTask?.path);
                     setTaskDetails(undefined);
                     void window.pilot.selectProject(project.path).then(setProjects).catch((reason) => reportActionError(reason, "Reload the Project list and try selecting it again."));
                   }}>
