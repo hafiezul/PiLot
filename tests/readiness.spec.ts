@@ -1,4 +1,4 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { getShellConfig, SessionManager } from "@earendil-works/pi-coding-agent";
 import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
@@ -108,12 +108,14 @@ async function launch(
   const env = withoutAuth
     ? Object.fromEntries(Object.entries(process.env).filter(([name]) => !/(_API_KEY|_TOKEN|_CREDENTIALS?)$/.test(name)))
     : process.env;
+  const testHome = extraEnv.HOME ?? path.join(agentDir, "pilot-test-home");
+  await mkdir(testHome, { recursive: true });
   const child = spawn(electronPath, [
     appPath,
     `--pilot-debug-port=${port}`,
     ...(test.info().project.use.headless === false ? [] : ["--pilot-test-hidden"]),
   ], {
-    env: { ...env, PILOT_USER_DATA_DIR: path.join(agentDir, "pilot-user-data"), ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
+    env: { ...env, HOME: testHome, PILOT_USER_DATA_DIR: path.join(agentDir, "pilot-user-data"), ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
     stdio: "ignore",
   });
   const endpoint = `http://127.0.0.1:${port}`;
@@ -315,6 +317,22 @@ async function deterministicProvider(root: string) {
               path: "src/app.ts",
               edits: [{ oldText: "export const value = 1;", newText: "export const value = 2;\nexport const extra = true;" }],
             }) },
+          }] }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+        }
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      if (latestUser === "inspect project environment") {
+        if (body.includes("environment-tool")) {
+          chunk({ index: 0, delta: { role: "assistant", content: "Environment checked." }, finish_reason: null });
+          chunk({ index: 0, delta: {}, finish_reason: "stop" });
+        } else {
+          chunk({ index: 0, delta: { tool_calls: [{
+            index: 0, id: "environment-tool", type: "function", function: {
+              name: "bash",
+              arguments: JSON.stringify({ command: "printf '%s|%s|%s|%s|' \"$PILOT_CAPTURED_ONLY\" \"$PILOT_LAYERED\" \"$CAPTURE_UNICODE_HOST\" \"${CAPTURE_SHOULD_UNSET-unset}\"; pilot-login-tool" }),
+            },
           }] }, finish_reason: null });
           chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
         }
@@ -666,8 +684,8 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     await expect(prompt).toHaveValue("/project-template ");
     await prompt.fill("/project-template widget");
     await composer.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => provider.requests.join("\n")).toContain("Project template says widget.");
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
-    expect(provider.requests.at(-1)).toContain("Project template says widget.");
 
     await prompt.fill("/skill:project");
     const skillCompletion = composer.getByRole("listbox", { name: "Resource completion" });
@@ -676,9 +694,9 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     await expect(prompt).toHaveValue("/skill:project-skill ");
     await prompt.fill("/skill:project-skill audit now");
     await composer.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => provider.requests.join("\n")).toContain("Project skill instructions.");
+    await expect.poll(() => provider.requests.join("\n")).toContain("audit now");
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
-    expect(provider.requests.at(-1)).toContain("Project skill instructions.");
-    expect(provider.requests.at(-1)).toContain("audit now");
     expect(await readFile(extensionMarker, "utf8").catch(() => "")).toBe("");
 
     await prompt.fill("@nstd");
@@ -714,9 +732,10 @@ test("attaches images and invokes trusted Pi resources through the Electron boun
     await expect(attachments).toContainText("selected.png");
     await expect(composer.getByRole("button", { name: "Attach images" })).toHaveAccessibleDescription("Paste, drop, or select PNG, JPEG, GIF, or WebP images up to 20 MB each");
 
+    const requestsBeforeImages = provider.requests.length;
     await prompt.fill("Inspect the attached images");
     await composer.getByRole("button", { name: "Send" }).click();
-    await expect.poll(() => provider.requests.length).toBe(3);
+    await expect.poll(() => provider.requests.length).toBe(requestsBeforeImages + 1);
     await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article").last()).toContainText("Settled");
     expect(provider.requests.at(-1)).toContain("data:image/png;base64");
     await expect(attachments).toHaveCount(0);
@@ -1219,9 +1238,10 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await app.window.getByRole("button", { name: "Add project" }).click();
     await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
     await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await expect(composer).toBeVisible({ timeout: 10_000 });
     await expect(app.window.getByRole("dialog", { name: "Create Task" })).toHaveCount(0);
 
-    const composer = app.window.getByRole("form", { name: "Task composer" });
     const modelControl = composer.getByRole("button", { name: /Provider and model/ });
     await expect(modelControl).toBeVisible();
     await modelControl.focus();
@@ -1278,12 +1298,14 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
 
     await app.window.getByRole("button", { name: "New Task" }).click();
     const commandComposer = app.window.getByRole("form", { name: "Task composer" });
-    await commandComposer.getByRole("combobox", { name: "Prompt" }).fill("!sleep 5");
+    await commandComposer.getByRole("combobox", { name: "Prompt" }).fill("!(sleep 1; printf leaked > abort-descendant.txt) & wait");
     await commandComposer.getByRole("button", { name: "Send" }).click();
     const commandRun = app.window.getByRole("region", { name: "Run timeline" });
-    await expect(commandRun.getByRole("region", { name: "Command: sleep 5" })).toContainText("Running");
+    await expect(commandRun.getByRole("region", { name: /Command:/ })).toContainText("Running");
     await commandComposer.getByRole("button", { name: "Stop Run" }).click();
     await expect(commandRun).toContainText("Aborted");
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    expect(await readFile(path.join(project, "abort-descendant.txt"), "utf8").catch(() => "")).toBe("");
 
     await app.window.getByRole("button", { name: "New Task" }).click();
     const modelComposer = app.window.getByRole("form", { name: "Task composer" });
@@ -1581,6 +1603,7 @@ test("pauses externally changed Tasks until Reload or Fork", async () => {
     await expect(prompt).toBeEnabled();
     await prompt.fill("continue after reload");
     await composer.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => provider.requests.length).toBe(2);
     await expect(timeline.getByRole("article").last()).toContainText("Settled");
     const reloadedEntries = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     const externalIndex = reloadedEntries.findIndex(({ id }) => id === externalId);
@@ -3261,6 +3284,229 @@ test("keeps unadmitted Task diagnostics out of readiness", async () => {
     await expect(readiness).toBeFocused();
   } finally {
     await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("layers explicit Project overrides over the captured login environment", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const provider = await deterministicProvider(environment.root);
+  const loginHome = path.join(environment.root, "login home ü with spaces");
+  const loginTools = path.join(loginHome, "bin");
+  const projectTools = path.join(environment.root, "project tools");
+  const projectEditor = path.join(projectTools, process.platform === "win32" ? "pilot-project-editor.cmd" : "pilot-project-editor");
+  const capturedEditor = path.join(loginTools, process.platform === "win32" ? "pilot-captured-editor.cmd" : "pilot-captured-editor");
+  const gitTrace = path.join(environment.root, "project-git.trace");
+  const shell = getShellConfig();
+  await Promise.all([mkdir(loginTools, { recursive: true }), mkdir(projectTools, { recursive: true })]);
+  await Promise.all([
+    writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: provider.baseUrl,
+          api: "openai-completions",
+          apiKey: "fixture-key",
+          models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+        },
+      },
+    })),
+    writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+      shellPath: shell.shell,
+      externalEditor: "pilot-captured-editor",
+    })),
+    writeFile(path.join(loginHome, ".bash_profile"), [
+      "export PILOT_CAPTURED_ONLY=captured-from-login",
+      "export PILOT_LAYERED=captured-base",
+      "unset CAPTURE_SHOULD_UNSET",
+      'export PATH="$HOME/bin:$PATH"',
+      "",
+    ].join("\n")),
+    writeFile(path.join(loginTools, "pilot-login-tool"), "#!/usr/bin/env bash\nprintf tool-from-profile\n"),
+    writeFile(capturedEditor, process.platform === "win32" ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n"),
+    writeFile(projectEditor, process.platform === "win32" ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n"),
+  ]);
+  if (process.platform !== "win32") await Promise.all([
+    chmod(path.join(loginTools, "pilot-login-tool"), 0o755),
+    chmod(capturedEditor, 0o755),
+    chmod(projectEditor, 0o755),
+  ]);
+  const app = await launch(environment.agentDir, false, {
+    HOME: loginHome,
+    SHELL: shell.shell,
+    PILOT_TEST_PROJECT_DIR: environment.project,
+    CAPTURE_UNICODE_HOST: "captured-工具-ü",
+    CAPTURE_SHOULD_UNSET: "desktop-value",
+  });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    const capturedApplicationState = await app.window.evaluate(async () => {
+      const pilot = (window as any).pilot;
+      const selected = (await pilot.getProjects()).selected;
+      return pilot.getApplicationState(selected.path, selected.tasks[0].path);
+    });
+    expect(capturedApplicationState.available).toContainEqual(expect.objectContaining({ id: "configured", label: "Pi configured editor" }));
+    await writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+      shellPath: shell.shell,
+      externalEditor: "pilot-project-editor",
+    }));
+
+    await app.window.getByRole("button", { name: "Project actions" }).click();
+    await app.window.getByRole("menuitem", { name: "Project access" }).click();
+    const access = app.window.getByRole("dialog", { name: "Project access" });
+    const overrides = access.getByRole("region", { name: "Project environment overrides" });
+    await expect(overrides).toContainText("captured when PiLot opened");
+    await overrides.getByRole("button", { name: "Add variable" }).click();
+    const row = overrides.getByRole("listitem").last();
+    await row.getByRole("textbox", { name: "Variable name" }).fill("PILOT_LAYERED");
+    await row.getByRole("textbox", { name: "Variable value" }).fill("project-override");
+    await overrides.getByRole("button", { name: "Add variable" }).click();
+    const pathRow = overrides.getByRole("listitem").last();
+    await pathRow.getByRole("textbox", { name: "Variable name" }).fill(process.platform === "win32" ? "pAtH" : "PATH");
+    await pathRow.getByRole("textbox", { name: "Variable value" }).fill(`${projectTools}${path.delimiter}${loginTools}${path.delimiter}${process.env.PATH ?? process.env.Path ?? ""}`);
+    await overrides.getByRole("button", { name: "Add variable" }).click();
+    const traceRow = overrides.getByRole("listitem").last();
+    await traceRow.getByRole("textbox", { name: "Variable name" }).fill("GIT_TRACE");
+    await traceRow.getByRole("textbox", { name: "Variable value" }).fill(gitTrace);
+    await overrides.getByRole("button", { name: "Save environment" }).click();
+    await expect(overrides.getByRole("status")).toHaveText("3 saved");
+    await expect.poll(async () => JSON.parse(await readFile(path.join(environment.agentDir, "pilot-user-data", "projects.json"), "utf8")))
+      .toMatchObject({ environmentOverrides: { [project]: { PILOT_LAYERED: "project-override", GIT_TRACE: gitTrace } } });
+    await access.getByRole("button", { name: "Close project access" }).click();
+    await expect(access).toHaveCount(0);
+
+    await app.window.evaluate(async () => {
+      const pilot = (window as any).pilot;
+      const selected = (await pilot.getProjects()).selected;
+      await pilot.getTaskCreation(selected.path);
+    });
+    await expect.poll(async () => readFile(gitTrace, "utf8").catch(() => "")).toContain("git");
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const applicationState = await app.window.evaluate(async () => {
+      const pilot = (window as any).pilot;
+      const selected = (await pilot.getProjects()).selected;
+      return pilot.getApplicationState(selected.path, selected.tasks[0].path);
+    });
+    expect(applicationState.available).toContainEqual(expect.objectContaining({ id: "configured", label: "Pi configured editor" }));
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("!printf '%s|%s|%s|%s|' \"$PILOT_CAPTURED_ONLY\" \"$PILOT_LAYERED\" \"$CAPTURE_UNICODE_HOST\" \"${CAPTURE_SHOULD_UNSET-unset}\"; pilot-login-tool");
+    await composer.getByRole("button", { name: "Send" }).click();
+    const timeline = app.window.getByRole("region", { name: "Run timeline" });
+    await expect(timeline).toContainText("captured-from-login|project-override|captured-工具-ü|unset|tool-from-profile");
+    await expect(timeline.getByRole("article").last()).toContainText("Settled");
+
+    await writeFile(path.join(loginHome, ".bash_profile"), "export PILOT_CAPTURED_ONLY=changed-after-startup\n");
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("inspect project environment");
+    await composer.getByRole("button", { name: "Send" }).click();
+    const tool = timeline.locator('details[aria-label="bash tool, succeeded"]').last();
+    await expect(tool).toBeVisible();
+    await tool.locator("summary").click();
+    await expect(tool).toContainText("captured-from-login|project-override|captured-工具-ü|unset|tool-from-profile");
+    await expect(timeline).toContainText("Environment checked.");
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("blocks a Run with actionable configured-shell guidance", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  const missingShell = path.join(environment.root, "missing-bash");
+  await Promise.all([
+    writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: provider.baseUrl,
+          api: "openai-completions",
+          apiKey: "fixture-key",
+          models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+        },
+      },
+    })),
+    writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+      shellPath: missingShell,
+    })),
+  ]);
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("This Run must not start");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(composer.getByRole("alert")).toContainText("configured Pi shell was not found");
+    await expect(composer.getByRole("alert")).toContainText("shellPath");
+    if (process.platform === "win32") await expect(composer.getByRole("alert")).toContainText("Git for Windows");
+    await expect(app.window.getByRole("region", { name: "Run timeline" }).getByRole("article")).toHaveCount(0);
+  } finally {
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("cleans up an inline command process tree before quitting", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  const project = await realpath(environment.project);
+  const shell = getShellConfig();
+  await Promise.all([
+    writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: provider.baseUrl,
+          api: "openai-completions",
+          apiKey: "fixture-key",
+          models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+        },
+      },
+    })),
+    writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+      shellPath: shell.shell,
+    })),
+  ]);
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+  let quit = false;
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("!(sleep 2; printf leaked > quit-descendant.txt) & wait");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect(app.window.getByRole("region", { name: /Command:/ })).toContainText("Running");
+
+    const exited = app.process.exitCode === null ? once(app.process, "exit") : undefined;
+    if (process.platform === "darwin") app.process.kill("SIGTERM");
+    else await app.window.evaluate(() => window.close());
+    if (exited) await exited;
+    await app.browser.close().catch(() => undefined);
+    quit = true;
+
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    expect(await readFile(path.join(project, "quit-descendant.txt"), "utf8").catch(() => "")).toBe("");
+    const directory = sessionDirectory(environment.agentDir, project);
+    const file = path.join(directory, (await readdir(directory)).find((name) => name.endsWith(".jsonl"))!);
+    const entries = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(entries.filter((entry) => entry.customType === "pilot.run").at(-1)?.data.outcome).toBe("aborted");
+  } finally {
+    if (!quit) await close(app);
+    await provider.close();
     await rm(environment.root, { recursive: true, force: true });
   }
 });

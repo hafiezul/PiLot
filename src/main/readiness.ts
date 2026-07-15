@@ -1,15 +1,16 @@
 import {
   AuthStorage,
   getAgentDir,
-  getShellConfig,
   ModelRegistry,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import type { ReadinessGap, StartupState } from "../shared/readiness.js";
+import { resolveBashShell, type CapturedShellEnvironment } from "./environment.js";
 
-export async function getStartupState(): Promise<StartupState> {
+export async function getStartupState(captured?: CapturedShellEnvironment, environment: NodeJS.ProcessEnv = process.env): Promise<StartupState> {
   const gaps: ReadinessGap[] = [];
   const agentDir = getAgentDir();
 
@@ -33,13 +34,20 @@ export async function getStartupState(): Promise<StartupState> {
   }
 
   try {
-    const settings = SettingsManager.create(process.cwd(), agentDir);
-    getShellConfig(settings.getShellPath());
-  } catch {
+    const settings = SettingsManager.create(homedir(), agentDir, { projectTrusted: false });
+    await resolveBashShell(environment, settings.getShellPath(), path.join(agentDir, "settings.json"));
+    if (captured?.error) {
+      gaps.push({
+        area: "shell",
+        title: "Load your login-shell environment",
+        detail: `PiLot could not capture the configured login shell and is using the desktop launch environment instead. ${captured.error} Fix the shell startup error, then relaunch PiLot.`,
+      });
+    }
+  } catch (error) {
     gaps.push({
       area: "shell",
       title: "Install a compatible Bash shell",
-      detail: "Install Git for Windows or add Bash to PATH, then relaunch PiLot.",
+      detail: error instanceof Error ? error.message : String(error),
     });
   }
 

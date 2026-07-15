@@ -1,12 +1,15 @@
 import {
   AuthStorage,
   createAgentSession,
+  createBashToolDefinition,
+  createLocalBashOperations,
   ModelRegistry,
   resizeImage,
   resolveModelScopeWithDiagnostics,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
+  type CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { copyFile } from "node:fs/promises";
@@ -19,6 +22,7 @@ import { loadTaskResources } from "./resources.js";
 import { assertReadableTask, assertRunnableTask, forkChangedTask as forkTaskSnapshot, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
 import { assertTaskCurrent, getTaskContinuity, guardTaskManager, reloadTaskContinuity, watchTask } from "./continuity.js";
 import { cloneActivePath, forkFromPrompt, historyLabel, historyNavigationType, navigateWithoutSummary, taskHistoryState } from "./history.js";
+import { mergeEnvironments, prepareProjectShellRuntime, withBashEnvironment, type PreparedShellRuntime } from "./environment.js";
 
 const runMetadataType = "pilot.run";
 const retryMetadataType = "pilot.retry";
@@ -436,11 +440,13 @@ export class RunCoordinator {
   private taskHistories = new Map<string, ReturnType<typeof taskHistoryState>>();
   private pendingRuns: ScheduledRun[] = [];
   private runningRuns = 0;
+  private idleWaiters = new Set<() => void>();
 
   constructor(
     private userData: string,
     private agentDir: string,
     private emit: (state: TaskRunState) => void,
+    private environmentForProject: (projectPath: string) => Promise<NodeJS.ProcessEnv>,
     private runLimit = DEFAULT_GLOBAL_RUN_CAP,
   ) {}
 
@@ -487,13 +493,18 @@ export class RunCoordinator {
     this.activeExecutionLocations.add(executionPath);
   }
 
+  private runnableTask(projectPath: string, taskPath: string) {
+    return this.environmentForProject(projectPath).then((environment) =>
+      assertRunnableTask(this.agentDir, projectPath, taskPath, environment));
+  }
+
   private async revalidateExecutionClaim(
     projectPath: string,
     taskPath: string,
     executionPath: string,
     validate?: (context: Awaited<ReturnType<typeof assertRunnableTask>>) => void,
   ) {
-    const current = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const current = await this.runnableTask(projectPath, taskPath);
     if (current.executionPath !== executionPath) throw new Error("This Task's Execution location changed while starting");
     this.observe(current.file);
     assertTaskCurrent(current.file);
@@ -624,6 +635,10 @@ export class RunCoordinator {
     const { queuePosition: _queuePosition, ...state } = active.state;
     active.state = { ...state, activeRunId: undefined };
     this.publish(active.state);
+    if (!this.activeTasks.size) {
+      for (const resolve of this.idleWaiters) resolve();
+      this.idleWaiters.clear();
+    }
   }
 
   private handleExternalChange(file: string) {
@@ -648,7 +663,7 @@ export class RunCoordinator {
   }
 
   async withIdleExecution<T>(projectPath: string, taskPath: string, operation: () => Promise<T>) {
-    const { file, executionPath, execution } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, executionPath, execution } = await this.runnableTask(projectPath, taskPath);
     this.observe(file);
     assertTaskCurrent(file);
     this.claimExecution(executionPath, execution.kind);
@@ -661,7 +676,7 @@ export class RunCoordinator {
   }
 
   private async mutateTaskHistory<T>(projectPath: string, taskPath: string, operation: (context: Awaited<ReturnType<typeof assertRunnableTask>>) => Promise<T>) {
-    const context = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const context = await this.runnableTask(projectPath, taskPath);
     SessionManager.open(context.file);
     this.observe(context.file);
     assertTaskCurrent(context.file);
@@ -677,7 +692,7 @@ export class RunCoordinator {
   async getTaskRun(projectPath: string, taskPath: string) {
     const active = this.activeTasks.get(path.resolve(taskPath));
     if (active) return active.state;
-    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, executionPath } = await this.runnableTask(projectPath, taskPath);
     const manager = SessionManager.open(file);
     const externalChange = this.observe(file);
     const cached = this.taskStates.get(file);
@@ -693,7 +708,7 @@ export class RunCoordinator {
   }
 
   async reloadTask(projectPath: string, taskPath: string) {
-    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, executionPath } = await this.runnableTask(projectPath, taskPath);
     if (this.activeTasks.has(file)) throw new Error("Wait for the interrupted Run to stop before reloading this Task");
     return withTaskWrite(file, async () => {
       const manager = SessionManager.open(file);
@@ -710,7 +725,8 @@ export class RunCoordinator {
     await assertExecutionAllowed(this.userData, projectPath);
     const file = path.resolve(taskPath);
     if (this.activeTasks.has(file)) throw new Error("Wait for the interrupted Run to stop before forking this Task");
-    return withTaskWrite(file, () => forkTaskSnapshot(this.agentDir, projectPath, file, execution, setupCommand));
+    const environment = await this.environmentForProject(projectPath);
+    return withTaskWrite(file, () => forkTaskSnapshot(this.agentDir, projectPath, file, execution, setupCommand, environment));
   }
 
   async getTaskHistory(projectPath: string, taskPath: string) {
@@ -724,7 +740,7 @@ export class RunCoordinator {
       this.taskHistories.set(readable.file, history);
       return history;
     }
-    const { file, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, executionPath } = await this.runnableTask(projectPath, taskPath);
     const manager = SessionManager.open(file);
     const externalChange = this.observe(file);
     if (!this.taskStates.has(file)) {
@@ -800,18 +816,23 @@ export class RunCoordinator {
     });
   }
 
+  private async taskShellRuntime(projectPath: string, executionPath: string) {
+    return (await prepareProjectShellRuntime(this.agentDir, projectPath, executionPath, this.environmentForProject)).runtime;
+  }
+
   async submitPrompt(projectPath: string, taskPath: string, prompt: string, images: ImageAttachment[] = []) {
     const text = prompt.trim();
     if (!text) throw new Error("Enter a prompt");
     assertDesktopPrompt(text);
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project, executionPath, execution, setup } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath, execution, setup } = await this.runnableTask(projectPath, taskPath);
     assertSetupReady(setup);
     const manager = SessionManager.open(file);
     this.observe(file);
     assertTaskCurrent(file);
     const preparedImages = await prepareImages(images);
     this.assertExecutionAvailable(executionPath, execution.kind);
+    const shellRuntime = await this.taskShellRuntime(project, executionPath);
 
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
     const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
@@ -848,7 +869,7 @@ export class RunCoordinator {
           return;
         }
         await withTaskWrite(file, async () => {
-          const { session, manager } = await this.createSession(project, executionPath, file, auth, models);
+          const { session, manager } = await this.createSession(project, executionPath, file, auth, models, shellRuntime);
           active.session = session;
           active.manager = manager;
           const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
@@ -902,12 +923,13 @@ export class RunCoordinator {
     const text = command.trim();
     if (!text) throw new Error("Enter a command");
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project, executionPath, execution, setup } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath, execution, setup } = await this.runnableTask(projectPath, taskPath);
     assertSetupReady(setup);
     const manager = SessionManager.open(file);
     this.observe(file);
     assertTaskCurrent(file);
     this.assertExecutionAvailable(executionPath, execution.kind);
+    const shellRuntime = await this.taskShellRuntime(project, executionPath);
 
     const run: RunEvidence = {
       id: randomUUID(),
@@ -942,7 +964,7 @@ export class RunCoordinator {
         await withTaskWrite(file, async () => {
           const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
           const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
-          const { session, manager } = await this.createSession(project, executionPath, file, auth, models);
+          const { session, manager, bashOperations } = await this.createSession(project, executionPath, file, auth, models, shellRuntime);
           active.session = session;
           active.manager = manager;
           try {
@@ -959,7 +981,7 @@ export class RunCoordinator {
                 return { ...item, ...view };
               });
               this.publish(active.state);
-            }, { excludeFromContext: !includeInContext });
+            }, { excludeFromContext: !includeInContext, operations: bashOperations });
             replaceItem(active, "command", (item) => item.kind === "command" ? {
               ...item,
               ...boundedOutput(result.output),
@@ -1003,12 +1025,13 @@ export class RunCoordinator {
 
   async compactTask(projectPath: string, taskPath: string) {
     await assertExecutionAllowed(this.userData, projectPath);
-    const { file, project, executionPath, execution, setup } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath, execution, setup } = await this.runnableTask(projectPath, taskPath);
     assertSetupReady(setup);
     const manager = SessionManager.open(file);
     this.observe(file);
     assertTaskCurrent(file);
     this.assertExecutionAvailable(executionPath, execution.kind);
+    const shellRuntime = await this.taskShellRuntime(project, executionPath);
 
     const auth = AuthStorage.create(path.join(this.agentDir, "auth.json"));
     const models = ModelRegistry.create(auth, path.join(this.agentDir, "models.json"));
@@ -1045,7 +1068,7 @@ export class RunCoordinator {
           return;
         }
         await withTaskWrite(file, async () => {
-          const { session, manager } = await this.createSession(project, executionPath, file, auth, models);
+          const { session, manager } = await this.createSession(project, executionPath, file, auth, models, shellRuntime);
           active.session = session;
           active.manager = manager;
           const unsubscribe = session.subscribe((event) => this.handleEvent(active, event));
@@ -1084,7 +1107,7 @@ export class RunCoordinator {
   }
 
   async exportTask(projectPath: string, taskPath: string, format: "jsonl" | "html", outputPath: string) {
-    const { file, project, executionPath } = await assertRunnableTask(this.agentDir, projectPath, taskPath);
+    const { file, project, executionPath } = await this.runnableTask(projectPath, taskPath);
     if (this.activeTasks.has(file)) throw new Error("Stop the active Run before exporting this Task");
     if (format === "jsonl") {
       await copyFile(file, outputPath);
@@ -1132,16 +1155,33 @@ export class RunCoordinator {
   }
 
   async abortAll() {
-    await Promise.all([...this.activeTasks].map(([taskPath]) => this.abortTask(taskPath)));
+    await Promise.allSettled([...this.activeTasks].map(([taskPath]) => this.abortTask(taskPath)));
+    if (!this.activeTasks.size) return;
+    await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
   }
 
-  private async createSession(projectPath: string, executionPath: string, file: string, auth: AuthStorage, models: ModelRegistry) {
+  private async createSession(
+    projectPath: string,
+    executionPath: string,
+    file: string,
+    auth: AuthStorage,
+    models: ModelRegistry,
+    shellRuntime?: PreparedShellRuntime,
+  ) {
     const { loader: resources, settings } = await loadTaskResources(this.agentDir, projectPath, executionPath);
     const manager = guardTaskManager(file, SessionManager.open(file));
     const configuredScope = settings.getEnabledModels();
     const { scopedModels } = Array.isArray(configuredScope) && configuredScope.length
       ? await resolveModelScopeWithDiagnostics(configuredScope, models)
       : { scopedModels: [] };
+    const bashOperations = shellRuntime
+      ? withBashEnvironment(createLocalBashOperations({ shellPath: shellRuntime.shellPath }), shellRuntime.environment)
+      : undefined;
+    const customTools: CreateAgentSessionOptions["customTools"] = shellRuntime ? [createBashToolDefinition(executionPath, {
+      shellPath: shellRuntime.shellPath,
+      commandPrefix: settings.getShellCommandPrefix(),
+      spawnHook: (context) => ({ ...context, env: mergeEnvironments(context.env, shellRuntime.environment) }),
+    }) as unknown as NonNullable<CreateAgentSessionOptions["customTools"]>[number]] : undefined;
     const { session } = await createAgentSession({
       cwd: executionPath,
       agentDir: this.agentDir,
@@ -1151,9 +1191,10 @@ export class RunCoordinator {
       resourceLoader: resources,
       sessionManager: manager,
       scopedModels,
+      ...(customTools ? { customTools } : {}),
       ...getTaskSessionSelection(manager, models),
     });
-    return { session, manager };
+    return { session, manager, bashOperations };
   }
 
   private ensureAssistant(active: ActiveRun, message: unknown) {

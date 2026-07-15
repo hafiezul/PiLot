@@ -61,11 +61,14 @@ export type ProjectSummary = {
   taskCount: number;
 };
 
+export type ProjectEnvironmentOverride = { name: string; value: string };
+
 export type ProjectAccess = ProjectSummary & {
   admitted: boolean;
   tasks: TaskSummary[];
   diagnostics: ProjectDiagnostic[];
   executionConsent: boolean;
+  environmentOverrides: ProjectEnvironmentOverride[];
   resourceTrust: {
     required: boolean;
     decision: boolean | null;
@@ -366,4 +369,5 @@ export type ProjectsApi = {
   setTaskArchived(projectPath: string, taskPath: string, archived: boolean): Promise<ProjectsState>;
   setResourceTrust(path: string, trusted: boolean): Promise<ProjectsState>;
   setExecutionConsent(path: string, consent: boolean): Promise<ProjectsState>;
+  setProjectEnvironment(path: string, overrides: ProjectEnvironmentOverride[]): Promise<ProjectsState>;
 };

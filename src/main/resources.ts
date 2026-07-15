@@ -83,8 +83,8 @@ function provenance(sourceInfo: { source: string; scope: "user" | "project" | "t
   };
 }
 
-export async function getTaskResources(agentDir: string, projectPath: string, taskPath: string): Promise<TaskResourceState> {
-  const { project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+export async function getTaskResources(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv = process.env): Promise<TaskResourceState> {
+  const { project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   const [loaded, discovered] = await Promise.all([
     loadTaskResources(agentDir, project, executionPath).then((value) => ({ value })).catch((error: unknown) => ({ error })),
     projectFiles(executionPath),

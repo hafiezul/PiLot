@@ -55,6 +55,18 @@ npm run dev
 
 Running `npx pi` initializes the selected Pi environment and lets you configure a provider. An empty environment is also valid for exercising PiLot's readiness UI.
 
+### Shell and Project environments
+
+PiLot reads the configured login-shell environment once when the app starts, without writing shell files. Restart PiLot after changing shell startup configuration. Explicit variables saved under **Project actions → Project access → Project environment** override that captured environment for all future Project-scoped processes, including agent tools, inline commands, Git and Worktree operations, setup commands, configured editors, and terminal launches. A Project override replaces the captured value with the same name; on Windows, names are matched case-insensitively.
+
+On Windows, Bash resolution is deterministic:
+
+1. Pi's `shellPath` setting (Project setting first when trusted, otherwise global)
+2. Git Bash under `Program Files` or `Program Files (x86)`
+3. `bash.exe` on the captured `PATH`
+
+PiLot passes native Windows paths to Git, editors, and process working directories. Git Bash performs its normal MSYS path conversion for shell commands; PiLot does not rewrite command text or require WSL.
+
 ## Checks
 
 ```sh
@@ -89,7 +101,8 @@ Before changing product behavior or terminology, read [the v1 scope](product/v1-
 ## Troubleshooting
 
 - **“Create your Pi environment”**: run `npx pi` with the same `PI_CODING_AGENT_DIR` value, then restart PiLot.
-- **“Install a compatible Bash shell”**: ensure `bash` is on `PATH`; on Windows, install Git for Windows or configure Pi's `shellPath`.
+- **“Install a compatible Bash shell”**: on Windows, install [Git for Windows](https://git-scm.com/download/win), add `bash.exe` to `PATH`, or configure Pi's `shellPath`; then relaunch PiLot.
+- **“Load your login-shell environment”**: fix the reported shell startup error, then relaunch PiLot. PiLot temporarily uses its desktop launch environment until capture succeeds.
 - **A provider is missing**: configure it in PiLot or Pi, then use **Refresh providers** or restart the app.
 - **Port 5173 is already in use**: stop the other process before running `npm run dev`; PiLot intentionally does not fall through to another port.
 - **A main-process or preload change is not visible**: stop Electron and run `npm run dev` again. Renderer React and CSS changes should update automatically.

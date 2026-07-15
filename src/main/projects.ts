@@ -1,7 +1,7 @@
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ProjectAccess, ProjectsState, TaskCreationRequest, TaskExecutionLocation } from "../shared/projects.js";
+import type { ProjectAccess, ProjectEnvironmentOverride, ProjectsState, TaskCreationRequest, TaskExecutionLocation } from "../shared/projects.js";
 import { createTaskAtExecution, discoverTasks, setTaskLifecycle } from "./tasks.js";
 import { getTaskCreationState, withManagedWorktree } from "./worktrees.js";
 
@@ -10,9 +10,20 @@ type SavedProjects = {
   selectedProject?: string;
   executionConsent: Record<string, boolean>;
   setupCommands: Record<string, string>;
+  environmentOverrides: Record<string, Record<string, string>>;
 };
 
-const defaults: SavedProjects = { recentProjects: [], executionConsent: {}, setupCommands: {} };
+const defaults: SavedProjects = { recentProjects: [], executionConsent: {}, setupCommands: {}, environmentOverrides: {} };
+
+function savedEnvironmentOverrides(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([projectPath, overrides]) => {
+    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return [];
+    const entries = Object.entries(overrides).filter((entry): entry is [string, string] =>
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[0]) && typeof entry[1] === "string");
+    return entries.length ? [[projectPath, Object.fromEntries(entries)]] : [];
+  }));
+}
 
 async function load(directory: string): Promise<SavedProjects> {
   try {
@@ -24,6 +35,7 @@ async function load(directory: string): Promise<SavedProjects> {
       setupCommands: saved.setupCommands && typeof saved.setupCommands === "object"
         ? Object.fromEntries(Object.entries(saved.setupCommands).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
         : {},
+      environmentOverrides: savedEnvironmentOverrides(saved.environmentOverrides),
     };
   } catch {
     return structuredClone(defaults);
@@ -67,6 +79,9 @@ async function projectAccess(
     diagnostics: discovery.diagnostics,
     taskCount: discovery.tasks.length,
     executionConsent: saved.executionConsent[projectPath] === true,
+    environmentOverrides: Object.entries(saved.environmentOverrides[projectPath] ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => ({ name, value })),
     resourceTrust: {
       required: hasTrustRequiringProjectResources(projectPath),
       decision: trust?.decision ?? null,
@@ -117,17 +132,18 @@ export async function removeProject(directory: string, agentDir: string, project
   saved.recentProjects = saved.recentProjects.filter((item) => item !== canonical);
   delete saved.executionConsent[canonical];
   delete saved.setupCommands[canonical];
+  delete saved.environmentOverrides[canonical];
   if (saved.selectedProject === canonical) saved.selectedProject = saved.recentProjects[0];
   await save(directory, saved);
   return getProjectsState(directory, agentDir);
 }
 
-export async function getTaskCreation(directory: string, agentDir: string, projectPath: string) {
+export async function getTaskCreation(directory: string, agentDir: string, projectPath: string, environment: NodeJS.ProcessEnv = process.env) {
   const saved = await load(directory);
   const canonical = await canonicalize(projectPath);
   if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this Project before creating a Task");
   if (saved.executionConsent[canonical] !== true) throw new Error("Agent execution consent is required for this Project");
-  return { ...await getTaskCreationState(canonical), setupCommand: saved.setupCommands[canonical] ?? "" };
+  return { ...await getTaskCreationState(canonical, environment), setupCommand: saved.setupCommands[canonical] ?? "" };
 }
 
 function normalizedSetupCommand(value?: string) {
@@ -144,6 +160,7 @@ export async function withTaskExecution<T>(
   projectPath: string,
   request: TaskCreationRequest,
   operation: (plan: TaskExecutionPlan) => Promise<T>,
+  environment: NodeJS.ProcessEnv = process.env,
 ) {
   const saved = await load(directory);
   const canonical = await canonicalize(projectPath);
@@ -161,12 +178,12 @@ export async function withTaskExecution<T>(
   remember(saved, canonical);
   await save(directory, saved);
   return withManagedWorktree(directory, canonical, request.ref, (execution) =>
-    operation({ execution, ...(command ? { setupCommand: command } : {}) }));
+    operation({ execution, ...(command ? { setupCommand: command } : {}) }), environment);
 }
 
-export function createTask(directory: string, agentDir: string, projectPath: string, request: TaskCreationRequest) {
+export function createTask(directory: string, agentDir: string, projectPath: string, request: TaskCreationRequest, environment: NodeJS.ProcessEnv = process.env) {
   return withTaskExecution(directory, agentDir, projectPath, request, ({ execution, setupCommand }) =>
-    createTaskAtExecution(agentDir, projectPath, execution, setupCommand));
+    createTaskAtExecution(agentDir, projectPath, execution, setupCommand), environment);
 }
 
 export async function setTaskArchived(
@@ -231,4 +248,51 @@ export async function assertExecutionAllowed(directory: string, projectPath: str
   if (saved.executionConsent[await canonicalize(projectPath)] !== true) {
     throw new Error("Agent execution consent is required for this Project");
   }
+}
+
+export async function getProjectEnvironmentOverrides(directory: string, projectPath: string) {
+  const saved = await load(directory);
+  const canonical = await canonicalize(projectPath);
+  if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this Project before using environment overrides");
+  return { ...(saved.environmentOverrides[canonical] ?? {}) };
+}
+
+function normalizedEnvironmentOverrides(overrides: ProjectEnvironmentOverride[]) {
+  if (!Array.isArray(overrides) || overrides.length > 128) throw new Error("Save no more than 128 Project environment variables");
+  const normalized: Record<string, string> = {};
+  let totalLength = 0;
+  for (const override of overrides) {
+    if (!override || typeof override !== "object" || typeof override.name !== "string" || typeof override.value !== "string") {
+      throw new Error("Each Project environment override needs a name and value");
+    }
+    const name = override.name.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`${name || "Variable names"} must start with a letter or underscore and contain only letters, numbers, and underscores`);
+    }
+    const duplicate = Object.keys(normalized).find((candidate) => process.platform === "win32"
+      ? candidate.toLocaleLowerCase() === name.toLocaleLowerCase()
+      : candidate === name);
+    if (duplicate) throw new Error(`${name} is listed more than once`);
+    totalLength += name.length + override.value.length;
+    if (override.value.includes("\0") || totalLength > 128 * 1024) throw new Error("Project environment overrides must be 128 KB or smaller");
+    normalized[name] = override.value;
+  }
+  return normalized;
+}
+
+export async function setProjectEnvironmentOverrides(
+  directory: string,
+  agentDir: string,
+  projectPath: string,
+  overrides: ProjectEnvironmentOverride[],
+) {
+  const saved = await load(directory);
+  const canonical = await canonicalize(projectPath);
+  if (!saved.recentProjects.includes(canonical)) throw new Error("Admit this Project before saving environment overrides");
+  const normalized = normalizedEnvironmentOverrides(overrides);
+  if (Object.keys(normalized).length) saved.environmentOverrides[canonical] = normalized;
+  else delete saved.environmentOverrides[canonical];
+  remember(saved, canonical);
+  await save(directory, saved);
+  return getProjectsState(directory, agentDir);
 }

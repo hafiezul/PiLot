@@ -91,6 +91,7 @@ const api: PiLotApi = {
   setTaskArchived: (projectPath, taskPath, archived) => ipcRenderer.invoke("projects:set-task-archived", projectPath, taskPath, archived),
   setResourceTrust: (path, trusted) => ipcRenderer.invoke("projects:set-resource-trust", path, trusted),
   setExecutionConsent: (path, consent) => ipcRenderer.invoke("projects:set-execution-consent", path, consent),
+  setProjectEnvironment: (path, overrides) => ipcRenderer.invoke("projects:set-environment", path, overrides),
 };
 
 contextBridge.exposeInMainWorld("pilot", api);

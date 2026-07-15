@@ -1,5 +1,4 @@
 import { AuthStorage, createAgentSession, CURRENT_SESSION_VERSION, DefaultResourceLoader, estimateTokens, ModelRegistry, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
@@ -9,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { thinkingLevels, type ProjectDiagnostic, type RunStatus, type TaskExecutionLocation, type TaskModelState, type TaskSetupState, type TaskSetupStatus, type TaskSummary, type ThinkingLevel } from "../shared/projects.js";
 import { BUILT_IN_PROVIDER_IDS } from "../shared/providers.js";
 import { guardTaskManager, taskSnapshot } from "./continuity.js";
+import { runGit } from "./git.js";
 
 const metadataType = "pilot.task";
 const runMetadataType = "pilot.run";
@@ -107,15 +107,12 @@ function appendMetadata(file: string, data: ResolvedTaskMetadata) {
   guardTaskManager(file, SessionManager.open(file)).appendCustomEntry(metadataType, metadataData(data));
 }
 
-function git(cwd: string, args: string[]) {
-  return new Promise<string>((resolve, reject) => {
-    execFile("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8", maxBuffer: 1024 * 1024 },
-      (error, stdout) => error ? reject(error) : resolve(stdout));
-  });
+function git(cwd: string, args: string[], environment: NodeJS.ProcessEnv = process.env) {
+  return runGit(cwd, args, { environment, maxBuffer: 1024 * 1024 });
 }
 
-async function gitCommonDirectory(cwd: string) {
-  const value = (await git(cwd, ["rev-parse", "--git-common-dir"])).trim();
+async function gitCommonDirectory(cwd: string, environment: NodeJS.ProcessEnv) {
+  const value = (await git(cwd, ["rev-parse", "--git-common-dir"], environment)).trim();
   return realpath(path.resolve(cwd, value));
 }
 
@@ -469,7 +466,7 @@ export async function assertReadableTask(agentDir: string, projectPath: string, 
   return { file, project, task: result.task, header: result.header, metadata: result.metadata };
 }
 
-export async function assertRunnableTask(agentDir: string, projectPath: string, taskPath: string) {
+export async function assertRunnableTask(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv = process.env) {
   const context = await assertReadableTask(agentDir, projectPath, taskPath);
   const { file, project, task, header } = context;
   const execution = task.execution;
@@ -488,7 +485,7 @@ export async function assertRunnableTask(agentDir: string, projectPath: string, 
       throw new Error("This managed Worktree Task has an invalid Execution location");
     }
     try {
-      const [projectGit, worktreeGit] = await Promise.all([gitCommonDirectory(project), gitCommonDirectory(executionPath)]);
+      const [projectGit, worktreeGit] = await Promise.all([gitCommonDirectory(project, environment), gitCommonDirectory(executionPath, environment)]);
       if (projectGit !== worktreeGit) throw new Error("mismatch");
     } catch {
       throw new Error("This managed Worktree is unavailable or no longer belongs to the Project");
@@ -497,8 +494,8 @@ export async function assertRunnableTask(agentDir: string, projectPath: string, 
   return { file, project, executionPath, execution, setup: context.metadata?.setup };
 }
 
-export async function getTaskSetupState(agentDir: string, projectPath: string, taskPath: string): Promise<TaskSetupState | undefined> {
-  const context = await assertRunnableTask(agentDir, projectPath, taskPath);
+export async function getTaskSetupState(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv = process.env): Promise<TaskSetupState | undefined> {
+  const context = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   return context.setup ? { taskPath: context.file, ...context.setup } : undefined;
 }
 
@@ -507,8 +504,9 @@ export async function setTaskSetupState(
   projectPath: string,
   taskPath: string,
   setup: Omit<TaskSetupState, "taskPath">,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<TaskSetupState> {
-  const context = await assertRunnableTask(agentDir, projectPath, taskPath);
+  const context = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   if (!context.setup) throw new Error("This Task has no setup command");
   return withTaskWrite(context.file, async () => {
     const task = await readTask(context.file, context.project);
@@ -782,13 +780,13 @@ async function taskModelState(file: string, projectPath: string, executionPath: 
   };
 }
 
-export async function getTaskModelState(agentDir: string, projectPath: string, taskPath: string) {
-  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+export async function getTaskModelState(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv = process.env) {
+  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   return withTaskWrite(file, async () => taskModelState(file, project, executionPath, agentDir, SessionManager.open(file)));
 }
 
-export async function setTaskModel(agentDir: string, projectPath: string, taskPath: string, provider: string, modelId: string) {
-  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+export async function setTaskModel(agentDir: string, projectPath: string, taskPath: string, provider: string, modelId: string, environment: NodeJS.ProcessEnv = process.env) {
+  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   return withTaskWrite(file, async () => {
     const manager = guardTaskManager(file, SessionManager.open(file));
     const before = await taskModelState(file, project, executionPath, agentDir, manager);
@@ -803,9 +801,9 @@ export async function setTaskModel(agentDir: string, projectPath: string, taskPa
   });
 }
 
-export async function setTaskThinking(agentDir: string, projectPath: string, taskPath: string, requested: ThinkingLevel) {
+export async function setTaskThinking(agentDir: string, projectPath: string, taskPath: string, requested: ThinkingLevel, environment: NodeJS.ProcessEnv = process.env) {
   if (!thinkingLevels.includes(requested)) throw new Error("Choose a valid thinking level");
-  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+  const { file, project, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   return withTaskWrite(file, async () => {
     const manager = guardTaskManager(file, SessionManager.open(file));
     const before = await taskModelState(file, project, executionPath, agentDir, manager);
@@ -898,9 +896,10 @@ export async function forkChangedTask(
   taskPath: string,
   targetExecution: TaskExecutionLocation,
   setupCommand?: string,
+  environment: NodeJS.ProcessEnv = process.env,
 ) {
   const file = path.resolve(taskPath);
-  const { project, executionPath } = await assertRunnableTask(agentDir, projectPath, file);
+  const { project, executionPath } = await assertRunnableTask(agentDir, projectPath, file, environment);
   const source = taskSnapshot(file).toString("utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
   const sourceHeader = source[0] as Header | undefined;
   if (!sourceHeader || sourceHeader.type !== "session" || typeof sourceHeader.id !== "string" || typeof sourceHeader.cwd !== "string"

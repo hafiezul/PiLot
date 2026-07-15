@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runGit } from "../dist/main/main/git.js";
 import { discoverTasks, getProjectSessionDirectory, setTaskLifecycle } from "../dist/main/main/tasks.js";
 
 const headerTime = "2026-01-01T00:00:00.000Z";
@@ -20,6 +21,12 @@ function message(id: string, activity: string, content: string) {
 async function entries(file: string) {
   return (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 }
+
+test("preserves Git max-buffer error metadata", async () => {
+  await expect(runGit(process.cwd(), ["--version"], { maxBuffer: 1 })).rejects.toMatchObject({
+    code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+  });
+});
 
 test("serializes Task bookkeeping without changing activity order", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "pilot-tasks-"));

@@ -1,12 +1,12 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, type MenuItemConstructorOptions } from "electron";
 import { realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPreferences, saveAppearance, saveExpandThinking, saveGlobalRunCap, saveNotificationPreferences, savePanePreferences, savePreferredApplication, savePreferredTerminal, saveRecentSelection, saveWindowPreference } from "./preferences.js";
 import { getAgentSettings, saveAgentCompaction, saveAgentModelScope, saveAgentRetry, saveDefaultAgentModel, saveDefaultAgentThinking } from "./agent-settings.js";
-import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectsState, getTaskCreation, removeProject, selectProject, setExecutionConsent, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
+import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectEnvironmentOverrides, getProjectsState, getTaskCreation, removeProject, selectProject, setExecutionConsent, setProjectEnvironmentOverrides, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { RunCoordinator } from "./runs.js";
 import { assertRunnableTask, getTaskModelState, recoverTaskWorktreeRemovals, setTaskModel, setTaskThinking } from "./tasks.js";
@@ -18,7 +18,8 @@ import { createTaskWorktreeBranch, getTaskWorktreeState, openTaskWorktreeTermina
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
 import { applicationIds, type ApplicationId } from "../shared/editors.js";
 import { type Appearance, type Preferences } from "../shared/preferences.js";
-import { CHANGE_STATUSES, type ChangeStatus, type ImageAttachment, type TaskCreationRequest, type TaskWorktreeFile, type ThinkingLevel } from "../shared/projects.js";
+import { CHANGE_STATUSES, type ChangeStatus, type ImageAttachment, type ProjectEnvironmentOverride, type TaskCreationRequest, type TaskWorktreeFile, type ThinkingLevel } from "../shared/projects.js";
+import { captureLoginShellEnvironment, installCapturedEnvironment, projectEnvironment } from "./environment.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
@@ -31,6 +32,10 @@ if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggi
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
 
 let preferences: Preferences;
+let runCoordinatorForQuit: RunCoordinator | undefined;
+let setupCoordinatorForQuit: WorktreeSetupCoordinator | undefined;
+let quitCleanupStarted = false;
+let quitCleanupFinished = false;
 const actionMenuItems = new Map<DesktopActionId, Electron.MenuItem>();
 
 function invokeRendererAction(id: DesktopActionId, target?: Electron.BaseWindow) {
@@ -193,15 +198,28 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  const launchEnvironment = { ...process.env };
+  const bootstrapAgentDir = getAgentDir();
+  const bootstrapSettings = SettingsManager.create(homedir(), bootstrapAgentDir, { projectTrusted: false });
+  const capturedEnvironment = await captureLoginShellEnvironment(launchEnvironment, bootstrapSettings.getShellPath());
+  const baseEnvironment = installCapturedEnvironment(capturedEnvironment, launchEnvironment);
+  const agentDir = getAgentDir();
+  const environmentForProject = async (projectPath: string) => projectEnvironment(
+    baseEnvironment,
+    await getProjectEnvironmentOverrides(app.getPath("userData"), projectPath),
+    agentDir,
+  );
+
   preferences = await loadPreferences(app.getPath("userData"));
-  await recoverTaskWorktreeRemovals(app.getPath("userData"), getAgentDir());
+  await recoverTaskWorktreeRemovals(app.getPath("userData"), agentDir);
   nativeTheme.themeSource = preferences.appearance;
   nativeTheme.on("updated", updateWindowChrome);
 
   createApplicationMenu();
-  const runs = new RunCoordinator(app.getPath("userData"), getAgentDir(), (state) => {
+  const runs = new RunCoordinator(app.getPath("userData"), agentDir, (state) => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:run-event", state);
-  }, preferences.globalRunCap);
+  }, environmentForProject, preferences.globalRunCap);
+  runCoordinatorForQuit = runs;
   ipcMain.on("actions:set-state", (_event, states: unknown) => {
     if (!Array.isArray(states) || states.some((state) => !state || typeof state !== "object"
       || typeof (state as DesktopActionState).id !== "string" || !desktopActionIds.has((state as DesktopActionState).id)
@@ -215,7 +233,7 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("startup:get", getStartupState);
+  ipcMain.handle("startup:get", () => getStartupState(capturedEnvironment, baseEnvironment));
   ipcMain.handle("preferences:get", () => preferences);
   ipcMain.handle("preferences:set-appearance", async (_event, appearance: Appearance) => {
     preferences = await saveAppearance(app.getPath("userData"), appearance);
@@ -255,10 +273,10 @@ app.whenReady().then(async () => {
     saveAgentRetry(getAgentDir(), settings));
   ipcMain.handle("agent-settings:set-compaction", (_event, settings: unknown) =>
     saveAgentCompaction(getAgentDir(), settings));
-  ipcMain.handle("terminals:get", () => getTerminalState(preferences.preferredTerminal));
+  ipcMain.handle("terminals:get", () => getTerminalState(preferences.preferredTerminal, baseEnvironment));
   ipcMain.handle("terminals:set-preferred", async (_event, terminal: unknown) => {
     preferences = await savePreferredTerminal(app.getPath("userData"), terminal);
-    return getTerminalState(preferences.preferredTerminal);
+    return getTerminalState(preferences.preferredTerminal, baseEnvironment);
   });
   ipcMain.handle("providers:get", getProviderState);
   ipcMain.handle("providers:set-key", (_event, provider: string, key: string) => setApiKey(provider, key));
@@ -282,9 +300,10 @@ app.whenReady().then(async () => {
       : undefined;
     return { projects, ...(selected ? { selected } : {}) };
   };
-  const setups = new WorktreeSetupCoordinator(getAgentDir(), (state) => {
+  const setups = new WorktreeSetupCoordinator(agentDir, (state) => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:setup-event", state);
-  });
+  }, environmentForProject);
+  setupCoordinatorForQuit = setups;
   const requireProjectPath = (value: unknown) => {
     if (typeof value !== "string" || !value) throw new Error("A Project path is required");
     return value;
@@ -312,8 +331,9 @@ app.whenReady().then(async () => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     await assertProjectAdmitted(app.getPath("userData"), project);
-    const { executionPath } = await assertRunnableTask(getAgentDir(), project, task);
-    return getConfiguredEditor(getAgentDir(), executionPath, project);
+    const environment = await environmentForProject(project);
+    const { executionPath } = await assertRunnableTask(getAgentDir(), project, task, environment);
+    return { configured: getConfiguredEditor(getAgentDir(), executionPath, project, environment), environment };
   };
   const worktreeContext = async (projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
@@ -321,15 +341,17 @@ app.whenReady().then(async () => {
     await assertProjectAdmitted(app.getPath("userData"), project);
     return { project, task };
   };
-  ipcMain.handle("applications:get", async (_event, projectPath: unknown, taskPath: unknown) =>
-    getApplicationState(preferences.preferredApplication, await editorContext(projectPath, taskPath)));
+  ipcMain.handle("applications:get", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const { configured, environment } = await editorContext(projectPath, taskPath);
+    return getApplicationState(preferences.preferredApplication, configured, environment);
+  });
   ipcMain.handle("applications:set-preferred", async (_event, projectPath: unknown, taskPath: unknown, application: unknown) => {
     if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("Unknown application");
-    const configured = await editorContext(projectPath, taskPath);
-    const state = await getApplicationState(application as ApplicationId, configured);
+    const { configured, environment } = await editorContext(projectPath, taskPath);
+    const state = await getApplicationState(application as ApplicationId, configured, environment);
     if (!state.available.some(({ id }) => id === application)) throw new Error("That application is not available on this computer");
     preferences = await savePreferredApplication(app.getPath("userData"), application);
-    return getApplicationState(preferences.preferredApplication, configured);
+    return getApplicationState(preferences.preferredApplication, configured, environment);
   });
   ipcMain.handle("projects:get", projectState);
   ipcMain.handle("projects:add", async (event) => {
@@ -353,10 +375,14 @@ app.whenReady().then(async () => {
     await runs.abortProject(project);
     return projectState();
   });
-  ipcMain.handle("tasks:get-creation", async (_event, projectPath: unknown) =>
-    getTaskCreation(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath)));
-  ipcMain.handle("tasks:create", async (_event, projectPath: unknown, request: unknown) =>
-    createTask(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireTaskCreation(request)));
+  ipcMain.handle("tasks:get-creation", async (_event, projectPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    return getTaskCreation(app.getPath("userData"), getAgentDir(), project, await environmentForProject(project));
+  });
+  ipcMain.handle("tasks:create", async (_event, projectPath: unknown, request: unknown) => {
+    const project = requireProjectPath(projectPath);
+    return createTask(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), await environmentForProject(project));
+  });
   ipcMain.handle("tasks:get-run", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskRun(requireProjectPath(projectPath), requireProjectPath(taskPath)));
   ipcMain.handle("tasks:get-setup", async (_event, projectPath: unknown, taskPath: unknown) =>
@@ -381,12 +407,16 @@ app.whenReady().then(async () => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
-      runs.forkChangedTask(project, task, execution, setupCommand));
+      runs.forkChangedTask(project, task, execution, setupCommand), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-model", async (_event, projectPath: unknown, taskPath: unknown) =>
-    getTaskModelState(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
-  ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) =>
-    getTaskResources(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-model", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    return getTaskModelState(getAgentDir(), project, requireProjectPath(taskPath), await environmentForProject(project));
+  });
+  ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    return getTaskResources(getAgentDir(), project, requireProjectPath(taskPath), await environmentForProject(project));
+  });
   ipcMain.handle("tasks:get-history", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath)));
   ipcMain.handle("tasks:navigate-history", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, summarize: unknown, customInstructions: unknown) => {
@@ -402,33 +432,37 @@ app.whenReady().then(async () => {
     const task = requireTaskPath(taskPath);
     const entry = requireHistoryEntry(entryId);
     return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
-      runs.forkTaskFromHistory(project, task, entry, execution, setupCommand));
+      runs.forkTaskFromHistory(project, task, entry, execution, setupCommand), await environmentForProject(project));
   });
   ipcMain.handle("tasks:clone-history", async (_event, projectPath: unknown, taskPath: unknown, request: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
-      runs.cloneTaskHistory(project, task, execution, setupCommand));
+      runs.cloneTaskHistory(project, task, execution, setupCommand), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-changes", async (_event, projectPath: unknown, taskPath: unknown) =>
-    getTaskChanges(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath)));
+  ipcMain.handle("tasks:get-changes", async (_event, projectPath: unknown, taskPath: unknown) => {
+    const project = requireProjectPath(projectPath);
+    return getTaskChanges(getAgentDir(), project, requireProjectPath(taskPath), await environmentForProject(project));
+  });
   ipcMain.handle("tasks:get-file-diff", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {
     if (typeof filePath !== "string" || !filePath) throw new Error("A changed file is required");
-    return getTaskFileDiff(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), filePath);
+    const project = requireProjectPath(projectPath);
+    return getTaskFileDiff(getAgentDir(), project, requireProjectPath(taskPath), filePath, await environmentForProject(project));
   });
   ipcMain.handle("tasks:get-worktree", async (_event, projectPath: unknown, taskPath: unknown) => {
     const { project, task } = await worktreeContext(projectPath, taskPath);
-    return getTaskWorktreeState(getAgentDir(), project, task);
+    return getTaskWorktreeState(getAgentDir(), project, task, await environmentForProject(project));
   });
   ipcMain.handle("tasks:create-worktree-branch", async (_event, projectPath: unknown, taskPath: unknown, branch: unknown) => {
     if (typeof branch !== "string") throw new Error("A branch name is required");
     const { project, task } = await worktreeContext(projectPath, taskPath);
+    const environment = await environmentForProject(project);
     return runs.withIdleExecution(project, task, () =>
-      createTaskWorktreeBranch(app.getPath("userData"), getAgentDir(), project, task, branch));
+      createTaskWorktreeBranch(app.getPath("userData"), getAgentDir(), project, task, branch, environment));
   });
   ipcMain.handle("tasks:open-worktree-terminal", async (_event, projectPath: unknown, taskPath: unknown) => {
     const { project, task } = await worktreeContext(projectPath, taskPath);
-    return openTaskWorktreeTerminal(getAgentDir(), project, task, preferences.preferredTerminal);
+    return openTaskWorktreeTerminal(getAgentDir(), project, task, preferences.preferredTerminal, await environmentForProject(project));
   });
   ipcMain.handle("tasks:remove-worktree", async (_event, projectPath: unknown, taskPath: unknown, discard: unknown, expectedFiles: unknown) => {
     if (typeof discard !== "boolean" || !Array.isArray(expectedFiles)
@@ -443,23 +477,27 @@ app.whenReady().then(async () => {
       throw new Error("Review each affected file once before removing this Worktree");
     }
     const { project, task } = await worktreeContext(projectPath, taskPath);
+    const environment = await environmentForProject(project);
     return runs.withIdleExecution(project, task, async () => {
-      await removeManagedWorktree(app.getPath("userData"), getAgentDir(), project, task, discard, files);
+      await removeManagedWorktree(app.getPath("userData"), getAgentDir(), project, task, discard, files, environment);
       return projectState();
     });
   });
   ipcMain.handle("tasks:open-in-application", async (_event, projectPath: unknown, taskPath: unknown, application: unknown, filePath: unknown) => {
     if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("An application is required");
     if (filePath !== undefined && (typeof filePath !== "string" || !filePath)) throw new Error("A changed file is required");
-    return openTaskPathInApplication(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), requireTaskPath(taskPath), application as ApplicationId, filePath as string | undefined);
+    const project = requireProjectPath(projectPath);
+    return openTaskPathInApplication(app.getPath("userData"), getAgentDir(), project, requireTaskPath(taskPath), application as ApplicationId, filePath as string | undefined, await environmentForProject(project));
   });
   ipcMain.handle("tasks:set-model", async (_event, projectPath: unknown, taskPath: unknown, provider: unknown, modelId: unknown) => {
     if (typeof provider !== "string" || typeof modelId !== "string") throw new Error("A provider and model are required");
-    return setTaskModel(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), provider, modelId);
+    const project = requireProjectPath(projectPath);
+    return setTaskModel(getAgentDir(), project, requireProjectPath(taskPath), provider, modelId, await environmentForProject(project));
   });
   ipcMain.handle("tasks:set-thinking", async (_event, projectPath: unknown, taskPath: unknown, level: unknown) => {
     if (typeof level !== "string") throw new Error("A thinking level is required");
-    return setTaskThinking(getAgentDir(), requireProjectPath(projectPath), requireProjectPath(taskPath), level as ThinkingLevel);
+    const project = requireProjectPath(projectPath);
+    return setTaskThinking(getAgentDir(), project, requireProjectPath(taskPath), level as ThinkingLevel, await environmentForProject(project));
   });
   ipcMain.handle("tasks:submit", async (_event, projectPath: unknown, taskPath: unknown, prompt: unknown, images: unknown) => {
     if (typeof prompt !== "string" || (images !== undefined && !Array.isArray(images))) throw new Error("A prompt is required");
@@ -535,11 +573,44 @@ app.whenReady().then(async () => {
     if (!consent) await runs.abortProject(project);
     return projectState();
   });
+  ipcMain.handle("projects:set-environment", (_event, projectPath: unknown, overrides: unknown) => {
+    if (!Array.isArray(overrides) || overrides.some((override) => !override || typeof override !== "object"
+      || typeof (override as ProjectEnvironmentOverride).name !== "string"
+      || typeof (override as ProjectEnvironmentOverride).value !== "string")) {
+      throw new Error("Project environment overrides must contain variable names and values");
+    }
+    return setProjectEnvironmentOverrides(
+      app.getPath("userData"),
+      agentDir,
+      requireProjectPath(projectPath),
+      overrides as ProjectEnvironmentOverride[],
+    );
+  });
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+app.on("before-quit", (event) => {
+  if (quitCleanupFinished) return;
+  event.preventDefault();
+  if (quitCleanupStarted) return;
+  quitCleanupStarted = true;
+  void Promise.all([
+    runCoordinatorForQuit?.abortAll(),
+    setupCoordinatorForQuit?.abortAll(),
+  ]).catch((error) => {
+    console.error("Could not finish PiLot process cleanup:", error);
+  }).finally(() => {
+    quitCleanupFinished = true;
+    app.exit(0);
+  });
+});
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => app.quit());
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

@@ -4,7 +4,7 @@ import { desktopActions, type DesktopActionId } from "../shared/actions";
 import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
 import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type RecentSelection } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectEnvironmentOverride, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { AgentSettings } from "./agent-settings";
 import { ProviderIcon } from "./provider-icons";
@@ -142,6 +142,55 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
   );
 }
 
+function ProjectEnvironmentEditor({ project, onChange }: { project: ProjectAccess; onChange(state: ProjectsState): void }) {
+  const savedKey = JSON.stringify(project.environmentOverrides);
+  const [overrides, setOverrides] = useState<ProjectEnvironmentOverride[]>(project.environmentOverrides);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setOverrides(project.environmentOverrides);
+    setError("");
+  }, [project.path, savedKey]);
+  const normalized = overrides.map(({ name, value }) => ({ name: name.trim(), value }));
+  const names = normalized.map(({ name }) => window.pilot.platform === "win32" ? name.toLocaleLowerCase() : name);
+  const valid = normalized.every(({ name }) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) && new Set(names).size === names.length;
+  const showValidationError = !valid && normalized.some(({ name }) => name.length > 0);
+  const changed = JSON.stringify(normalized) !== savedKey;
+  const update = (index: number, field: keyof ProjectEnvironmentOverride, value: string) => {
+    setOverrides((current) => current.map((override, item) => item === index ? { ...override, [field]: value } : override));
+    setError("");
+  };
+  const save = () => {
+    if (busy || !changed || !valid) return;
+    setBusy(true);
+    setError("");
+    void window.pilot.setProjectEnvironment(project.path, normalized).then(onChange).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => setBusy(false));
+  };
+
+  return <section className="project-environment" aria-label="Project environment overrides">
+    <div className="access-heading">
+      <div><h3>Project environment</h3><p>Overrides the login-shell environment captured when PiLot opened. Changes apply to future agent tools, inline commands, and Worktree setup.</p></div>
+      <span className="access-status" role="status">{project.environmentOverrides.length} saved</span>
+    </div>
+    <p className="decision-source">Values stay in PiLot's local Project settings; they do not modify shell files, the Project, or Pi settings.</p>
+    {overrides.length ? <ul className="project-environment-list" aria-label="Environment variables">
+      {overrides.map((override, index) => <li key={index}>
+        <label><span>Name</span><input aria-label="Variable name" value={override.name} maxLength={128} autoComplete="off" spellCheck={false} disabled={busy} onChange={(event) => update(index, "name", event.target.value)} /></label>
+        <label><span>Value</span><input aria-label="Variable value" value={override.value} maxLength={32768} autoComplete="off" spellCheck={false} disabled={busy} onChange={(event) => update(index, "value", event.target.value)} /></label>
+        <button type="button" aria-label={`Remove ${override.name.trim() || "variable"}`} disabled={busy} onClick={() => { setOverrides((current) => current.filter((_, item) => item !== index)); setError(""); }}>Remove</button>
+      </li>)}
+    </ul> : <p className="project-environment-empty">No Project overrides. Runs use the environment captured at launch.</p>}
+    {showValidationError && <p className="error project-environment-error" role="alert">Use unique variable names beginning with a letter or underscore; only letters, numbers, and underscores are allowed.</p>}
+    {error && <p className="error project-environment-error" role="alert">{error}</p>}
+    <div className="project-environment-actions">
+      <button type="button" disabled={busy || overrides.length >= 128} onClick={() => setOverrides((current) => [...current, { name: "", value: "" }])}>Add variable</button>
+      <button type="button" className="primary-action" disabled={busy || !changed || !valid} onClick={save}>{busy ? "Saving…" : "Save environment"}</button>
+    </div>
+  </section>;
+}
+
 function ProjectAccessPanel({ project, onChange }: { project: ProjectAccess; onChange(state: ProjectsState): void }) {
   const [error, setError] = useState("");
   const attempt = async (action: () => Promise<ProjectsState>) => {
@@ -183,6 +232,7 @@ function ProjectAccessPanel({ project, onChange }: { project: ProjectAccess; onC
           : <button className="primary-action" onClick={() => void attempt(() => window.pilot.setExecutionConsent(project.path, true))}>Allow agent execution</button>}
       </div>
     </section>
+    {project.admitted && <ProjectEnvironmentEditor project={project} onChange={onChange} />}
     {error && <p className="error" role="alert">{error}</p>}
   </section>;
 }
@@ -1535,7 +1585,6 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       {waitingForCapacity && <p className="queue-position" role="status"><strong>Waiting for capacity.</strong> Queue position {timeline?.queuePosition ?? 1} · global limit {timeline?.runLimit ?? 4} active Runs.</p>}
       {interrupted && <section className="interrupted-recovery" role="status" aria-label="Interrupted Run recovery"><strong>Run interrupted</strong><p>PiLot did not retry the interrupted input. Review the timeline and Changes before continuing.</p></section>}
       {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
     </section>
     <div className="composer-dock">
       {showJumpLatest && <button type="button" className="jump-latest" aria-label="Jump to latest Run evidence" title="Jump to latest" onClick={jumpToLatest}>
@@ -1577,6 +1626,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     }} onSubmit={(event) => { event.preventDefault(); submit(active ? liveMode : undefined); }}>
       {imageDragActive && <div className="image-drop-feedback" aria-hidden="true"><span>＋</span> Drop images to attach</div>}
       <label htmlFor="task-prompt">{externallyChanged ? "Prompts paused — choose Reload or Fork" : waitingForCapacity ? "Run waiting for capacity" : setupBlocked ? "Finish Worktree setup before the first Run" : live ? "Guide the active Run" : "Prompt or inline command"}</label>
+      {error && <p className="error task-submit-error" role="alert">{error}</p>}
       <UnsupportedResourceNotice resources={resources?.unsupported ?? []} />
       {resources?.diagnostics.length ? <section className="resource-diagnostics" aria-label="Pi resource diagnostics">
         {resources.diagnostics.map((diagnostic, index) => <p key={`${diagnostic.path ?? "resource"}-${index}`} className={diagnostic.severity}><strong>Pi resource {diagnostic.severity}:</strong> {diagnostic.message}{diagnostic.path && <code>{diagnostic.path}</code>}</p>)}
@@ -2124,11 +2174,11 @@ function App() {
   const updateProjectAccess = useCallback((next: ProjectsState) => {
     setProjects(next);
     const selected = next.selected;
-    if (selected?.executionConsent && (!selected.resourceTrust.required || selected.resourceTrust.decision !== null)) {
+    if (!showProjectAccess && selected?.executionConsent && (!selected.resourceTrust.required || selected.resourceTrust.decision !== null)) {
       setShowProjectAccess(false);
       setShowHome(false);
     }
-  }, []);
+  }, [showProjectAccess]);
   const createTaskFromRequest = useCallback(async (request: TaskCreationRequest) => {
     const project = projects?.selected;
     if (!project) return;

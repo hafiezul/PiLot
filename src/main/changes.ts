@@ -1,10 +1,10 @@
-import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ApplicationId } from "../shared/editors.js";
 import type { ChangeStatus, DiffHunk, TaskChanges, TaskFileDiff } from "../shared/projects.js";
 import { getConfiguredEditor, launchApplication } from "./editors.js";
+import { runGit } from "./git.js";
 import { assertProjectAdmitted } from "./projects.js";
 import { assertRunnableTask } from "./tasks.js";
 
@@ -18,15 +18,8 @@ function taskChangesKey(projectPath: string, taskPath: string) {
   return `${path.resolve(projectPath)}\0${path.resolve(taskPath)}`;
 }
 
-function git(cwd: string, args: string[], maxBuffer = maximumGitOutputBytes) {
-  return new Promise<string>((resolve, reject) => {
-    execFile("git", ["--no-optional-locks", "--literal-pathspecs", ...args], {
-      cwd,
-      encoding: "utf8",
-      maxBuffer,
-      env: { ...process.env, GIT_PAGER: "cat" },
-    }, (error, stdout) => error ? reject(error) : resolve(stdout));
-  });
+function git(cwd: string, args: string[], maxBuffer = maximumGitOutputBytes, environment: NodeJS.ProcessEnv = process.env) {
+  return runGit(cwd, args, { environment, literalPathspecs: true, maxBuffer });
 }
 
 function gitPath(value: string) {
@@ -141,38 +134,38 @@ async function untrackedStats(executionPath: string, filePath: string) {
   return remember({ additions: binary ? 0 : additions, deletions: 0, binary });
 }
 
-async function hasHead(executionPath: string) {
+async function hasHead(executionPath: string, environment: NodeJS.ProcessEnv) {
   try {
-    await git(executionPath, ["rev-parse", "--verify", "HEAD"]);
+    await git(executionPath, ["rev-parse", "--verify", "HEAD"], maximumGitOutputBytes, environment);
     return true;
   } catch {
     return false;
   }
 }
 
-export async function getTaskChanges(agentDir: string, projectPath: string, taskPath: string): Promise<TaskChanges> {
-  const { file, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+export async function getTaskChanges(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv = process.env): Promise<TaskChanges> {
+  const { file, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   const checkedAt = Date.now();
   const finish = (changes: TaskChanges) => {
     taskChangesCache.set(taskChangesKey(projectPath, taskPath), changes);
     return changes;
   };
   try {
-    if ((await git(executionPath, ["rev-parse", "--is-inside-work-tree"])).trim() !== "true") {
+    if ((await git(executionPath, ["rev-parse", "--is-inside-work-tree"], maximumGitOutputBytes, environment)).trim() !== "true") {
       return finish({ taskPath: file, executionPath, repository: false, checkedAt, files: [], additions: 0, deletions: 0 });
     }
   } catch {
     return finish({ taskPath: file, executionPath, repository: false, checkedAt, files: [], additions: 0, deletions: 0 });
   }
 
-  const head = await hasHead(executionPath);
+  const head = await hasHead(executionPath, environment);
   const [trackedOutput, untrackedOutput, numstatOutput] = await Promise.all([
     head
-      ? git(executionPath, ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--name-status", "-z", "--relative", "HEAD", "--", "."])
-      : git(executionPath, ["ls-files", "--cached", "-z", "--", "."]),
-    git(executionPath, ["ls-files", "--others", "--exclude-standard", "-z", "--", "."]),
+      ? git(executionPath, ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--name-status", "-z", "--relative", "HEAD", "--", "."], maximumGitOutputBytes, environment)
+      : git(executionPath, ["ls-files", "--cached", "-z", "--", "."], maximumGitOutputBytes, environment),
+    git(executionPath, ["ls-files", "--others", "--exclude-standard", "-z", "--", "."], maximumGitOutputBytes, environment),
     head
-      ? git(executionPath, ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--numstat", "-z", "--relative", "HEAD", "--", "."])
+      ? git(executionPath, ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--numstat", "-z", "--relative", "HEAD", "--", "."], maximumGitOutputBytes, environment)
       : Promise.resolve(""),
   ]);
   const statuses: Array<{ path: string; previousPath?: string; status: ChangeStatus }> = head
@@ -261,15 +254,15 @@ async function syntheticDiff(executionPath: string, filePath: string): Promise<{
   return { binary: false, truncated: false, metadata: [], hunks: lines.length || content ? [hunk] : [] };
 }
 
-export async function getTaskFileDiff(agentDir: string, projectPath: string, taskPath: string, filePath: string): Promise<TaskFileDiff> {
+export async function getTaskFileDiff(agentDir: string, projectPath: string, taskPath: string, filePath: string, environment: NodeJS.ProcessEnv = process.env): Promise<TaskFileDiff> {
   const cached = taskChangesCache.get(taskChangesKey(projectPath, taskPath));
   const changes = cached && Date.now() - cached.checkedAt < 5_000
     ? cached
-    : await getTaskChanges(agentDir, projectPath, taskPath);
+    : await getTaskChanges(agentDir, projectPath, taskPath, environment);
   const change = changes.files.find((candidate) => candidate.path === gitPath(filePath));
   if (!changes.repository || !change) throw new Error("That file is no longer changed");
   if (change.binary) return { ...change, taskPath: changes.taskPath, binary: true, truncated: false, metadata: [], hunks: [] };
-  const head = await hasHead(changes.executionPath);
+  const head = await hasHead(changes.executionPath, environment);
   if (change.status === "untracked" || (!head && change.status !== "deleted")) {
     const diff = await syntheticDiff(changes.executionPath, change.path);
     return { ...change, ...diff, taskPath: changes.taskPath };
@@ -278,7 +271,7 @@ export async function getTaskFileDiff(agentDir: string, projectPath: string, tas
     const paths = [change.previousPath, change.path].filter((value): value is string => Boolean(value));
     const output = await git(changes.executionPath, [
       "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--relative", "--unified=3", "HEAD", "--", ...paths,
-    ]);
+    ], maximumGitOutputBytes, environment);
     return { ...change, taskPath: changes.taskPath, truncated: false, ...parseUnifiedDiff(output) };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
@@ -288,9 +281,9 @@ export async function getTaskFileDiff(agentDir: string, projectPath: string, tas
   }
 }
 
-export async function openTaskPathInApplication(userDataDir: string, agentDir: string, projectPath: string, taskPath: string, application: ApplicationId, filePath?: string) {
+export async function openTaskPathInApplication(userDataDir: string, agentDir: string, projectPath: string, taskPath: string, application: ApplicationId, filePath?: string, environment: NodeJS.ProcessEnv = process.env) {
   await assertProjectAdmitted(userDataDir, projectPath);
-  const { executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath);
+  const { executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   const canonicalExecutionPath = await realpath(executionPath);
   const requestedTarget = filePath ? resolveChangePath(executionPath, filePath) : executionPath;
   const details = await lstat(requestedTarget);
@@ -300,12 +293,12 @@ export async function openTaskPathInApplication(userDataDir: string, agentDir: s
     canonicalTarget = await realpathAllowMissing(path.resolve(path.dirname(requestedTarget), await readlink(requestedTarget)));
   }
   if (filePath) {
-    const change = (await getTaskChanges(agentDir, projectPath, taskPath)).files.find((candidate) => candidate.path === gitPath(filePath));
+    const change = (await getTaskChanges(agentDir, projectPath, taskPath, environment)).files.find((candidate) => candidate.path === gitPath(filePath));
     if (!change || change.status === "deleted") throw new Error("That file is not a current Git change");
     const relative = path.relative(canonicalExecutionPath, canonicalTarget);
     if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
       throw new Error("Changed files must stay within the Execution location");
     }
   }
-  await launchApplication(application, requestedTarget, canonicalExecutionPath, getConfiguredEditor(agentDir, canonicalExecutionPath, projectPath));
+  await launchApplication(application, requestedTarget, canonicalExecutionPath, getConfiguredEditor(agentDir, canonicalExecutionPath, projectPath, environment), environment);
 }
