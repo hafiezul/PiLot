@@ -49,6 +49,7 @@ const api: PiLotApi = {
     ipcRenderer.on("providers:oauth-event", handler);
     return () => ipcRenderer.removeListener("providers:oauth-event", handler);
   },
+  loadProjectsState: () => ipcRenderer.invoke("projects:load-state"),
   getProjects: () => ipcRenderer.invoke("projects:get"),
   addProject: () => ipcRenderer.invoke("projects:add"),
   selectProject: (path) => ipcRenderer.invoke("projects:select", path),

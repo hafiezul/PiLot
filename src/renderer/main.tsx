@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
 import { diagnosticCategories, diagnosticCategoryLabels, type DiagnosticBundle, type DiagnosticCategory } from "../shared/diagnostics";
 import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
-import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type RecentSelection } from "../shared/preferences";
+import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type Preferences, type RecentSelection } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectEnvironmentOverride, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
@@ -2202,10 +2202,43 @@ function CommandPalette({ open, availability, onClose, onInvoke }: {
   </dialog>;
 }
 
-type ActionFailure = { message: string; recovery: string };
+type ActionFailure = { message: string; recovery: string; retryProjectState?: boolean; preserveOnContextChange?: boolean };
+type LoadedDesktopState = {
+  startup: StartupState;
+  projects: ProjectsState;
+  preferences: Preferences;
+  selectionFailure?: { reason: unknown };
+};
 
-function ActionError({ failure, onDismiss }: { failure: ActionFailure; onDismiss(): void }) {
-  return <div className="action-error" role="alert"><span><strong>Action failed.</strong> {failure.message}<small>{failure.recovery}</small></span><button type="button" aria-label="Dismiss error" onClick={onDismiss}>×</button></div>;
+const failureMessage = (reason: unknown) => reason instanceof Error ? reason.message : String(reason);
+
+class ProjectStateLoadFailure extends Error {
+  constructor(reason: unknown) {
+    super(failureMessage(reason), { cause: reason });
+    this.name = "ProjectStateLoadFailure";
+  }
+}
+
+function startupFailure(reason: unknown): ActionFailure {
+  const projectStateLoadFailed = reason instanceof ProjectStateLoadFailure;
+  return {
+    message: failureMessage(reason),
+    recovery: projectStateLoadFailed
+      ? "Repair projects.json or restore read access. Delete it only to reset recent Projects and execution consent."
+      : "Check PiLot's local state and Pi environment file access, then reopen the app.",
+    preserveOnContextChange: true,
+    ...(projectStateLoadFailed ? { retryProjectState: true } : {}),
+  };
+}
+
+function ActionError({ failure, onDismiss, onRetry }: { failure: ActionFailure; onDismiss(): void; onRetry(): void }) {
+  return <div className="action-error" role="alert">
+    <span><strong>Action failed.</strong> {failure.message}<small>{failure.recovery}</small></span>
+    <div className="action-error-actions">
+      {failure.retryProjectState && <button type="button" className="action-error-retry" aria-label="Retry Project state" onClick={onRetry}>Retry</button>}
+      <button type="button" aria-label="Dismiss error" onClick={onDismiss}>×</button>
+    </div>
+  </div>;
 }
 
 function App() {
@@ -2243,6 +2276,43 @@ function App() {
   const focusWasInInspector = useRef(false);
   const taskCreationReturnFocus = useRef<HTMLElement | null>(null);
   const taskCreationPreviousTask = useRef<string | undefined>(undefined);
+  const loadDesktopState = useCallback(async (): Promise<LoadedDesktopState> => {
+    const [startup, projectState, preferences] = await Promise.all([
+      window.pilot.getStartupState(),
+      window.pilot.loadProjectsState().then((result) => {
+        if (result.status === "unreadable") throw new ProjectStateLoadFailure(result.message);
+        return result.state;
+      }),
+      window.pilot.getPreferences(),
+    ]);
+    let projects = projectState;
+    let selectionFailure: { reason: unknown } | undefined;
+    const recentProject = preferences.recentSelection.projectPath;
+    if (recentProject && projectState.projects.some(({ path }) => path === recentProject) && projectState.selected?.path !== recentProject) {
+      try {
+        projects = await window.pilot.selectProject(recentProject);
+      } catch (reason) {
+        selectionFailure = { reason };
+      }
+    }
+    return { startup, projects, preferences, ...(selectionFailure ? { selectionFailure } : {}) };
+  }, []);
+  const applyDesktopState = useCallback(({ startup, projects: nextProjects, preferences, selectionFailure }: LoadedDesktopState) => {
+    setState(startup);
+    setProjects(nextProjects);
+    setRecentSelection(preferences.recentSelection);
+    const recentTask = nextProjects.selected?.tasks.find(({ path }) => path === preferences.recentSelection.taskPath);
+    setSelectedTaskPath(recentTask?.path);
+    setShowDetails(preferences.panes.inspectorVisible);
+    setInspectorView(preferences.panes.inspectorView);
+    applyAppearance(preferences.appearance);
+    setDesktopPreferencesLoaded(true);
+    setActionError(selectionFailure ? startupFailure(selectionFailure.reason) : undefined);
+  }, []);
+  const retryProjectState = useCallback(() => {
+    setActionError(undefined);
+    void loadDesktopState().then(applyDesktopState).catch((reason) => setActionError(startupFailure(reason)));
+  }, [applyDesktopState, loadDesktopState]);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
     setState(startup);
     setProjects(projectState);
@@ -2476,30 +2546,13 @@ function App() {
   }), []);
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects(), window.pilot.getPreferences()]).then(async ([startup, projectState, saved]) => {
-      let nextProjects = projectState;
-      const recentProject = saved.recentSelection.projectPath;
-      if (recentProject && projectState.projects.some(({ path }) => path === recentProject) && projectState.selected?.path !== recentProject) {
-        nextProjects = await window.pilot.selectProject(recentProject);
-      }
-      if (cancelled) return;
-      setState(startup);
-      setProjects(nextProjects);
-      setRecentSelection(saved.recentSelection);
-      const recentTask = nextProjects.selected?.tasks.find(({ path }) => path === saved.recentSelection.taskPath);
-      setSelectedTaskPath(recentTask?.path);
-      setShowDetails(saved.panes.inspectorVisible);
-      setInspectorView(saved.panes.inspectorView);
-      applyAppearance(saved.appearance);
-      setDesktopPreferencesLoaded(true);
+    void loadDesktopState().then((loaded) => {
+      if (!cancelled) applyDesktopState(loaded);
     }).catch((reason) => {
-      if (!cancelled) {
-        refresh();
-        setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery: "Check PiLot preference-file access and reopen the app." });
-      }
+      if (!cancelled) setActionError(startupFailure(reason));
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [applyDesktopState, loadDesktopState]);
   useEffect(() => {
     if (!desktopPreferencesLoaded) return;
     const timer = window.setTimeout(() => {
@@ -2516,13 +2569,13 @@ function App() {
     void window.pilot.setRecentSelection(next.projectPath, next.taskPath)
       .catch((reason) => reportActionError(reason, "Check PiLot preference-file access and select the Project or Task again."));
   }, [desktopPreferencesLoaded, showHome, selectedProject?.path, selectedTaskPath, reportActionError]);
-  useEffect(() => setActionError(undefined), [selectedProject?.path, selectedTask?.path, showSettings]);
+  useEffect(() => setActionError((current) => current?.preserveOnContextChange ? current : undefined), [selectedProject?.path, selectedTask?.path, showSettings]);
 
   if (showSettings) return <>
     <div className="window-bar" aria-hidden="true" />
     <SettingsPage initialDestination={settingsDestination} onChange={refresh} onClose={closeSettings} />
     <CommandPalette open={paletteOpen} availability={availability} onClose={() => setPaletteOpen(false)} onInvoke={invokeAction} />
-    {actionError && <ActionError failure={actionError} onDismiss={() => setActionError(undefined)} />}
+    {actionError && <ActionError failure={actionError} onDismiss={() => setActionError(undefined)} onRetry={retryProjectState} />}
   </>;
 
   return (
@@ -2700,7 +2753,7 @@ function App() {
       {selectedProject && (needsProjectAccess || showProjectAccess) && <ProjectAccessDialog project={selectedProject} dismissible={!needsProjectAccess} onChange={updateProjectAccess} onClose={closeProjectAccess} />}
       {selectedProject && taskCreation && <TaskCreationDialog project={selectedProject} state={taskCreation} onCreate={createTaskFromRequest} onClose={closeTaskCreation} />}
       <CommandPalette open={paletteOpen} availability={availability} onClose={() => setPaletteOpen(false)} onInvoke={invokeAction} />
-      {actionError && <ActionError failure={actionError} onDismiss={() => setActionError(undefined)} />}
+      {actionError && <ActionError failure={actionError} onDismiss={() => setActionError(undefined)} onRetry={retryProjectState} />}
     </>
   );
 }

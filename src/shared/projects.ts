@@ -81,6 +81,10 @@ export type ProjectsState = {
   selected?: ProjectAccess;
 };
 
+export type ProjectStateLoadResult =
+  | { status: "ready"; state: ProjectsState }
+  | { status: "unreadable"; message: string };
+
 export type RunStatus = "queued" | "preparing" | "running" | "retrying" | "compacting" | "settled" | "failed" | "aborted" | "interrupted";
 export type LiveInputMode = "steer" | "followUp";
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -327,6 +331,7 @@ export type TaskFileDiff = ChangedFile & {
 };
 
 export type ProjectsApi = {
+  loadProjectsState(): Promise<ProjectStateLoadResult>;
   getProjects(): Promise<ProjectsState>;
   addProject(): Promise<ProjectsState>;
   selectProject(path: string): Promise<ProjectsState>;

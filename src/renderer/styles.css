@@ -319,7 +319,9 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .action-error { position: fixed; z-index: var(--z-toast); right: 18px; bottom: 18px; display: flex; align-items: start; gap: 12px; max-width: min(460px, calc(100% - 36px)); padding: 10px 10px 10px 12px; border: 1px solid #b98c8c; border-radius: 6px; color: #912f2f; background: #fff7f7; box-shadow: 0 4px 10px rgb(20 20 19 / 18%); font-size: 12px; line-height: 1.45; }
 .action-error span { display: grid; min-width: 0; flex: 1; gap: 3px; overflow-wrap: anywhere; }
 .action-error small { font-size: 11px; font-weight: 400; }
+.action-error-actions { display: flex; align-items: center; gap: 2px; }
 .action-error button { display: grid; place-items: center; width: 26px; height: 26px; flex: none; border: 0; border-radius: 4px; padding: 0; color: inherit; background: transparent; cursor: pointer; font-size: 16px; }
+.action-error .action-error-retry { width: auto; padding: 0 8px; font-size: 11px; font-weight: 650; }
 .action-error button:hover { background: rgb(145 47 47 / 10%); }
 .model-picker-layout { display: flex; min-height: 0; flex: 1; }
 .model-picker-main { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; }

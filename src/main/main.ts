@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPreferences, saveAppearance, saveExpandThinking, saveGlobalRunCap, saveNotificationPreferences, savePanePreferences, savePreferredApplication, savePreferredTerminal, saveRecentSelection, saveWindowPreference } from "./preferences.js";
 import { getAgentSettings, saveAgentCompaction, saveAgentModelScope, saveAgentRetry, saveDefaultAgentModel, saveDefaultAgentThinking } from "./agent-settings.js";
-import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectEnvironmentOverrides, getProjectsState, getTaskCreation, removeProject, selectProject, setExecutionConsent, setProjectEnvironmentOverrides, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
+import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectEnvironmentOverrides, getProjectsState, getTaskCreation, ProjectStateLoadError, removeProject, selectProject, setExecutionConsent, setProjectEnvironmentOverrides, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
 import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { RunCoordinator } from "./runs.js";
 import { assertRunnableTask, getTaskModelState, recoverTaskWorktreeRemovals, setTaskModel, setTaskThinking } from "./tasks.js";
@@ -616,6 +616,15 @@ app.whenReady().then(async () => {
     });
     preferences = await withDiagnostic("preferences.write", () => savePreferredApplication(app.getPath("userData"), application));
     return withDiagnostic("shell.launch", () => getApplicationState(preferences.preferredApplication, configured, environment));
+  });
+  handleDiagnostic("projects:load-state", "session.read", async () => {
+    try {
+      return { status: "ready", state: await projectState() } as const;
+    } catch (error) {
+      if (!(error instanceof ProjectStateLoadError)) throw error;
+      await diagnostics?.record("session.read", error);
+      return { status: "unreadable", message: error.message } as const;
+    }
   });
   handleDiagnostic("projects:get", "session.read", projectState);
   handleDiagnostic("projects:add", "session.read", async (event) => {

@@ -14,32 +14,112 @@ type SavedProjects = {
 };
 
 const defaults: SavedProjects = { recentProjects: [], executionConsent: {}, setupCommands: {}, environmentOverrides: {} };
+const maximumSetupCommandLength = 20_000;
+const maximumEnvironmentOverrides = 128;
+const maximumEnvironmentOverrideLength = 128 * 1024;
+const environmentVariableNamePattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-function savedEnvironmentOverrides(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).flatMap(([projectPath, overrides]) => {
-    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return [];
-    const entries = Object.entries(overrides).filter((entry): entry is [string, string] =>
-      /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[0]) && typeof entry[1] === "string");
-    return entries.length ? [[projectPath, Object.fromEntries(entries)]] : [];
-  }));
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export class ProjectStateLoadError extends Error {
+  constructor(target: string, problem: string, cause?: unknown) {
+    super(
+      `Could not load PiLot Project state from ${target}: ${problem}. Repair the file, or delete it to reset recent Projects and execution consent, then retry.`,
+      { cause },
+    );
+    this.name = "ProjectStateLoadError";
+  }
+}
+
+const projectStateLoadError = (target: string, problem: string, cause?: unknown) =>
+  new ProjectStateLoadError(target, problem, cause);
+
+function isSavedProjectPath(value: unknown): value is string {
+  return typeof value === "string" && Boolean(value) && !value.includes("\0") && path.isAbsolute(value);
+}
+
+function isValidSetupCommand(value: string) {
+  return value.length <= maximumSetupCommandLength && !value.includes("\0");
+}
+
+function savedRecord<T>(
+  value: unknown,
+  target: string,
+  field: string,
+  description: string,
+  valid: (entry: unknown) => entry is T,
+): Record<string, T> {
+  if (value === undefined) return {};
+  if (!isRecord(value) || Object.entries(value).some(([projectPath, entry]) => !isSavedProjectPath(projectPath) || !valid(entry))) {
+    throw projectStateLoadError(target, `\"${field}\" must be ${description}`);
+  }
+  return Object.fromEntries(Object.entries(value)) as Record<string, T>;
+}
+
+function savedEnvironmentOverrides(value: unknown, target: string) {
+  if (value === undefined) return {};
+  if (!isRecord(value)) {
+    throw projectStateLoadError(target, '"environmentOverrides" must be an object of Project environment maps');
+  }
+  const saved: Record<string, Record<string, string>> = {};
+  for (const [projectPath, overrides] of Object.entries(value)) {
+    if (!isSavedProjectPath(projectPath) || !isRecord(overrides)) {
+      throw projectStateLoadError(target, '"environmentOverrides" must be keyed by absolute Project paths');
+    }
+    const entries = Object.entries(overrides);
+    const names = new Set<string>();
+    let totalLength = 0;
+    for (const [name, entry] of entries) {
+      const comparableName = process.platform === "win32" ? name.toLocaleLowerCase() : name;
+      totalLength += name.length + (typeof entry === "string" ? entry.length : 0);
+      if (!environmentVariableNamePattern.test(name) || typeof entry !== "string" || entry.includes("\0")
+        || names.has(comparableName) || entries.length > maximumEnvironmentOverrides || totalLength > maximumEnvironmentOverrideLength) {
+        throw projectStateLoadError(target, '"environmentOverrides" must contain at most 128 valid environment variables totaling 128 KB or less');
+      }
+      names.add(comparableName);
+    }
+    saved[projectPath] = Object.fromEntries(entries) as Record<string, string>;
+  }
+  return saved;
+}
+
+function savedProjects(value: unknown, target: string): SavedProjects {
+  if (!isRecord(value)) throw projectStateLoadError(target, "the top-level value must be an object");
+  if (value.recentProjects !== undefined
+    && (!Array.isArray(value.recentProjects) || value.recentProjects.some((entry) => !isSavedProjectPath(entry)))) {
+    throw projectStateLoadError(target, '"recentProjects" must be an array of absolute Project paths');
+  }
+  if (value.selectedProject !== undefined && !isSavedProjectPath(value.selectedProject)) {
+    throw projectStateLoadError(target, '"selectedProject" must be an absolute Project path');
+  }
+  return {
+    recentProjects: value.recentProjects === undefined ? [] : [...value.recentProjects] as string[],
+    ...(typeof value.selectedProject === "string" ? { selectedProject: value.selectedProject } : {}),
+    executionConsent: savedRecord(value.executionConsent, target, "executionConsent", "an object keyed by absolute Project paths with only boolean values", (entry): entry is boolean => typeof entry === "boolean"),
+    setupCommands: savedRecord(value.setupCommands, target, "setupCommands", "an object of bounded strings keyed by absolute Project paths", (entry): entry is string => typeof entry === "string" && isValidSetupCommand(entry)),
+    environmentOverrides: savedEnvironmentOverrides(value.environmentOverrides, target),
+  };
 }
 
 async function load(directory: string): Promise<SavedProjects> {
+  const target = path.join(directory, "projects.json");
+  let contents: string;
   try {
-    const saved = JSON.parse(await readFile(path.join(directory, "projects.json"), "utf8")) as Partial<SavedProjects>;
-    return {
-      recentProjects: Array.isArray(saved.recentProjects) ? saved.recentProjects.filter((item): item is string => typeof item === "string") : [],
-      selectedProject: typeof saved.selectedProject === "string" ? saved.selectedProject : undefined,
-      executionConsent: saved.executionConsent && typeof saved.executionConsent === "object" ? saved.executionConsent : {},
-      setupCommands: saved.setupCommands && typeof saved.setupCommands === "object"
-        ? Object.fromEntries(Object.entries(saved.setupCommands).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
-        : {},
-      environmentOverrides: savedEnvironmentOverrides(saved.environmentOverrides),
-    };
-  } catch {
-    return structuredClone(defaults);
+    contents = await readFile(target, "utf8");
+  } catch (cause) {
+    const code = cause && typeof cause === "object" ? (cause as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT") return structuredClone(defaults);
+    throw projectStateLoadError(target, `projects.json could not be read${code ? ` (${code})` : ""}; check its permissions`, cause);
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (cause) {
+    throw projectStateLoadError(target, "projects.json contains malformed JSON", cause);
+  }
+  return savedProjects(parsed, target);
 }
 
 async function save(directory: string, projects: SavedProjects) {
@@ -148,7 +228,7 @@ export async function getTaskCreation(directory: string, agentDir: string, proje
 
 function normalizedSetupCommand(value?: string) {
   const command = value?.trim() ?? "";
-  if (command.length > 20_000 || command.includes("\0")) throw new Error("Project setup commands must be 20,000 characters or fewer");
+  if (!isValidSetupCommand(command)) throw new Error("Project setup commands must be 20,000 characters or fewer");
   return command;
 }
 
@@ -208,10 +288,14 @@ export async function setResourceTrust(
   projectPath: string,
   trusted: boolean,
 ) {
+  const saved = await load(directory);
   const canonical = await canonicalize(projectPath);
   new ProjectTrustStore(agentDir).set(canonical, trusted);
-  const saved = await load(directory);
-  if (saved.recentProjects.includes(canonical)) return selectProject(directory, agentDir, canonical);
+  if (saved.recentProjects.includes(canonical)) {
+    remember(saved, canonical);
+    await save(directory, saved);
+    return getProjectsState(directory, agentDir);
+  }
   return getProjectsState(directory, agentDir, canonical);
 }
 
@@ -258,7 +342,7 @@ export async function getProjectEnvironmentOverrides(directory: string, projectP
 }
 
 function normalizedEnvironmentOverrides(overrides: ProjectEnvironmentOverride[]) {
-  if (!Array.isArray(overrides) || overrides.length > 128) throw new Error("Save no more than 128 Project environment variables");
+  if (!Array.isArray(overrides) || overrides.length > maximumEnvironmentOverrides) throw new Error("Save no more than 128 Project environment variables");
   const normalized: Record<string, string> = {};
   let totalLength = 0;
   for (const override of overrides) {
@@ -266,7 +350,7 @@ function normalizedEnvironmentOverrides(overrides: ProjectEnvironmentOverride[])
       throw new Error("Each Project environment override needs a name and value");
     }
     const name = override.name.trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    if (!environmentVariableNamePattern.test(name)) {
       throw new Error(`${name || "Variable names"} must start with a letter or underscore and contain only letters, numbers, and underscores`);
     }
     const duplicate = Object.keys(normalized).find((candidate) => process.platform === "win32"
@@ -274,7 +358,7 @@ function normalizedEnvironmentOverrides(overrides: ProjectEnvironmentOverride[])
       : candidate === name);
     if (duplicate) throw new Error(`${name} is listed more than once`);
     totalLength += name.length + override.value.length;
-    if (override.value.includes("\0") || totalLength > 128 * 1024) throw new Error("Project environment overrides must be 128 KB or smaller");
+    if (override.value.includes("\0") || totalLength > maximumEnvironmentOverrideLength) throw new Error("Project environment overrides must be 128 KB or smaller");
     normalized[name] = override.value;
   }
   return normalized;
