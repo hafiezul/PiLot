@@ -1942,10 +1942,11 @@ function GeneralSettings() {
     </fieldset>
     <fieldset className="notification-setting" disabled={!notifications || notificationSaving} aria-busy={notificationSaving}>
       <legend>Notifications</legend>
+      <p className="notification-guidance" role="note">PiLot sends these only while its window is unfocused or running in the background. Click a notification to return to PiLot.</p>
       {notifications && ([
-        ["runCompleted", "Run completed", "Notify when a background Run settles successfully."],
-        ["runFailed", "Run failed", "Notify when a background Run fails or is interrupted."],
-        ["attentionRequired", "Attention required", "Notify when Pi needs a decision or input."],
+        ["runCompleted", "Run completed", "When a Run settles successfully."],
+        ["runFailed", "Run failed", "When a Run fails or is interrupted."],
+        ["attentionRequired", "Attention required", "When Pi needs a decision or input."],
       ] as const).map(([key, label, detail]) => <label key={key}>
         <input type="checkbox" aria-label={label} checked={notifications[key]} onChange={(event) => saveNotification(key, event.target.checked)} />
         <span><strong>{label}</strong><small>{detail}</small></span>
@@ -2160,6 +2161,8 @@ function App() {
   const [historyDraft, setHistoryDraft] = useState<{ taskPath: string; text: string; version: number }>();
   const settingsButton = useRef<HTMLButtonElement>(null);
   const detailsReturnFocus = useRef<HTMLElement | null>(null);
+  const lastInspectorFocus = useRef<HTMLElement | null>(null);
+  const focusWasInInspector = useRef(false);
   const taskCreationReturnFocus = useRef<HTMLElement | null>(null);
   const taskCreationPreviousTask = useRef<string | undefined>(undefined);
   const refresh = useCallback(() => void Promise.all([window.pilot.getStartupState(), window.pilot.getProjects()]).then(([startup, projectState]) => {
@@ -2359,8 +2362,24 @@ function App() {
   useEffect(() => window.pilot.setActionState(actionState), [actionStateKey]);
   useEffect(() => window.pilot.onAction(invokeAction), [invokeAction]);
   useEffect(() => {
+    const trackFocus = (event: FocusEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      focusWasInInspector.current = Boolean(target && document.querySelector(".inspector")?.contains(target));
+      if (focusWasInInspector.current) lastInspectorFocus.current = target;
+    };
+    window.addEventListener("focusin", trackFocus);
+    return () => window.removeEventListener("focusin", trackFocus);
+  }, []);
+  useEffect(() => {
     const media = matchMedia("(max-width: 1040px)");
-    const updateLayout = () => setCompactLayout(media.matches);
+    const updateLayout = () => {
+      if (media.matches && focusWasInInspector.current) {
+        detailsReturnFocus.current = document.getElementById("content");
+        setShowDetails(true);
+        requestAnimationFrame(() => lastInspectorFocus.current?.focus());
+      }
+      setCompactLayout(media.matches);
+    };
     media.addEventListener("change", updateLayout);
     return () => media.removeEventListener("change", updateLayout);
   }, []);
@@ -2484,7 +2503,7 @@ function App() {
           </div>
         </nav>
 
-        <main id="content" className="workspace-main">
+        <main id="content" className="workspace-main" tabIndex={-1}>
           {surfaceProject ? <ProjectPage
             project={surfaceProject}
             needsAccess={needsProjectAccess}

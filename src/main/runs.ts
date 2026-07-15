@@ -9,6 +9,7 @@ import {
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
+  type BashOperations,
   type CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
@@ -53,6 +54,7 @@ type ActiveRun = {
   activeCompactionId?: string;
   manager?: SessionManager;
   externalChanged: boolean;
+  commandAbort?: AbortController;
 };
 
 type ScheduledRun = {
@@ -69,6 +71,24 @@ type ResultView = {
   outputTruncated: boolean;
   fullOutputPath?: string;
 };
+
+function withRunAbort(operations: BashOperations | undefined, signal: AbortSignal): BashOperations | undefined {
+  if (!operations) return;
+  return {
+    exec: (command, cwd, options) => operations.exec(command, cwd, {
+      ...options,
+      signal: options.signal ? AbortSignal.any([options.signal, signal]) : signal,
+    }),
+  };
+}
+
+function abortRunProcesses(active: ActiveRun) {
+  active.commandAbort?.abort();
+  active.session?.abortRetry();
+  active.session?.abortBash();
+  active.session?.abortCompaction();
+  return active.session?.abort() ?? Promise.resolve();
+}
 
 async function prepareImages(images: ImageAttachment[]): Promise<PreparedImage[]> {
   if (images.length > MAXIMUM_IMAGES) throw new Error(`Attach no more than ${MAXIMUM_IMAGES} images at once`);
@@ -455,6 +475,16 @@ export class RunCoordinator {
     return active ? currentRun(active).status : undefined;
   }
 
+  getActivity() {
+    const runCount = this.activeTasks.size;
+    const waitingCount = this.pendingRuns.length;
+    return {
+      runCount,
+      activeCount: Math.max(0, runCount - waitingCount),
+      waitingCount,
+    };
+  }
+
   setRunLimit(limit: number) {
     if (!Number.isInteger(limit) || limit < MINIMUM_GLOBAL_RUN_CAP || limit > MAXIMUM_GLOBAL_RUN_CAP) {
       throw new Error(`Active Run limit must be between ${MINIMUM_GLOBAL_RUN_CAP} and ${MAXIMUM_GLOBAL_RUN_CAP}`);
@@ -651,10 +681,7 @@ export class RunCoordinator {
       updateRun(active, interruptRun);
       if (this.cancelPendingRun(file, "interrupted")) return;
       active.session?.clearQueue();
-      active.session?.abortRetry();
-      active.session?.abortBash();
-      active.session?.abortCompaction();
-      void active.session?.abort().catch(() => undefined);
+      void abortRunProcesses(active).catch(() => undefined);
       this.publish(active.state);
       return;
     }
@@ -939,6 +966,7 @@ export class RunCoordinator {
       items: [{ id: "command", kind: "command", command: text, output: "", status: "running", includeInContext }],
     };
     const saved = savedState(file, manager, executionPath);
+    const commandAbort = new AbortController();
     const active: ActiveRun = {
       project,
       executionPath,
@@ -950,6 +978,7 @@ export class RunCoordinator {
       assistantSequence: 0,
       compactionSequence: 0,
       externalChanged: false,
+      commandAbort,
     };
 
     await this.scheduleRun(active, execution.kind, "running", async () => {
@@ -981,7 +1010,7 @@ export class RunCoordinator {
                 return { ...item, ...view };
               });
               this.publish(active.state);
-            }, { excludeFromContext: !includeInContext, operations: bashOperations });
+            }, { excludeFromContext: !includeInContext, operations: withRunAbort(bashOperations, commandAbort.signal) });
             replaceItem(active, "command", (item) => item.kind === "command" ? {
               ...item,
               ...boundedOutput(result.output),
@@ -1140,10 +1169,7 @@ export class RunCoordinator {
       this.publish(active.state);
       active.state = { ...active.state, recoveredInput: undefined };
     }
-    active.session?.abortRetry();
-    active.session?.abortBash();
-    active.session?.abortCompaction();
-    await active.session?.abort();
+    await abortRunProcesses(active);
     updateRun(active, (run) => ({ ...run, status: runStatus(active, "aborted") }));
   }
 

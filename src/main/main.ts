@@ -1,5 +1,5 @@
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, Tray, type MenuItemConstructorOptions } from "electron";
 import { realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -20,6 +20,7 @@ import { applicationIds, type ApplicationId } from "../shared/editors.js";
 import { type Appearance, type Preferences } from "../shared/preferences.js";
 import { CHANGE_STATUSES, type ChangeStatus, type ImageAttachment, type ProjectEnvironmentOverride, type TaskCreationRequest, type TaskWorktreeFile, type ThinkingLevel } from "../shared/projects.js";
 import { captureLoginShellEnvironment, installCapturedEnvironment, projectEnvironment } from "./environment.js";
+import { backgroundRunStatus, lastWindowPrompt, RunAttentionPolicy, type RunAttentionNotification } from "./desktop-lifecycle.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
@@ -27,16 +28,142 @@ const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === 
   : undefined;
 const debuggingPort = process.argv.find((argument) => argument.startsWith("--pilot-debug-port="))?.split("=")[1];
 const testWindowHidden = process.argv.includes("--pilot-test-hidden");
+const testLifecycle = !app.isPackaged && process.argv.includes("--pilot-test-lifecycle");
+const testCloseResponse = testLifecycle ? process.env.PILOT_TEST_CLOSE_RESPONSE : undefined;
+// The 32 px representations keep the status icon crisp at 2x display scale.
+const macTrayIcon = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAARElEQVR42mNgoBH4jwMTrZEseWJtwanuPwHn/0dTg1UzsQZgGPKfgDP/41AzagARMYEtZhjwpYP/lKZWipIyVTITyQAArBFUrN6dr4YAAAAASUVORK5CYII=";
+const macTrayIcon2x = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAaUlEQVR42u2XQQoAIAgENfz/l+0cRBYqCq3n2rZRw4h+D35YqxnaozMBddC63t+SgPfmT3rlBOSCjgZR1pY1IJtccXK9Lee0rgErhxzRPeUEYAAGYAAGxHqrA+aAoy4mIkzFAz8jQhTHBM0KEz4Gi2RdAAAAAElFTkSuQmCC";
+const windowsTrayIcon = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAATUlEQVR42mNgoAXQ1dP5jw0Trfndu9dYMUFD8GkmaAhMs7KKEl6M1RBkm4kxAMMQdKejK0bnjxrwmviYwBYzRKUFshISVZIyVTITqQAAo5eaqgBj2VUAAAAASUVORK5CYII=";
+const windowsTrayIcon2x = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAjUlEQVR42mNgGOmAkViFuno6/0kx+PKlK0SZzTToQwDm84MH9pNksL2DI1EhMXhDgFyfkxoSgy8E0H1uamZOkQWnT53EGxIDHgIs1I5zXABmrr2D43/kkBg8IUAoDtHTAkwcBgjJD9pyYNQBow4YdcCoA1jQ23CwsprSOgFWMg762nC0RTTaKh7tGY0CAAB1TYjPqNxpAAAAAElFTkSuQmCC";
 const changeStatuses = new Set<ChangeStatus>(CHANGE_STATUSES);
 if (debuggingPort) app.commandLine.appendSwitch("remote-debugging-port", debuggingPort);
 if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_USER_DATA_DIR);
+if (process.platform === "win32") app.setAppUserModelId("com.hafiezul.pilot");
 
 let preferences: Preferences;
-let runCoordinatorForQuit: RunCoordinator | undefined;
+let runCoordinator: RunCoordinator | undefined;
 let setupCoordinatorForQuit: WorktreeSetupCoordinator | undefined;
+let mainWindow: BrowserWindow | undefined;
+let backgroundTray: Tray | undefined;
+let backgroundStatusKey: string | undefined;
+let backgroundMode = false;
+let closeDecisionPending = false;
 let quitCleanupStarted = false;
 let quitCleanupFinished = false;
 const actionMenuItems = new Map<DesktopActionId, Electron.MenuItem>();
+const runAttentionPolicy = new RunAttentionPolicy();
+const liveNotifications = new Set<Notification>();
+const maximumLiveNotifications = 128;
+
+type LastWindowChoice = "background" | "stop" | "cancel";
+
+function runActivity() {
+  return runCoordinator?.getActivity() ?? { runCount: 0, activeCount: 0, waitingCount: 0 };
+}
+
+function destroyBackgroundTray() {
+  backgroundTray?.destroy();
+  backgroundTray = undefined;
+  backgroundStatusKey = undefined;
+}
+
+function restoreMainWindow() {
+  backgroundMode = false;
+  destroyBackgroundTray();
+  if (process.platform === "darwin") app.show();
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : BrowserWindow.getAllWindows()[0];
+  if (!window) {
+    createWindow();
+    return;
+  }
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+
+function refreshBackgroundTray() {
+  if (!backgroundMode) return;
+  const { activeCount, waitingCount, runCount } = runActivity();
+  const statusKey = `${activeCount}:${waitingCount}`;
+  if (backgroundTray && statusKey === backgroundStatusKey) return;
+  const status = backgroundRunStatus({ activeCount, waitingCount });
+  if (!backgroundTray) {
+    const image = nativeImage.createFromDataURL(process.platform === "darwin" ? macTrayIcon : windowsTrayIcon);
+    image.addRepresentation({ scaleFactor: 2, dataURL: process.platform === "darwin" ? macTrayIcon2x : windowsTrayIcon2x });
+    if (process.platform === "darwin") image.setTemplateImage(true);
+    backgroundTray = new Tray(image);
+    backgroundTray.on("click", restoreMainWindow);
+  }
+  backgroundTray.setToolTip(status.tooltip);
+  if (process.platform === "darwin") backgroundTray.setTitle(runCount ? ` ${runCount}` : "");
+  backgroundTray.setContextMenu(Menu.buildFromTemplate([
+    { label: status.menuLabel, enabled: false },
+    { type: "separator" },
+    { label: "Open PiLot", click: restoreMainWindow },
+    { label: runCount ? "Stop Runs and Quit" : "Quit PiLot", click: () => app.quit() },
+  ]));
+  backgroundStatusKey = statusKey;
+}
+
+function continueInBackground(window: BrowserWindow) {
+  backgroundMode = true;
+  try {
+    refreshBackgroundTray();
+    window.hide();
+  } catch (error) {
+    backgroundMode = false;
+    destroyBackgroundTray();
+    throw error;
+  }
+}
+
+async function chooseLastWindowAction(window: BrowserWindow, runCount: number): Promise<LastWindowChoice> {
+  if (testCloseResponse === "background" || testCloseResponse === "stop" || testCloseResponse === "cancel") return testCloseResponse;
+  const prompt = lastWindowPrompt(runCount);
+  const result = await dialog.showMessageBox(window, {
+    type: "warning",
+    ...prompt,
+    buttons: [...prompt.buttons],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  return result.response === 0 ? "background" : result.response === 1 ? "stop" : "cancel";
+}
+
+function showRunAttention(attention: RunAttentionNotification) {
+  if (testWindowHidden || !Notification.isSupported()) return;
+  const notification = new Notification({
+    id: attention.id,
+    groupId: "pilot-runs",
+    ...(process.platform === "win32" ? { groupTitle: "PiLot Runs" } : {}),
+    title: attention.title,
+    body: attention.body,
+  });
+  liveNotifications.add(notification);
+  while (liveNotifications.size > maximumLiveNotifications) {
+    const oldest = liveNotifications.values().next().value as Notification | undefined;
+    if (!oldest) break;
+    liveNotifications.delete(oldest);
+    oldest.close();
+  }
+  const release = () => liveNotifications.delete(notification);
+  notification.once("click", () => {
+    release();
+    restoreMainWindow();
+  });
+  notification.once("close", release);
+  notification.once("failed", (_event, error) => {
+    release();
+    console.error("Could not show a PiLot notification:", error);
+  });
+  try {
+    notification.show();
+  } catch (error) {
+    release();
+    console.error("Could not show a PiLot notification:", error);
+  }
+}
 
 function invokeRendererAction(id: DesktopActionId, target?: Electron.BaseWindow) {
   const window = target instanceof BrowserWindow ? target : BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
@@ -165,9 +292,11 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       preload: path.join(directory, "../preload.cjs"),
+      ...(testLifecycle ? { additionalArguments: ["--pilot-test-lifecycle-api"] } : {}),
     },
   });
 
+  mainWindow = window;
   if (preferences.window?.maximized) window.maximize();
   if (!testWindowHidden) window.once("ready-to-show", () => window.show());
 
@@ -186,11 +315,33 @@ function createWindow() {
   window.on("resize", scheduleGeometry);
   window.on("maximize", scheduleGeometry);
   window.on("unmaximize", scheduleGeometry);
-  window.on("close", () => {
+  window.on("close", (event) => {
     if (geometryTimer) clearTimeout(geometryTimer);
     persistGeometry();
+    if (quitCleanupStarted || quitCleanupFinished) return;
+    if (BrowserWindow.getAllWindows().some((candidate) => candidate !== window && !candidate.isDestroyed())) return;
+    const { runCount } = runActivity();
+    if (!runCount) return;
+    event.preventDefault();
+    if (closeDecisionPending) return;
+    closeDecisionPending = true;
+    void chooseLastWindowAction(window, runCount).then((choice) => {
+      if (window.isDestroyed()) return;
+      if (choice === "background") {
+        continueInBackground(window);
+      } else if (choice === "stop") {
+        setImmediate(() => app.quit());
+      }
+    }).catch((error) => {
+      console.error("Could not choose how to close PiLot:", error);
+    }).finally(() => {
+      closeDecisionPending = false;
+    });
   });
-  window.on("closed", () => { if (geometryTimer) clearTimeout(geometryTimer); });
+  window.on("closed", () => {
+    if (geometryTimer) clearTimeout(geometryTimer);
+    if (mainWindow === window) mainWindow = undefined;
+  });
 
   void (developmentRenderer
     ? window.loadURL(developmentRenderer)
@@ -218,8 +369,20 @@ app.whenReady().then(async () => {
   createApplicationMenu();
   const runs = new RunCoordinator(app.getPath("userData"), agentDir, (state) => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:run-event", state);
+    const focused = BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && window.isFocused());
+    for (const attention of runAttentionPolicy.observe(state, { focused, preferences: preferences.notifications })) {
+      showRunAttention(attention);
+    }
+    refreshBackgroundTray();
   }, environmentForProject, preferences.globalRunCap);
-  runCoordinatorForQuit = runs;
+  runCoordinator = runs;
+  if (testLifecycle) {
+    ipcMain.on("window:test-close", (event) => BrowserWindow.fromWebContents(event.sender)?.close());
+    ipcMain.handle("window:test-lifecycle-state", (event) => ({
+      windowVisible: BrowserWindow.fromWebContents(event.sender)?.isVisible() ?? false,
+      statusPresent: Boolean(backgroundTray && !backgroundTray.isDestroyed()),
+    }));
+  }
   ipcMain.on("actions:set-state", (_event, states: unknown) => {
     if (!Array.isArray(states) || states.some((state) => !state || typeof state !== "object"
       || typeof (state as DesktopActionState).id !== "string" || !desktopActionIds.has((state as DesktopActionState).id)
@@ -587,8 +750,10 @@ app.whenReady().then(async () => {
     );
   });
   createWindow();
+  if (process.platform === "win32") Notification.handleActivation(restoreMainWindow);
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else restoreMainWindow();
   });
 });
 
@@ -597,8 +762,10 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
+  backgroundMode = false;
+  destroyBackgroundTray();
   void Promise.all([
-    runCoordinatorForQuit?.abortAll(),
+    runCoordinator?.abortAll(),
     setupCoordinatorForQuit?.abortAll(),
   ]).catch((error) => {
     console.error("Could not finish PiLot process cleanup:", error);
@@ -613,5 +780,5 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
 }
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin" && !backgroundMode) app.quit();
 });

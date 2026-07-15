@@ -4,6 +4,11 @@ import type { TaskRunState, TaskSetupState } from "./shared/projects.js";
 import type { OAuthEvent } from "./shared/providers.js";
 import type { PiLotApi } from "./shared/readiness.js";
 
+const lifecycleTestApi = process.argv.includes("--pilot-test-lifecycle-api") ? {
+  closeWindow: () => ipcRenderer.send("window:test-close"),
+  getDesktopLifecycleState: () => ipcRenderer.invoke("window:test-lifecycle-state") as Promise<{ windowVisible: boolean; statusPresent: boolean }>,
+} : {};
+
 const api: PiLotApi = {
   getStartupState: () => ipcRenderer.invoke("startup:get"),
   platform: process.platform as "darwin" | "win32" | "linux",
@@ -13,6 +18,7 @@ const api: PiLotApi = {
     ipcRenderer.on("actions:invoke", handler);
     return () => ipcRenderer.removeListener("actions:invoke", handler);
   },
+  ...lifecycleTestApi,
   getPreferences: () => ipcRenderer.invoke("preferences:get"),
   setAppearance: (appearance) => ipcRenderer.invoke("preferences:set-appearance", appearance),
   setExpandThinking: (expand) => ipcRenderer.invoke("preferences:set-expand-thinking", expand),

@@ -113,7 +113,8 @@ async function launch(
   const child = spawn(electronPath, [
     appPath,
     `--pilot-debug-port=${port}`,
-    ...(test.info().project.use.headless === false ? [] : ["--pilot-test-hidden"]),
+    ...(test.info().project.use.headless === false || extraEnv.PILOT_TEST_WINDOW_VISIBLE === "1" ? [] : ["--pilot-test-hidden"]),
+    ...(extraEnv.PILOT_TEST_CLOSE_RESPONSE ? ["--pilot-test-lifecycle"] : []),
   ], {
     env: { ...env, HOME: testHome, PILOT_USER_DATA_DIR: path.join(agentDir, "pilot-user-data"), ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
     stdio: "ignore",
@@ -3025,9 +3026,13 @@ test("restores PiLot-owned desktop preferences without polluting Pi settings", a
     await first.window.getByRole("button", { name: "Settings" }).click();
     const settings = first.window.getByRole("main", { name: "Settings" });
     await expect(settings.getByRole("group", { name: "Appearance" }).getByRole("radio", { name: "System" })).toBeChecked();
-    await settings.getByRole("radio", { name: "Dark" }).check();
-    await settings.getByRole("checkbox", { name: "Run completed" }).check();
+    const darkAppearance = settings.getByRole("radio", { name: "Dark" });
+    await darkAppearance.focus();
+    await darkAppearance.check();
     await expect.poll(() => first.window.evaluate(() => getComputedStyle(document.documentElement).color)).toBe("rgb(232, 232, 229)");
+    await expect(darkAppearance).toBeFocused();
+    await settings.getByRole("checkbox", { name: "Run completed" }).check();
+    await expect(settings.getByRole("note")).toContainText("only while its window is unfocused or running in the background");
     await expect(first.window.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page");
     await first.window.getByRole("button", { name: "Providers" }).click();
     await expect(settings.getByRole("region", { name: "Provider authentication" })).toBeVisible();
@@ -3040,7 +3045,7 @@ test("restores PiLot-owned desktop preferences without polluting Pi settings", a
     await first.window.getByRole("button", { name: "Add project" }).click();
     await first.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
     await first.window.getByRole("button", { name: "New Task" }).click();
-    await expect.poll(async () => JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8")).recentSelection?.taskPath ?? "").not.toBe("");
+    await expect.poll(async () => JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8")).recentSelection?.taskPath ?? "", { timeout: 10_000 }).not.toBe("");
     taskPath = JSON.parse(await readFile(path.join(userData, "preferences.json"), "utf8")).recentSelection.taskPath;
 
     await first.window.evaluate(() => window.resizeTo(900, 640));
@@ -3457,6 +3462,114 @@ test("blocks a Run with actionable configured-shell guidance", async () => {
   }
 });
 
+test("keeps the native title-bar shell fixed and inspector focus stable", async () => {
+  const environment = await fixture();
+  const app = await launch(environment.agentDir);
+
+  try {
+    await app.window.locator(".shell").waitFor();
+    expect(await app.window.evaluate(() => ({
+      closeWindow: "closeWindow" in (window as any).pilot,
+      lifecycleState: "getDesktopLifecycleState" in (window as any).pilot,
+    }))).toEqual({ closeWindow: false, lifecycleState: false });
+    const shellContract = await app.window.evaluate(() => {
+      const style = (selector: string) => getComputedStyle(document.querySelector(selector)!);
+      return {
+        titleBarMatchesShell: style(".window-bar").backgroundColor === style(".shell").backgroundColor,
+        titleBarDragRegion: style(".window-bar").getPropertyValue("-webkit-app-region"),
+        documentOverflow: style("html").overflow,
+        shellOverflow: style(".shell").overflow,
+        centerOverflow: style(".workspace-main").overflowY,
+      };
+    });
+    expect(shellContract).toEqual({
+      titleBarMatchesShell: true,
+      titleBarDragRegion: "drag",
+      documentOverflow: "hidden",
+      shellOverflow: "hidden",
+      centerOverflow: "auto",
+    });
+
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const detailsTab = inspector.getByRole("tab", { name: "Details" });
+    await detailsTab.focus();
+    await app.window.evaluate(() => window.resizeTo(900, 640));
+    await expect.poll(() => app.window.evaluate(() => window.outerWidth)).toBe(900);
+    await expect(inspector).toBeVisible();
+    await expect(detailsTab).toBeFocused();
+    await inspector.getByRole("button", { name: "Close Inspector" }).click();
+    await expect(app.window.locator(".workspace-main")).toBeFocused();
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("continues an active Run after the last window closes", async () => {
+  const environment = await fixture();
+  const provider = await deterministicProvider(environment.root);
+  await Promise.all([
+    writeFile(path.join(environment.agentDir, "models.json"), JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: provider.baseUrl,
+          api: "openai-completions",
+          apiKey: "fixture-key",
+          models: [{ id: "fixture-model", name: "Fixture model", contextWindow: 32_000, maxTokens: 1_000 }],
+        },
+      },
+    })),
+    writeFile(path.join(environment.agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "fixture",
+      defaultModel: "fixture-model",
+    })),
+  ]);
+  const app = await launch(environment.agentDir, false, {
+    PILOT_TEST_PROJECT_DIR: environment.project,
+    PILOT_TEST_CLOSE_RESPONSE: "background",
+    PILOT_TEST_WINDOW_VISIBLE: "1",
+  });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await composer.getByRole("combobox", { name: "Prompt" }).fill("hold concurrent background lifecycle");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => provider.activeConcurrent).toBe(1);
+    await expect.poll(() => app.window.evaluate(() => (window as any).pilot.getDesktopLifecycleState())).toEqual({
+      windowVisible: true,
+      statusPresent: false,
+    });
+
+    await app.window.evaluate(() => (window as any).pilot.closeWindow());
+    await expect.poll(() => app.window.evaluate(() => (window as any).pilot.getDesktopLifecycleState())).toEqual({
+      windowVisible: false,
+      statusPresent: true,
+    });
+    await expect.poll(() => app.window.isClosed()).toBe(false);
+    expect(app.process.exitCode).toBeNull();
+    expect(provider.activeConcurrent).toBe(1);
+
+    provider.releaseConcurrent("hold concurrent background lifecycle");
+    await expect.poll(() => provider.activeConcurrent).toBe(0);
+    const outcome = await app.window.evaluate(async () => {
+      const pilot = (window as any).pilot;
+      const selected = (await pilot.getProjects()).selected;
+      const task = selected.tasks.reduce((latest: { modified: string }, candidate: { modified: string }) => candidate.modified > latest.modified ? candidate : latest);
+      return (await pilot.getTaskRun(selected.path, task.path)).runs.at(-1)?.status;
+    });
+    expect(outcome).toBe("settled");
+    expect(app.process.exitCode).toBeNull();
+  } finally {
+    provider.releaseConcurrent("hold concurrent background lifecycle");
+    await close(app);
+    await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("cleans up an inline command process tree before quitting", async () => {
   const environment = await fixture();
   const provider = await deterministicProvider(environment.root);
@@ -3479,7 +3592,10 @@ test("cleans up an inline command process tree before quitting", async () => {
       shellPath: shell.shell,
     })),
   ]);
-  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+  const app = await launch(environment.agentDir, false, {
+    PILOT_TEST_PROJECT_DIR: environment.project,
+    PILOT_TEST_CLOSE_RESPONSE: "stop",
+  });
   let quit = false;
 
   try {
@@ -3491,10 +3607,8 @@ test("cleans up an inline command process tree before quitting", async () => {
     await composer.getByRole("button", { name: "Send" }).click();
     await expect(app.window.getByRole("region", { name: /Command:/ })).toContainText("Running");
 
-    const exited = app.process.exitCode === null ? once(app.process, "exit") : undefined;
-    if (process.platform === "darwin") app.process.kill("SIGTERM");
-    else await app.window.evaluate(() => window.close());
-    if (exited) await exited;
+    await app.window.evaluate(() => (window as any).pilot.closeWindow());
+    await expect.poll(() => app.process.exitCode, { timeout: 5_000 }).not.toBeNull();
     await app.browser.close().catch(() => undefined);
     quit = true;
 

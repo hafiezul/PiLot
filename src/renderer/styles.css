@@ -487,6 +487,7 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .general-settings label span { display: grid; gap: 3px; }
 .general-settings label strong { font-size: 13px; }
 .general-settings label small { color: #686864; font-size: 12px; }
+.notification-guidance { max-width: 65ch; margin: -2px 10px 10px; color: var(--change-muted); font-size: 11px; line-height: 1.5; }
 .general-settings .terminal-setting-notice { margin: 9px 10px 0; font-size: 12px; }
 .provider-setup { background: inherit; }
 .setup-heading { display: flex; justify-content: space-between; gap: 24px; align-items: start; margin-bottom: 20px; }

@@ -30,5 +30,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - name: Exercise shell discovery and process cleanup
-        run: npx playwright test tests/readiness.spec.ts --grep "layers explicit Project overrides|blocks a Run with actionable configured-shell guidance|runs and aborts a Local Task|cleans up an inline command process tree before quitting"
+      - name: Exercise platform lifecycle, shells, and cleanup
+        run: |
+          npx playwright test tests/lifecycle.spec.ts
+          npx playwright test tests/readiness.spec.ts --grep "keeps the native title-bar shell fixed|continues an active Run after the last window closes|layers explicit Project overrides|blocks a Run with actionable configured-shell guidance|runs and aborts a Local Task|cleans up an inline command process tree before quitting"
