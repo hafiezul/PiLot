@@ -19,6 +19,8 @@ const api: PiLotApi = {
     return () => ipcRenderer.removeListener("actions:invoke", handler);
   },
   ...lifecycleTestApi,
+  getDiagnosticPreview: () => ipcRenderer.invoke("diagnostics:get"),
+  exportDiagnosticBundle: () => ipcRenderer.invoke("diagnostics:export"),
   getPreferences: () => ipcRenderer.invoke("preferences:get"),
   setAppearance: (appearance) => ipcRenderer.invoke("preferences:set-appearance", appearance),
   setExpandThinking: (expand) => ipcRenderer.invoke("preferences:set-expand-thinking", expand),

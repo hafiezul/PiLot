@@ -439,7 +439,7 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .back-button { display: flex; align-items: center; gap: 5px; padding: 5px 8px; color: #5f605b; font-size: 12px; }
 .back-button:first-letter { font-size: 18px; }
 .settings-main { padding: 54px max(42px, calc((100% - 720px) / 2)); }
-.general-settings, .agent-settings, .provider-setup { max-width: 720px; }
+.general-settings, .agent-settings, .provider-setup, .diagnostics-settings { max-width: 720px; }
 .general-settings > .muted { margin: 0 0 32px; font-size: 13px; }
 .settings-page-heading { display: flex; align-items: start; justify-content: space-between; gap: 24px; }
 .settings-page-heading h2 { margin-bottom: 0; }
@@ -475,6 +475,30 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .runtime-number-settings input { width: 100%; min-height: 34px; border: 1px solid var(--change-button-border); border-radius: 4px; padding: 6px 8px; color: var(--change-text); background: var(--change-surface); font: 12px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
 .runtime-defaults .settings-save-row { margin-left: 28px; }
 .settings-feedback { margin: 16px 0 0; font-size: 12px; line-height: 1.45; }
+.diagnostic-privacy { margin: 22px 0; padding: 14px 16px; border: 1px solid var(--change-border); border-radius: 6px; background: var(--change-subtle); }
+.diagnostic-privacy strong { font-size: 12px; }
+.diagnostic-privacy p { max-width: 70ch; margin: 5px 0 0; color: var(--change-muted); font-size: 11px; line-height: 1.5; }
+.diagnostic-environment { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 0 26px; border-top: 1px solid var(--change-border); border-bottom: 1px solid var(--change-border); }
+.diagnostic-environment div { display: grid; gap: 4px; min-width: 0; padding: 11px 10px; border-left: 1px solid var(--change-border); }
+.diagnostic-environment div:first-child { border-left: 0; }
+.diagnostic-environment dt { color: var(--change-muted); font-size: 10px; font-weight: 650; }
+.diagnostic-environment dd { margin: 0; overflow-wrap: anywhere; font-size: 11px; }
+.diagnostic-preview > header { display: flex; align-items: start; justify-content: space-between; gap: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--change-border); }
+.diagnostic-preview > header h3 { margin: 0; font-size: 13px; }
+.diagnostic-preview > header p { margin: 4px 0 0; color: var(--change-muted); font-size: 10px; }
+.diagnostic-preview button { flex: none; border: 1px solid var(--focus-ring); border-radius: 5px; padding: 6px 10px; color: #fff; background: #1668d4; cursor: pointer; font-size: 12px; }
+.diagnostic-preview button:disabled { cursor: wait; opacity: .55; }
+.diagnostic-category { padding-top: 18px; }
+.diagnostic-category > h3 { display: flex; align-items: center; justify-content: space-between; margin: 0 0 7px; font-size: 12px; }
+.diagnostic-category > h3 span { color: var(--change-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.diagnostic-category ol { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--change-border); }
+.diagnostic-category li { padding: 10px 0; border-bottom: 1px solid var(--change-border); }
+.diagnostic-category li > div { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
+.diagnostic-category li strong { font-size: 11px; }
+.diagnostic-category time { flex: none; color: var(--change-muted); font-size: 9px; }
+.diagnostic-category p { margin: 4px 0; color: var(--change-muted); font-size: 10px; line-height: 1.45; }
+.diagnostic-category code { color: var(--change-muted); font-size: 9px; }
+.diagnostic-empty { margin: 18px 0 0; color: var(--change-muted); font-size: 11px; line-height: 1.5; }
 .general-settings fieldset { margin: 0; padding: 0; border: 0; }
 .general-settings .run-cap-setting, .general-settings .notification-setting, .general-settings .terminal-setting, .general-settings .thinking-setting { margin-top: 30px; }
 .general-settings legend { margin-bottom: 10px; font-size: 12px; font-weight: 650; }

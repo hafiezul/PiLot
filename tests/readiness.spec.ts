@@ -1278,6 +1278,7 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await abortComposer.getByRole("button", { name: "Send" }).click();
     const abortRun = app.window.getByRole("region", { name: "Run timeline" });
     await expect(abortRun.locator('details[aria-label="bash tool, running"]')).toBeVisible();
+    await expect.poll(() => readFile(provider.started, "utf8").catch(() => "")).toBe("started");
     const localConflict = await app.window.evaluate(async ({ projectPath, taskPath }) => {
       try {
         await (window as any).pilot.submitPrompt(projectPath, taskPath, "must serialize");
@@ -1293,7 +1294,6 @@ test("runs and aborts a Local Task through the Electron boundary", async () => {
     await stopToolRun.click();
     await expect(abortRun).toContainText("Aborted");
     await expect(abortRun.getByRole("button", { name: /Abort/ })).toHaveCount(0);
-    await expect.poll(() => readFile(provider.started, "utf8").catch(() => "")).toBe("started");
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(await readFile(provider.finished, "utf8").catch(() => "")).toBe("");
 

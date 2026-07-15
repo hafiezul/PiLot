@@ -437,7 +437,11 @@ async function reconcileRemovalJournal(userData: string, agentDir: string, journ
   }
 }
 
-export async function recoverTaskWorktreeRemovals(userData: string, agentDir: string) {
+export async function recoverTaskWorktreeRemovals(
+  userData: string,
+  agentDir: string,
+  onFailure: (error: unknown) => void | Promise<void> = () => undefined,
+) {
   const directory = removalJournalDirectory(userData);
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
@@ -453,7 +457,8 @@ export async function recoverTaskWorktreeRemovals(userData: string, agentDir: st
       await withTaskWrite(path.resolve(journal.taskPath), () => reconcileRemovalJournal(userData, agentDir, journal, true));
       await removeRemovalJournal(file);
     } catch (error) {
-      console.error(`Could not recover pending Worktree cleanup ${entry.name}:`, error);
+      await Promise.resolve(onFailure(error)).catch(() => undefined);
+      console.error("Could not recover a pending Worktree cleanup");
     }
   }
 }

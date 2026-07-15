@@ -16,11 +16,22 @@ import { getTaskChanges, getTaskFileDiff, openTaskPathInApplication } from "./ch
 import { getApplicationState, getConfiguredEditor, getTerminalState } from "./editors.js";
 import { createTaskWorktreeBranch, getTaskWorktreeState, openTaskWorktreeTerminal, removeManagedWorktree, WorktreeSetupCoordinator } from "./worktrees.js";
 import { desktopActionIds, desktopActions, type DesktopActionId, type DesktopActionState } from "../shared/actions.js";
+import type { DiagnosticOperation } from "../shared/diagnostics.js";
 import { applicationIds, type ApplicationId } from "../shared/editors.js";
 import { type Appearance, type Preferences } from "../shared/preferences.js";
 import { CHANGE_STATUSES, type ChangeStatus, type ImageAttachment, type ProjectEnvironmentOverride, type TaskCreationRequest, type TaskWorktreeFile, type ThinkingLevel } from "../shared/projects.js";
 import { captureLoginShellEnvironment, installCapturedEnvironment, projectEnvironment } from "./environment.js";
 import { backgroundRunStatus, lastWindowPrompt, RunAttentionPolicy, type RunAttentionNotification } from "./desktop-lifecycle.js";
+import { LocalDiagnostics } from "./diagnostics.js";
+
+function disablePiTelemetry(environment: NodeJS.ProcessEnv) {
+  for (const name of Object.keys(environment)) if (name.toUpperCase() === "PI_TELEMETRY") delete environment[name];
+  environment.PI_TELEMETRY = "0";
+  return environment;
+}
+
+// PiLot never opts into the Pi CLI's install telemetry, and intentionally does not start Electron's crashReporter.
+disablePiTelemetry(process.env);
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === "1"
@@ -41,6 +52,7 @@ if (process.env.PILOT_USER_DATA_DIR) app.setPath("userData", process.env.PILOT_U
 if (process.platform === "win32") app.setAppUserModelId("com.hafiezul.pilot");
 
 let preferences: Preferences;
+let diagnostics: LocalDiagnostics | undefined;
 let runCoordinator: RunCoordinator | undefined;
 let setupCoordinatorForQuit: WorktreeSetupCoordinator | undefined;
 let mainWindow: BrowserWindow | undefined;
@@ -56,6 +68,35 @@ const liveNotifications = new Set<Notification>();
 const maximumLiveNotifications = 128;
 
 type LastWindowChoice = "background" | "stop" | "cancel";
+
+function diagnosticApplication() {
+  return {
+    name: "PiLot" as const,
+    version: app.getVersion(),
+    packaged: app.isPackaged,
+    platform: process.platform,
+    architecture: process.arch,
+    electronVersion: process.versions.electron,
+    nodeVersion: process.versions.node,
+  };
+}
+
+async function withDiagnostic<T>(operation: DiagnosticOperation, action: () => T | Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    await diagnostics?.record(operation, error);
+    throw error;
+  }
+}
+
+function handleDiagnostic(
+  channel: string,
+  operation: DiagnosticOperation,
+  listener: Parameters<typeof ipcMain.handle>[1],
+) {
+  ipcMain.handle(channel, (...args) => withDiagnostic(operation, () => listener(...args)));
+}
 
 function runActivity() {
   return runCoordinator?.getActivity() ?? { runCount: 0, activeCount: 0, waitingCount: 0 };
@@ -155,13 +196,15 @@ function showRunAttention(attention: RunAttentionNotification) {
   notification.once("close", release);
   notification.once("failed", (_event, error) => {
     release();
-    console.error("Could not show a PiLot notification:", error);
+    void diagnostics?.record("app.notification", error);
+    console.error("Could not show a PiLot notification");
   });
   try {
     notification.show();
   } catch (error) {
     release();
-    console.error("Could not show a PiLot notification:", error);
+    void diagnostics?.record("app.notification", error);
+    console.error("Could not show a PiLot notification");
   }
 }
 
@@ -297,6 +340,8 @@ function createWindow() {
   });
 
   mainWindow = window;
+  window.webContents.on("render-process-gone", () => { void diagnostics?.record("app.window-load"); });
+  window.on("unresponsive", () => { void diagnostics?.record("app.window-load"); });
   if (preferences.window?.maximized) window.maximize();
   if (!testWindowHidden) window.once("ready-to-show", () => window.show());
 
@@ -305,7 +350,10 @@ function createWindow() {
     geometryTimer = undefined;
     const bounds = window.getNormalBounds();
     void saveWindowPreference(app.getPath("userData"), { ...bounds, maximized: window.isMaximized() }).then((next) => { preferences = next; })
-      .catch((error) => console.error("Could not save PiLot window geometry:", error));
+      .catch((error) => {
+        void diagnostics?.record("preferences.write", error);
+        console.error("Could not save PiLot window geometry");
+      });
   };
   const scheduleGeometry = () => {
     if (geometryTimer) clearTimeout(geometryTimer);
@@ -333,7 +381,8 @@ function createWindow() {
         setImmediate(() => app.quit());
       }
     }).catch((error) => {
-      console.error("Could not choose how to close PiLot:", error);
+      void diagnostics?.record("app.lifecycle", error);
+      console.error("Could not choose how to close PiLot");
     }).finally(() => {
       closeDecisionPending = false;
     });
@@ -345,15 +394,21 @@ function createWindow() {
 
   void (developmentRenderer
     ? window.loadURL(developmentRenderer)
-    : window.loadFile(path.join(directory, "../../renderer/index.html")));
+    : window.loadFile(path.join(directory, "../../renderer/index.html")))
+    .catch((error) => diagnostics?.record("app.window-load", error));
 }
 
 app.whenReady().then(async () => {
+  const localDiagnostics = new LocalDiagnostics(app.getPath("userData"), diagnosticApplication());
+  diagnostics = localDiagnostics;
+  await localDiagnostics.record("app.start");
   const launchEnvironment = { ...process.env };
   const bootstrapAgentDir = getAgentDir();
   const bootstrapSettings = SettingsManager.create(homedir(), bootstrapAgentDir, { projectTrusted: false });
   const capturedEnvironment = await captureLoginShellEnvironment(launchEnvironment, bootstrapSettings.getShellPath());
-  const baseEnvironment = installCapturedEnvironment(capturedEnvironment, launchEnvironment);
+  if (capturedEnvironment.error) await localDiagnostics.record("shell.capture", capturedEnvironment.error);
+  const baseEnvironment = disablePiTelemetry(installCapturedEnvironment(capturedEnvironment, launchEnvironment));
+  disablePiTelemetry(process.env);
   const agentDir = getAgentDir();
   const environmentForProject = async (projectPath: string) => projectEnvironment(
     baseEnvironment,
@@ -362,12 +417,24 @@ app.whenReady().then(async () => {
   );
 
   preferences = await loadPreferences(app.getPath("userData"));
-  await recoverTaskWorktreeRemovals(app.getPath("userData"), agentDir);
+  await recoverTaskWorktreeRemovals(
+    app.getPath("userData"),
+    agentDir,
+    (error) => localDiagnostics.record("runtime.setup", error),
+  );
   nativeTheme.themeSource = preferences.appearance;
   nativeTheme.on("updated", updateWindowChrome);
 
   createApplicationMenu();
+  const diagnosedRuns = new Map<string, string>();
   const runs = new RunCoordinator(app.getPath("userData"), agentDir, (state) => {
+    const latestRun = state.runs.at(-1);
+    if (latestRun && (latestRun.status === "failed" || latestRun.status === "interrupted")
+      && diagnosedRuns.get(state.taskPath) !== latestRun.id) {
+      diagnosedRuns.set(state.taskPath, latestRun.id);
+      if (diagnosedRuns.size > 1_000) diagnosedRuns.delete(diagnosedRuns.keys().next().value!);
+      void diagnostics?.record("runtime.run");
+    }
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:run-event", state);
     const focused = BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && window.isFocused());
     for (const attention of runAttentionPolicy.observe(state, { focused, preferences: preferences.notifications })) {
@@ -396,57 +463,76 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("startup:get", () => getStartupState(capturedEnvironment, baseEnvironment));
-  ipcMain.handle("preferences:get", () => preferences);
-  ipcMain.handle("preferences:set-appearance", async (_event, appearance: Appearance) => {
+  handleDiagnostic("startup:get", "shell.resolve", () => getStartupState(capturedEnvironment, baseEnvironment));
+  handleDiagnostic("preferences:get", "preferences.read", () => preferences);
+  handleDiagnostic("preferences:set-appearance", "preferences.write", async (_event, appearance: Appearance) => {
     preferences = await saveAppearance(app.getPath("userData"), appearance);
     nativeTheme.themeSource = preferences.appearance;
     updateWindowChrome();
     return preferences;
   });
-  ipcMain.handle("preferences:set-expand-thinking", async (_event, expand: unknown) => {
+  handleDiagnostic("preferences:set-expand-thinking", "preferences.write", async (_event, expand: unknown) => {
     preferences = await saveExpandThinking(app.getPath("userData"), expand);
     return preferences;
   });
-  ipcMain.handle("preferences:set-global-run-cap", async (_event, limit: unknown) => {
+  handleDiagnostic("preferences:set-global-run-cap", "preferences.write", async (_event, limit: unknown) => {
     preferences = await saveGlobalRunCap(app.getPath("userData"), limit);
     runs.setRunLimit(preferences.globalRunCap);
     return preferences;
   });
-  ipcMain.handle("preferences:set-notifications", async (_event, notifications: unknown) => {
+  handleDiagnostic("preferences:set-notifications", "preferences.write", async (_event, notifications: unknown) => {
     preferences = await saveNotificationPreferences(app.getPath("userData"), notifications);
     return preferences;
   });
-  ipcMain.handle("preferences:set-panes", async (_event, panes: unknown) => {
+  handleDiagnostic("preferences:set-panes", "preferences.write", async (_event, panes: unknown) => {
     preferences = await savePanePreferences(app.getPath("userData"), panes);
     return preferences;
   });
-  ipcMain.handle("preferences:set-recent-selection", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("preferences:set-recent-selection", "preferences.write", async (_event, projectPath: unknown, taskPath: unknown) => {
     preferences = await saveRecentSelection(app.getPath("userData"), projectPath, taskPath);
     return preferences;
   });
-  ipcMain.handle("agent-settings:get", () => getAgentSettings(getAgentDir()));
-  ipcMain.handle("agent-settings:set-default-model", (_event, provider: unknown, modelId: unknown) =>
+  handleDiagnostic("agent-settings:get", "settings.read", () => getAgentSettings(getAgentDir()));
+  handleDiagnostic("agent-settings:set-default-model", "settings.write", (_event, provider: unknown, modelId: unknown) =>
     saveDefaultAgentModel(getAgentDir(), provider, modelId));
-  ipcMain.handle("agent-settings:set-default-thinking", (_event, level: unknown) =>
+  handleDiagnostic("agent-settings:set-default-thinking", "settings.write", (_event, level: unknown) =>
     saveDefaultAgentThinking(getAgentDir(), level));
-  ipcMain.handle("agent-settings:set-model-scope", (_event, patterns: unknown) =>
+  handleDiagnostic("agent-settings:set-model-scope", "settings.write", (_event, patterns: unknown) =>
     saveAgentModelScope(getAgentDir(), patterns));
-  ipcMain.handle("agent-settings:set-retry", (_event, settings: unknown) =>
+  handleDiagnostic("agent-settings:set-retry", "settings.write", (_event, settings: unknown) =>
     saveAgentRetry(getAgentDir(), settings));
-  ipcMain.handle("agent-settings:set-compaction", (_event, settings: unknown) =>
+  handleDiagnostic("agent-settings:set-compaction", "settings.write", (_event, settings: unknown) =>
     saveAgentCompaction(getAgentDir(), settings));
-  ipcMain.handle("terminals:get", () => getTerminalState(preferences.preferredTerminal, baseEnvironment));
+  handleDiagnostic("terminals:get", "shell.resolve", () => getTerminalState(preferences.preferredTerminal, baseEnvironment));
   ipcMain.handle("terminals:set-preferred", async (_event, terminal: unknown) => {
-    preferences = await savePreferredTerminal(app.getPath("userData"), terminal);
-    return getTerminalState(preferences.preferredTerminal, baseEnvironment);
+    preferences = await withDiagnostic("preferences.write", () => savePreferredTerminal(app.getPath("userData"), terminal));
+    return withDiagnostic("shell.resolve", () => getTerminalState(preferences.preferredTerminal, baseEnvironment));
   });
-  ipcMain.handle("providers:get", getProviderState);
-  ipcMain.handle("providers:set-key", (_event, provider: string, key: string) => setApiKey(provider, key));
-  ipcMain.handle("providers:remove-key", (_event, provider: string) => removeApiKey(provider));
-  ipcMain.handle("providers:login", (event, provider: string) => login(provider, event.sender));
-  ipcMain.handle("providers:logout", (_event, provider: string) => logout(provider));
-  ipcMain.handle("providers:oauth-reply", (_event, value?: string) => respondToOAuth(value));
+  handleDiagnostic("providers:get", "auth.read", getProviderState);
+  handleDiagnostic("providers:set-key", "auth.write", (_event, provider: string, key: string) => setApiKey(provider, key));
+  handleDiagnostic("providers:remove-key", "auth.write", (_event, provider: string) => removeApiKey(provider));
+  handleDiagnostic("providers:login", "auth.login", (event, provider: string) => login(provider, event.sender));
+  handleDiagnostic("providers:logout", "auth.write", (_event, provider: string) => logout(provider));
+  handleDiagnostic("providers:oauth-reply", "auth.login", (_event, value?: string) => respondToOAuth(value));
+  handleDiagnostic("diagnostics:get", "diagnostics.preview", () => localDiagnostics.bundle());
+  handleDiagnostic("diagnostics:export", "diagnostics.export-failed", async (event) => {
+    let destination: string | undefined;
+    if (process.env.PILOT_TEST_DIAGNOSTICS_EXPORT_DIR) {
+      destination = path.join(process.env.PILOT_TEST_DIAGNOSTICS_EXPORT_DIR, "pilot-diagnostics.json");
+    } else {
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.SaveDialogOptions = {
+        title: "Export Diagnostic Bundle",
+        defaultPath: `PiLot-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
+        filters: [{ name: "PiLot diagnostics", extensions: ["json"] }],
+      };
+      const result = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
+      destination = result.canceled ? undefined : result.filePath;
+    }
+    if (!destination) return false;
+    await localDiagnostics.export(destination);
+    return true;
+  });
 
   const projectState = async () => {
     const state = await getProjectsState(app.getPath("userData"), getAgentDir());
@@ -461,9 +547,21 @@ app.whenReady().then(async () => {
     const selected = state.selected
       ? projects.find(({ path: projectPath }) => projectPath === state.selected!.path) ?? withLiveRuns(state.selected)
       : undefined;
+    if (projects.some(({ diagnostics: projectDiagnostics }) => projectDiagnostics.length > 0)
+      || (selected?.diagnostics.length ?? 0) > 0) {
+      await diagnostics?.record("session.compatibility");
+    }
     return { projects, ...(selected ? { selected } : {}) };
   };
+  const diagnosedSetups = new Map<string, string>();
   const setups = new WorktreeSetupCoordinator(agentDir, (state) => {
+    if ((state.status === "failed" || state.status === "interrupted") && diagnosedSetups.get(state.taskPath) !== state.status) {
+      diagnosedSetups.set(state.taskPath, state.status);
+      if (diagnosedSetups.size > 1_000) diagnosedSetups.delete(diagnosedSetups.keys().next().value!);
+      void diagnostics?.record("runtime.setup");
+    } else if (state.status === "running") {
+      diagnosedSetups.delete(state.taskPath);
+    }
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("tasks:setup-event", state);
   }, environmentForProject);
   setupCoordinatorForQuit = setups;
@@ -504,20 +602,23 @@ app.whenReady().then(async () => {
     await assertProjectAdmitted(app.getPath("userData"), project);
     return { project, task };
   };
-  ipcMain.handle("applications:get", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("applications:get", "shell.launch", async (_event, projectPath: unknown, taskPath: unknown) => {
     const { configured, environment } = await editorContext(projectPath, taskPath);
     return getApplicationState(preferences.preferredApplication, configured, environment);
   });
   ipcMain.handle("applications:set-preferred", async (_event, projectPath: unknown, taskPath: unknown, application: unknown) => {
-    if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("Unknown application");
-    const { configured, environment } = await editorContext(projectPath, taskPath);
-    const state = await getApplicationState(application as ApplicationId, configured, environment);
-    if (!state.available.some(({ id }) => id === application)) throw new Error("That application is not available on this computer");
-    preferences = await savePreferredApplication(app.getPath("userData"), application);
-    return getApplicationState(preferences.preferredApplication, configured, environment);
+    const { configured, environment } = await withDiagnostic("shell.launch", async () => {
+      if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("Unknown application");
+      const context = await editorContext(projectPath, taskPath);
+      const state = await getApplicationState(application as ApplicationId, context.configured, context.environment);
+      if (!state.available.some(({ id }) => id === application)) throw new Error("That application is not available on this computer");
+      return context;
+    });
+    preferences = await withDiagnostic("preferences.write", () => savePreferredApplication(app.getPath("userData"), application));
+    return withDiagnostic("shell.launch", () => getApplicationState(preferences.preferredApplication, configured, environment));
   });
-  ipcMain.handle("projects:get", projectState);
-  ipcMain.handle("projects:add", async (event) => {
+  handleDiagnostic("projects:get", "session.read", projectState);
+  handleDiagnostic("projects:add", "session.read", async (event) => {
     let projectPath = process.env.PILOT_TEST_PROJECT_DIR;
     if (!projectPath) {
       const owner = BrowserWindow.fromWebContents(event.sender);
@@ -528,106 +629,106 @@ app.whenReady().then(async () => {
     if (!projectPath) return projectState();
     return addProject(app.getPath("userData"), getAgentDir(), projectPath);
   });
-  ipcMain.handle("projects:select", async (_event, projectPath: unknown) => {
+  handleDiagnostic("projects:select", "session.read", async (_event, projectPath: unknown) => {
     await selectProject(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath));
     return projectState();
   });
-  ipcMain.handle("projects:remove", async (_event, projectPath: unknown) => {
+  handleDiagnostic("projects:remove", "session.write", async (_event, projectPath: unknown) => {
     const project = requireProjectPath(projectPath);
     await removeProject(app.getPath("userData"), getAgentDir(), project);
     await runs.abortProject(project);
     return projectState();
   });
-  ipcMain.handle("tasks:get-creation", async (_event, projectPath: unknown) => {
+  handleDiagnostic("tasks:get-creation", "runtime.command", async (_event, projectPath: unknown) => {
     const project = requireProjectPath(projectPath);
     return getTaskCreation(app.getPath("userData"), getAgentDir(), project, await environmentForProject(project));
   });
-  ipcMain.handle("tasks:create", async (_event, projectPath: unknown, request: unknown) => {
+  handleDiagnostic("tasks:create", "session.write", async (_event, projectPath: unknown, request: unknown) => {
     const project = requireProjectPath(projectPath);
     return createTask(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-run", async (_event, projectPath: unknown, taskPath: unknown) =>
+  handleDiagnostic("tasks:get-run", "session.read", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskRun(requireProjectPath(projectPath), requireProjectPath(taskPath)));
-  ipcMain.handle("tasks:get-setup", async (_event, projectPath: unknown, taskPath: unknown) =>
+  handleDiagnostic("tasks:get-setup", "runtime.setup", async (_event, projectPath: unknown, taskPath: unknown) =>
     setups.get(requireProjectPath(projectPath), requireTaskPath(taskPath)));
-  ipcMain.handle("tasks:run-setup", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("tasks:run-setup", "runtime.setup", async (_event, projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     await assertExecutionAllowed(app.getPath("userData"), project);
     if ((await setups.get(project, task))?.status === "running") throw new Error("Setup is already running for this Task");
     return runs.withIdleExecution(project, task, () => setups.run(project, task));
   });
-  ipcMain.handle("tasks:abort-setup", async (_event, taskPath: unknown) => setups.abort(requireTaskPath(taskPath)));
-  ipcMain.handle("tasks:bypass-setup", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("tasks:abort-setup", "runtime.setup", async (_event, taskPath: unknown) => setups.abort(requireTaskPath(taskPath)));
+  handleDiagnostic("tasks:bypass-setup", "runtime.setup", async (_event, projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     await assertExecutionAllowed(app.getPath("userData"), project);
     return runs.withIdleExecution(project, task, () => setups.bypass(project, task));
   });
-  ipcMain.handle("tasks:reload", async (_event, projectPath: unknown, taskPath: unknown) =>
+  handleDiagnostic("tasks:reload", "session.read", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.reloadTask(requireProjectPath(projectPath), requireTaskPath(taskPath)));
-  ipcMain.handle("tasks:fork-changed", async (_event, projectPath: unknown, taskPath: unknown, request: unknown) => {
+  handleDiagnostic("tasks:fork-changed", "session.write", async (_event, projectPath: unknown, taskPath: unknown, request: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
       runs.forkChangedTask(project, task, execution, setupCommand), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-model", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("tasks:get-model", "session.read", async (_event, projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
     return getTaskModelState(getAgentDir(), project, requireProjectPath(taskPath), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-resources", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("tasks:get-resources", "session.read", async (_event, projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
     return getTaskResources(getAgentDir(), project, requireProjectPath(taskPath), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-history", async (_event, projectPath: unknown, taskPath: unknown) =>
+  handleDiagnostic("tasks:get-history", "session.read", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath)));
-  ipcMain.handle("tasks:navigate-history", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, summarize: unknown, customInstructions: unknown) => {
+  handleDiagnostic("tasks:navigate-history", "session.write", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, summarize: unknown, customInstructions: unknown) => {
     if (typeof summarize !== "boolean" || (customInstructions !== undefined && typeof customInstructions !== "string")) throw new Error("Choose valid history navigation options");
     return runs.navigateTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId), summarize, customInstructions as string | undefined);
   });
-  ipcMain.handle("tasks:set-history-label", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, label: unknown) => {
+  handleDiagnostic("tasks:set-history-label", "session.write", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, label: unknown) => {
     if (label !== undefined && typeof label !== "string") throw new Error("A history label must be text");
     return runs.setTaskHistoryLabel(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId), label as string | undefined);
   });
-  ipcMain.handle("tasks:fork-history", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, request: unknown) => {
+  handleDiagnostic("tasks:fork-history", "session.write", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, request: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     const entry = requireHistoryEntry(entryId);
     return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
       runs.forkTaskFromHistory(project, task, entry, execution, setupCommand), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:clone-history", async (_event, projectPath: unknown, taskPath: unknown, request: unknown) => {
+  handleDiagnostic("tasks:clone-history", "session.write", async (_event, projectPath: unknown, taskPath: unknown, request: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     return withTaskExecution(app.getPath("userData"), getAgentDir(), project, requireTaskCreation(request), ({ execution, setupCommand }) =>
       runs.cloneTaskHistory(project, task, execution, setupCommand), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-changes", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("tasks:get-changes", "runtime.command", async (_event, projectPath: unknown, taskPath: unknown) => {
     const project = requireProjectPath(projectPath);
     return getTaskChanges(getAgentDir(), project, requireProjectPath(taskPath), await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-file-diff", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {
+  handleDiagnostic("tasks:get-file-diff", "runtime.command", async (_event, projectPath: unknown, taskPath: unknown, filePath: unknown) => {
     if (typeof filePath !== "string" || !filePath) throw new Error("A changed file is required");
     const project = requireProjectPath(projectPath);
     return getTaskFileDiff(getAgentDir(), project, requireProjectPath(taskPath), filePath, await environmentForProject(project));
   });
-  ipcMain.handle("tasks:get-worktree", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("tasks:get-worktree", "runtime.command", async (_event, projectPath: unknown, taskPath: unknown) => {
     const { project, task } = await worktreeContext(projectPath, taskPath);
     return getTaskWorktreeState(getAgentDir(), project, task, await environmentForProject(project));
   });
-  ipcMain.handle("tasks:create-worktree-branch", async (_event, projectPath: unknown, taskPath: unknown, branch: unknown) => {
+  handleDiagnostic("tasks:create-worktree-branch", "runtime.command", async (_event, projectPath: unknown, taskPath: unknown, branch: unknown) => {
     if (typeof branch !== "string") throw new Error("A branch name is required");
     const { project, task } = await worktreeContext(projectPath, taskPath);
     const environment = await environmentForProject(project);
     return runs.withIdleExecution(project, task, () =>
       createTaskWorktreeBranch(app.getPath("userData"), getAgentDir(), project, task, branch, environment));
   });
-  ipcMain.handle("tasks:open-worktree-terminal", async (_event, projectPath: unknown, taskPath: unknown) => {
+  handleDiagnostic("tasks:open-worktree-terminal", "shell.launch", async (_event, projectPath: unknown, taskPath: unknown) => {
     const { project, task } = await worktreeContext(projectPath, taskPath);
     return openTaskWorktreeTerminal(getAgentDir(), project, task, preferences.preferredTerminal, await environmentForProject(project));
   });
-  ipcMain.handle("tasks:remove-worktree", async (_event, projectPath: unknown, taskPath: unknown, discard: unknown, expectedFiles: unknown) => {
+  handleDiagnostic("tasks:remove-worktree", "runtime.command", async (_event, projectPath: unknown, taskPath: unknown, discard: unknown, expectedFiles: unknown) => {
     if (typeof discard !== "boolean" || !Array.isArray(expectedFiles)
       || expectedFiles.some((file) => !file || typeof file !== "object" || typeof (file as TaskWorktreeFile).path !== "string" || !(file as TaskWorktreeFile).path
         || typeof (file as TaskWorktreeFile).fingerprint !== "string" || !/^[a-f0-9]{64}$/.test((file as TaskWorktreeFile).fingerprint)
@@ -646,37 +747,37 @@ app.whenReady().then(async () => {
       return projectState();
     });
   });
-  ipcMain.handle("tasks:open-in-application", async (_event, projectPath: unknown, taskPath: unknown, application: unknown, filePath: unknown) => {
+  handleDiagnostic("tasks:open-in-application", "shell.launch", async (_event, projectPath: unknown, taskPath: unknown, application: unknown, filePath: unknown) => {
     if (typeof application !== "string" || !applicationIds.has(application as ApplicationId)) throw new Error("An application is required");
     if (filePath !== undefined && (typeof filePath !== "string" || !filePath)) throw new Error("A changed file is required");
     const project = requireProjectPath(projectPath);
     return openTaskPathInApplication(app.getPath("userData"), getAgentDir(), project, requireTaskPath(taskPath), application as ApplicationId, filePath as string | undefined, await environmentForProject(project));
   });
-  ipcMain.handle("tasks:set-model", async (_event, projectPath: unknown, taskPath: unknown, provider: unknown, modelId: unknown) => {
+  handleDiagnostic("tasks:set-model", "session.write", async (_event, projectPath: unknown, taskPath: unknown, provider: unknown, modelId: unknown) => {
     if (typeof provider !== "string" || typeof modelId !== "string") throw new Error("A provider and model are required");
     const project = requireProjectPath(projectPath);
     return setTaskModel(getAgentDir(), project, requireProjectPath(taskPath), provider, modelId, await environmentForProject(project));
   });
-  ipcMain.handle("tasks:set-thinking", async (_event, projectPath: unknown, taskPath: unknown, level: unknown) => {
+  handleDiagnostic("tasks:set-thinking", "session.write", async (_event, projectPath: unknown, taskPath: unknown, level: unknown) => {
     if (typeof level !== "string") throw new Error("A thinking level is required");
     const project = requireProjectPath(projectPath);
     return setTaskThinking(getAgentDir(), project, requireProjectPath(taskPath), level as ThinkingLevel, await environmentForProject(project));
   });
-  ipcMain.handle("tasks:submit", async (_event, projectPath: unknown, taskPath: unknown, prompt: unknown, images: unknown) => {
+  handleDiagnostic("tasks:submit", "runtime.run", async (_event, projectPath: unknown, taskPath: unknown, prompt: unknown, images: unknown) => {
     if (typeof prompt !== "string" || (images !== undefined && !Array.isArray(images))) throw new Error("A prompt is required");
     return runs.submitPrompt(requireProjectPath(projectPath), requireProjectPath(taskPath), prompt, (images ?? []) as ImageAttachment[]);
   });
-  ipcMain.handle("tasks:queue", async (_event, taskPath: unknown, prompt: unknown, mode: unknown) => {
+  handleDiagnostic("tasks:queue", "runtime.run", async (_event, taskPath: unknown, prompt: unknown, mode: unknown) => {
     if (typeof prompt !== "string" || (mode !== "steer" && mode !== "followUp")) throw new Error("A live input mode is required");
     return runs.queuePrompt(requireProjectPath(taskPath), prompt, mode);
   });
-  ipcMain.handle("tasks:command", async (_event, projectPath: unknown, taskPath: unknown, command: unknown, includeInContext: unknown) => {
+  handleDiagnostic("tasks:command", "runtime.command", async (_event, projectPath: unknown, taskPath: unknown, command: unknown, includeInContext: unknown) => {
     if (typeof command !== "string" || typeof includeInContext !== "boolean") throw new Error("A command is required");
     return runs.executeCommand(requireProjectPath(projectPath), requireProjectPath(taskPath), command, includeInContext);
   });
-  ipcMain.handle("tasks:compact", async (_event, projectPath: unknown, taskPath: unknown) =>
+  handleDiagnostic("tasks:compact", "runtime.run", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.compactTask(requireProjectPath(projectPath), requireProjectPath(taskPath)));
-  ipcMain.handle("tasks:export", async (event, projectPath: unknown, taskPath: unknown, format: unknown) => {
+  handleDiagnostic("tasks:export", "session.read", async (event, projectPath: unknown, taskPath: unknown, format: unknown) => {
     const project = requireProjectPath(projectPath);
     const task = requireProjectPath(taskPath);
     if (format !== "jsonl" && format !== "html") throw new Error("Choose a supported Task export format");
@@ -708,9 +809,9 @@ app.whenReady().then(async () => {
     await runs.exportTask(project, task, format, destination.filePath);
     return true;
   });
-  ipcMain.handle("tasks:abort-retry", async (_event, taskPath: unknown) => runs.abortRetry(requireProjectPath(taskPath)));
-  ipcMain.handle("tasks:abort", async (_event, taskPath: unknown) => runs.abortTask(requireProjectPath(taskPath)));
-  ipcMain.handle("outputs:open", async (_event, outputPath: unknown) => {
+  handleDiagnostic("tasks:abort-retry", "runtime.run", async (_event, taskPath: unknown) => runs.abortRetry(requireProjectPath(taskPath)));
+  handleDiagnostic("tasks:abort", "runtime.run", async (_event, taskPath: unknown) => runs.abortTask(requireProjectPath(taskPath)));
+  handleDiagnostic("outputs:open", "shell.launch", async (_event, outputPath: unknown) => {
     if (typeof outputPath !== "string" || !path.isAbsolute(outputPath)) throw new Error("A complete output path is required");
     const [temporaryDirectory, target] = await Promise.all([realpath(tmpdir()), realpath(outputPath)]);
     const relative = path.relative(temporaryDirectory, target);
@@ -718,25 +819,25 @@ app.whenReady().then(async () => {
     const error = await shell.openPath(target);
     if (error) throw new Error(error);
   });
-  ipcMain.handle("projects:set-task-archived", async (_event, projectPath: unknown, taskPath: unknown, archived: unknown) => {
+  handleDiagnostic("projects:set-task-archived", "session.write", async (_event, projectPath: unknown, taskPath: unknown, archived: unknown) => {
     if (typeof archived !== "boolean") throw new Error("A Task lifecycle is required");
     const project = requireProjectPath(projectPath);
     const task = requireTaskPath(taskPath);
     const update = () => setTaskArchived(app.getPath("userData"), getAgentDir(), project, task, archived);
     return archived ? runs.withIdleExecution(project, task, update) : update();
   });
-  ipcMain.handle("projects:set-resource-trust", async (_event, projectPath: unknown, trusted: unknown) => {
+  handleDiagnostic("projects:set-resource-trust", "settings.write", async (_event, projectPath: unknown, trusted: unknown) => {
     if (typeof trusted !== "boolean") throw new Error("A trust decision is required");
     return setResourceTrust(app.getPath("userData"), getAgentDir(), requireProjectPath(projectPath), trusted);
   });
-  ipcMain.handle("projects:set-execution-consent", async (_event, projectPath: unknown, consent: unknown) => {
+  handleDiagnostic("projects:set-execution-consent", "preferences.write", async (_event, projectPath: unknown, consent: unknown) => {
     if (typeof consent !== "boolean") throw new Error("An execution consent decision is required");
     const project = requireProjectPath(projectPath);
     await setExecutionConsent(app.getPath("userData"), getAgentDir(), project, consent);
     if (!consent) await runs.abortProject(project);
     return projectState();
   });
-  ipcMain.handle("projects:set-environment", (_event, projectPath: unknown, overrides: unknown) => {
+  handleDiagnostic("projects:set-environment", "preferences.write", (_event, projectPath: unknown, overrides: unknown) => {
     if (!Array.isArray(overrides) || overrides.some((override) => !override || typeof override !== "object"
       || typeof (override as ProjectEnvironmentOverride).name !== "string"
       || typeof (override as ProjectEnvironmentOverride).value !== "string")) {
@@ -751,10 +852,17 @@ app.whenReady().then(async () => {
   });
   createWindow();
   if (process.platform === "win32") Notification.handleActivation(restoreMainWindow);
+  app.on("child-process-gone", () => { void diagnostics?.record("app.lifecycle"); });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else restoreMainWindow();
   });
+}).catch(async (error) => {
+  const localDiagnostics = diagnostics ?? new LocalDiagnostics(app.getPath("userData"), diagnosticApplication());
+  diagnostics = localDiagnostics;
+  await localDiagnostics.record("app.bootstrap", error);
+  dialog.showErrorBox("PiLot could not start", "Reopen PiLot and export the local diagnostic bundle from Settings if the problem continues.");
+  app.exit(1);
 });
 
 app.on("before-quit", (event) => {
@@ -764,15 +872,22 @@ app.on("before-quit", (event) => {
   quitCleanupStarted = true;
   backgroundMode = false;
   destroyBackgroundTray();
-  void Promise.all([
-    runCoordinator?.abortAll(),
-    setupCoordinatorForQuit?.abortAll(),
-  ]).catch((error) => {
-    console.error("Could not finish PiLot process cleanup:", error);
-  }).finally(() => {
-    quitCleanupFinished = true;
-    app.exit(0);
-  });
+  void (async () => {
+    try {
+      const results = await Promise.allSettled([
+        runCoordinator?.abortAll(),
+        setupCoordinatorForQuit?.abortAll(),
+      ]);
+      for (const result of results) {
+        if (result.status === "rejected") await diagnostics?.record("app.lifecycle", result.reason);
+      }
+      if (results.some(({ status }) => status === "rejected")) console.error("Could not finish PiLot process cleanup");
+    } finally {
+      await diagnostics?.flush();
+      quitCleanupFinished = true;
+      app.exit(0);
+    }
+  })();
 });
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {

@@ -1,6 +1,7 @@
 import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
+import { diagnosticCategories, diagnosticCategoryLabels, type DiagnosticBundle, type DiagnosticCategory } from "../shared/diagnostics";
 import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
 import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type RecentSelection } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
@@ -1089,7 +1090,11 @@ function ThinkingPicker({ state, disabled, onSelect }: {
     if (!popover.current || !trigger.current || disabled) return;
     placePicker(popover.current, trigger.current, Math.max(180, trigger.current.offsetWidth));
     if (!popover.current.matches(":popover-open")) popover.current.showPopover();
-    requestAnimationFrame(() => popover.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus());
+    requestAnimationFrame(() => {
+      const current = popover.current;
+      if (!current || (document.activeElement !== trigger.current && document.activeElement !== document.body)) return;
+      current.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+    });
   };
   const move = (event: React.KeyboardEvent, direction: number) => {
     const options = [...(popover.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])];
@@ -1985,8 +1990,80 @@ function GeneralSettings() {
   </section>;
 }
 
-function SettingsPage({ initialDestination, onChange, onClose }: { initialDestination: "general" | "agent" | "providers"; onChange(): void; onClose(): void }) {
-  const [destination, setDestination] = useState<"general" | "agent" | "providers">(initialDestination);
+type SettingsDestination = "general" | "agent" | "providers" | "diagnostics";
+
+function DiagnosticsSettings() {
+  const [preview, setPreview] = useState<DiagnosticBundle>();
+  const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const load = useCallback(() => {
+    setLoading(true);
+    setError("");
+    setMessage("");
+    void window.pilot.getDiagnosticPreview().then(setPreview).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => setLoading(false));
+  }, []);
+  useEffect(load, [load]);
+
+  const events = preview ? [...preview.events].reverse() : [];
+  const grouped = diagnosticCategories.flatMap((category) => {
+    const items = events.filter((event) => event.category === category);
+    return items.length ? [{ category, items }] : [];
+  });
+  const exportBundle = () => {
+    if (exporting) return;
+    setExporting(true);
+    setError("");
+    setMessage("");
+    void window.pilot.exportDiagnosticBundle().then((exported) => {
+      if (exported) setMessage("Diagnostic bundle exported to the selected local file.");
+    }).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => setExporting(false));
+  };
+
+  return <section className="diagnostics-settings" aria-labelledby="diagnostics-title">
+    <div className="settings-page-heading">
+      <div><p className="eyebrow">Support</p><h2 id="diagnostics-title">Diagnostics</h2></div>
+      <button type="button" disabled={loading || exporting} onClick={load}>Refresh preview</button>
+    </div>
+    <p className="settings-introduction">Inspect bounded local support events before choosing whether to export them.</p>
+    <div className="diagnostic-privacy" role="note">
+      <strong>Local only</strong>
+      <p>PiLot collects no analytics and makes no automatic crash uploads. Diagnostic events stay on this device until you explicitly export a bundle.</p>
+      <p>Secrets are redacted; Task transcripts, source, paths, and diffs are excluded by default.</p>
+    </div>
+    {loading ? <p role="status" className="muted">Loading diagnostic preview…</p> : error && !preview ? <p className="error" role="alert">Could not load diagnostics: {error}</p> : preview && <>
+      <dl className="diagnostic-environment" aria-label="Diagnostic environment">
+        <div><dt>PiLot</dt><dd>{preview.application.version}</dd></div>
+        <div><dt>Runtime</dt><dd>Electron {preview.application.electronVersion} · Node {preview.application.nodeVersion}</dd></div>
+        <div><dt>Platform</dt><dd>{preview.application.platform} · {preview.application.architecture} · {preview.application.packaged ? "Packaged" : "Development"}</dd></div>
+      </dl>
+      <section className="diagnostic-preview" aria-label="Diagnostic preview">
+        <header>
+          <div><h3>Included events</h3><p>{events.length} bounded event{events.length === 1 ? "" : "s"}</p></div>
+          <button type="button" className="primary-action" disabled={exporting} onClick={exportBundle}>{exporting ? "Exporting…" : "Export diagnostic bundle"}</button>
+        </header>
+        {grouped.length ? grouped.map(({ category, items }: { category: DiagnosticCategory; items: typeof events }) => <section key={category} className="diagnostic-category" aria-labelledby={`diagnostic-${category}`}>
+          <h3 id={`diagnostic-${category}`}>{diagnosticCategoryLabels[category]} <span>{items.length}</span></h3>
+          <ol>{items.map((event, index) => <li key={`${event.timestamp}-${event.operation}-${index}`}>
+            <div><strong>{event.summary}</strong><time dateTime={event.timestamp}>{new Date(event.timestamp).toLocaleString()}</time></div>
+            <p>{event.guidance}</p>
+            <code>{event.operation}{event.code ? ` · ${event.code}` : ""}</code>
+          </li>)}</ol>
+        </section>) : <p className="diagnostic-empty">No support failures have been recorded. The bounded local log contains only application startup.</p>}
+      </section>
+    </>}
+    {message && <p className="success settings-feedback" role="status">{message}</p>}
+    {error && preview && <p className="error settings-feedback" role="alert">Diagnostic action failed: {error}</p>}
+  </section>;
+}
+
+function SettingsPage({ initialDestination, onChange, onClose }: { initialDestination: SettingsDestination; onChange(): void; onClose(): void }) {
+  const [destination, setDestination] = useState<SettingsDestination>(initialDestination);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus();
@@ -2003,10 +2080,11 @@ function SettingsPage({ initialDestination, onChange, onClose }: { initialDestin
         <button aria-current={destination === "general" ? "page" : undefined} onClick={() => setDestination("general")}>General</button>
         <button aria-current={destination === "agent" ? "page" : undefined} onClick={() => setDestination("agent")}>Agent</button>
         <button aria-current={destination === "providers" ? "page" : undefined} onClick={() => setDestination("providers")}>Providers</button>
+        <button aria-current={destination === "diagnostics" ? "page" : undefined} onClick={() => setDestination("diagnostics")}>Diagnostics</button>
       </nav>
     </aside>
     <main className="settings-main" aria-label="Settings">
-      {destination === "general" ? <GeneralSettings /> : destination === "agent" ? <AgentSettings /> : <ProviderSettings onChange={onChange} />}
+      {destination === "general" ? <GeneralSettings /> : destination === "agent" ? <AgentSettings /> : destination === "providers" ? <ProviderSettings onChange={onChange} /> : <DiagnosticsSettings />}
     </main>
   </div>;
 }
@@ -2139,7 +2217,7 @@ function App() {
   const [desktopPreferencesLoaded, setDesktopPreferencesLoaded] = useState(false);
   const [runStates, setRunStates] = useState<Record<string, TaskRunState>>({});
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsDestination, setSettingsDestination] = useState<"general" | "agent" | "providers">("general");
+  const [settingsDestination, setSettingsDestination] = useState<SettingsDestination>("general");
   const [showProjectAccess, setShowProjectAccess] = useState(false);
   const [taskCreation, setTaskCreation] = useState<TaskCreationState>();
   const [paletteOpen, setPaletteOpen] = useState(false);
