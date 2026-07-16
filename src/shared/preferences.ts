@@ -10,6 +10,14 @@ export const MAXIMUM_GLOBAL_RUN_CAP = 16;
 export const preferenceInspectorViews = ["details", "changes", "history"] as const;
 export type PreferenceInspectorView = typeof preferenceInspectorViews[number];
 
+export const MINIMUM_NAVIGATION_PANE_WIDTH = 180;
+export const DEFAULT_NAVIGATION_PANE_WIDTH = 230;
+export const MAXIMUM_NAVIGATION_PANE_WIDTH = 360;
+export const MINIMUM_INSPECTOR_PANE_WIDTH = 280;
+export const DEFAULT_INSPECTOR_PANE_WIDTH = 360;
+export const MAXIMUM_INSPECTOR_PANE_WIDTH = 600;
+export const MINIMUM_PRIMARY_PANE_WIDTH = 440;
+
 export type NotificationPreferences = {
   runCompleted: boolean;
   runFailed: boolean;
@@ -19,6 +27,8 @@ export type NotificationPreferences = {
 export type PanePreferences = {
   inspectorVisible: boolean;
   inspectorView: PreferenceInspectorView;
+  navigationWidth: number;
+  inspectorWidth: number;
 };
 
 export type WindowPreference = {

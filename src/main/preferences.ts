@@ -1,14 +1,19 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { applicationIds, terminalIds, type ApplicationId, type TerminalId } from "../shared/editors.js";
-import { appearances, DEFAULT_GLOBAL_RUN_CAP, MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, preferenceInspectorViews, type Appearance, type NotificationPreferences, type PanePreferences, type Preferences, type WindowPreference } from "../shared/preferences.js";
+import { appearances, DEFAULT_GLOBAL_RUN_CAP, DEFAULT_INSPECTOR_PANE_WIDTH, DEFAULT_NAVIGATION_PANE_WIDTH, MAXIMUM_GLOBAL_RUN_CAP, MAXIMUM_INSPECTOR_PANE_WIDTH, MAXIMUM_NAVIGATION_PANE_WIDTH, MINIMUM_GLOBAL_RUN_CAP, MINIMUM_INSPECTOR_PANE_WIDTH, MINIMUM_NAVIGATION_PANE_WIDTH, preferenceInspectorViews, type Appearance, type NotificationPreferences, type PanePreferences, type Preferences, type WindowPreference } from "../shared/preferences.js";
 
 const defaults: Preferences = {
   appearance: "system",
   expandThinking: false,
   globalRunCap: DEFAULT_GLOBAL_RUN_CAP,
   notifications: { runCompleted: false, runFailed: true, attentionRequired: true },
-  panes: { inspectorVisible: false, inspectorView: "details" },
+  panes: {
+    inspectorVisible: false,
+    inspectorView: "details",
+    navigationWidth: DEFAULT_NAVIGATION_PANE_WIDTH,
+    inspectorWidth: DEFAULT_INSPECTOR_PANE_WIDTH,
+  },
   recentSelection: {},
   preferredTerminal: "system",
 };
@@ -29,6 +34,14 @@ function savedWindow(value: unknown): WindowPreference | undefined {
   };
 }
 let preferenceWrites = Promise.resolve();
+
+function isPaneWidth(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isInteger(value) && (value as number) >= minimum && (value as number) <= maximum;
+}
+
+function savedPaneWidth(value: unknown, minimum: number, maximum: number, fallback: number) {
+  return isPaneWidth(value, minimum, maximum) ? value : fallback;
+}
 
 export async function loadPreferences(directory: string): Promise<Preferences> {
   try {
@@ -62,6 +75,8 @@ export async function loadPreferences(directory: string): Promise<Preferences> {
         inspectorVisible: panes.inspectorVisible === true,
         inspectorView: preferenceInspectorViews.includes(panes.inspectorView as PanePreferences["inspectorView"])
           ? panes.inspectorView as PanePreferences["inspectorView"] : defaults.panes.inspectorView,
+        navigationWidth: savedPaneWidth(panes.navigationWidth, MINIMUM_NAVIGATION_PANE_WIDTH, MAXIMUM_NAVIGATION_PANE_WIDTH, defaults.panes.navigationWidth),
+        inspectorWidth: savedPaneWidth(panes.inspectorWidth, MINIMUM_INSPECTOR_PANE_WIDTH, MAXIMUM_INSPECTOR_PANE_WIDTH, defaults.panes.inspectorWidth),
       },
       recentSelection: {
         ...(recentProjectPath ? { projectPath: recentProjectPath } : {}),
@@ -128,12 +143,20 @@ export async function saveNotificationPreferences(directory: string, value: unkn
 export async function savePanePreferences(directory: string, value: unknown): Promise<Preferences> {
   if (!value || typeof value !== "object") throw new Error("Unknown pane preferences");
   const panes = value as Partial<PanePreferences>;
-  if (typeof panes.inspectorVisible !== "boolean" || !preferenceInspectorViews.includes(panes.inspectorView as PanePreferences["inspectorView"])) {
+  if (typeof panes.inspectorVisible !== "boolean"
+    || !preferenceInspectorViews.includes(panes.inspectorView as PanePreferences["inspectorView"])
+    || !isPaneWidth(panes.navigationWidth, MINIMUM_NAVIGATION_PANE_WIDTH, MAXIMUM_NAVIGATION_PANE_WIDTH)
+    || !isPaneWidth(panes.inspectorWidth, MINIMUM_INSPECTOR_PANE_WIDTH, MAXIMUM_INSPECTOR_PANE_WIDTH)) {
     throw new Error("Unknown pane preferences");
   }
   return updatePreferences(directory, (current) => ({
     ...current,
-    panes: { inspectorVisible: panes.inspectorVisible!, inspectorView: panes.inspectorView! },
+    panes: {
+      inspectorVisible: panes.inspectorVisible!,
+      inspectorView: panes.inspectorView!,
+      navigationWidth: panes.navigationWidth!,
+      inspectorWidth: panes.inspectorWidth!,
+    },
   }));
 }
 

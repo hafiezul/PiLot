@@ -3,11 +3,12 @@ import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
 import { diagnosticCategories, diagnosticCategoryLabels, type DiagnosticBundle, type DiagnosticCategory } from "../shared/diagnostics";
 import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
-import { MAXIMUM_GLOBAL_RUN_CAP, MINIMUM_GLOBAL_RUN_CAP, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type Preferences, type RecentSelection } from "../shared/preferences";
+import { DEFAULT_INSPECTOR_PANE_WIDTH, DEFAULT_NAVIGATION_PANE_WIDTH, MAXIMUM_GLOBAL_RUN_CAP, MAXIMUM_INSPECTOR_PANE_WIDTH, MAXIMUM_NAVIGATION_PANE_WIDTH, MINIMUM_GLOBAL_RUN_CAP, MINIMUM_INSPECTOR_PANE_WIDTH, MINIMUM_NAVIGATION_PANE_WIDTH, MINIMUM_PRIMARY_PANE_WIDTH, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type Preferences, type RecentSelection } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
 import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectEnvironmentOverride, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { AgentSettings } from "./agent-settings";
+import { COMPACT_LAYOUT_MEDIA, DEFAULT_PANE_WIDTHS, PaneDivider, constrainedPaneWidths, type PaneName, type PaneShellStyle, type PaneWidths } from "./panes";
 import { ProviderIcon } from "./provider-icons";
 import "./styles.css";
 
@@ -2386,8 +2387,6 @@ function useWindowActive() {
   return windowActive;
 }
 
-const COMPACT_LAYOUT_MEDIA = "(max-width: 1080px)";
-
 function App() {
   const [state, setState] = useState<StartupState>();
   const [projects, setProjects] = useState<ProjectsState>();
@@ -2408,6 +2407,9 @@ function App() {
   const [showDetails, setShowDetails] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [compactLayout, setCompactLayout] = useState(() => matchMedia(COMPACT_LAYOUT_MEDIA).matches);
+  const [shellWidth, setShellWidth] = useState(() => window.innerWidth);
+  const [paneWidths, setPaneWidths] = useState<PaneWidths>(DEFAULT_PANE_WIDTHS);
+  const [committedPaneWidths, setCommittedPaneWidths] = useState<PaneWidths>(DEFAULT_PANE_WIDTHS);
   const windowActive = useWindowActive();
   const [actionError, setActionError] = useState<ActionFailure>();
   const [taskDetails, setTaskDetails] = useState<TaskModelState>();
@@ -2419,6 +2421,7 @@ function App() {
   const [historyError, setHistoryError] = useState("");
   const [taskRevision, setTaskRevision] = useState(0);
   const [historyDraft, setHistoryDraft] = useState<{ taskPath: string; text: string; version: number }>();
+  const shell = useRef<HTMLDivElement>(null);
   const settingsButton = useRef<HTMLButtonElement>(null);
   const mobileNavigationButton = useRef<HTMLButtonElement>(null);
   const navigationPanel = useRef<HTMLElement>(null);
@@ -2458,6 +2461,12 @@ function App() {
     setSelectedTaskPath(recentTask?.path);
     setShowDetails(preferences.panes.inspectorVisible);
     setInspectorView(preferences.panes.inspectorView);
+    const preferredPaneWidths = {
+      navigation: preferences.panes.navigationWidth,
+      inspector: preferences.panes.inspectorWidth,
+    };
+    setPaneWidths(preferredPaneWidths);
+    setCommittedPaneWidths(preferredPaneWidths);
     applyAppearance(preferences.appearance);
     setDesktopPreferencesLoaded(true);
     setActionError(selectionFailure ? startupFailure(selectionFailure.reason) : undefined);
@@ -2597,6 +2606,24 @@ function App() {
   const changesPollingInterval = changesInspectorVisible ? 1_500 : 3_000;
   const changePathsKey = taskChanges?.files.flatMap(({ path, previousPath }) => previousPath ? [path, previousPath] : [path]).join("\0") ?? "";
   const changePaths = useMemo(() => changePathsKey ? changePathsKey.split("\0") : [], [changePathsKey]);
+  const effectivePaneWidths = useMemo(() => constrainedPaneWidths(shellWidth, paneWidths), [paneWidths, shellWidth]);
+  const navigationMaximum = MAXIMUM_NAVIGATION_PANE_WIDTH;
+  const inspectorMaximum = Math.min(MAXIMUM_INSPECTOR_PANE_WIDTH, Math.max(
+    MINIMUM_INSPECTOR_PANE_WIDTH,
+    shellWidth - MINIMUM_PRIMARY_PANE_WIDTH - effectivePaneWidths.navigation,
+  ));
+  const paneShellStyle: PaneShellStyle = {
+    "--navigation-pane-width": `${effectivePaneWidths.navigation}px`,
+    "--inspector-pane-width": `${effectivePaneWidths.inspector}px`,
+    "--primary-pane-min-width": `${MINIMUM_PRIMARY_PANE_WIDTH}px`,
+  };
+  const previewPaneWidth = useCallback((pane: PaneName, width: number) => {
+    setPaneWidths((current) => ({ ...current, [pane]: width }));
+  }, []);
+  const commitPaneWidth = useCallback((pane: PaneName, width: number) => {
+    setPaneWidths((current) => ({ ...current, [pane]: width }));
+    setCommittedPaneWidths((current) => ({ ...current, [pane]: width }));
+  }, []);
   useEffect(() => {
     setTaskChanges(undefined);
     setChangesError("");
@@ -2709,6 +2736,15 @@ function App() {
     media.addEventListener("change", updateLayout);
     return () => media.removeEventListener("change", updateLayout);
   }, []);
+  useLayoutEffect(() => {
+    if (showSettings || !shell.current) return;
+    const element = shell.current;
+    const updateWidth = () => setShellWidth(element.clientWidth || window.innerWidth);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [showSettings]);
   useEffect(() => {
     const media = matchMedia("(max-width: 679px)");
     const hideNavigationWhenWide = () => { if (!media.matches) setNavigationOpen(false); };
@@ -2754,11 +2790,16 @@ function App() {
   useEffect(() => {
     if (!desktopPreferencesLoaded) return;
     const timer = window.setTimeout(() => {
-      void window.pilot.setPanePreferences({ inspectorVisible: showDetails, inspectorView })
-        .catch((reason) => reportActionError(reason, "Check PiLot preference-file access and try changing the Inspector again."));
+      void window.pilot.setPanePreferences({
+        inspectorVisible: showDetails,
+        inspectorView,
+        navigationWidth: committedPaneWidths.navigation,
+        inspectorWidth: committedPaneWidths.inspector,
+      })
+        .catch((reason) => reportActionError(reason, "Check PiLot preference-file access and try changing the pane layout again."));
     }, 100);
     return () => window.clearTimeout(timer);
-  }, [desktopPreferencesLoaded, showDetails, inspectorView, reportActionError]);
+  }, [committedPaneWidths.inspector, committedPaneWidths.navigation, desktopPreferencesLoaded, showDetails, inspectorView, reportActionError]);
   useEffect(() => {
     if (!desktopPreferencesLoaded || showHome || !selectedProject) return;
     const taskPath = selectedProject.tasks.some(({ path }) => path === selectedTaskPath) ? selectedTaskPath : undefined;
@@ -2780,7 +2821,7 @@ function App() {
     <>
       <a className="skip-link" href="#content">Skip to content</a>
       <div className="window-bar" aria-hidden="true" />
-      <div className="shell">
+      <div ref={shell} className="shell" style={paneShellStyle}>
         <header className="mobile-toolbar">
           <button ref={mobileNavigationButton} type="button" className="mobile-navigation-button" aria-label={navigationOpen ? "Close navigation" : "Open navigation"} aria-controls="workspace-navigation" aria-expanded={navigationOpen} onClick={() => navigationOpen ? closeNavigation(true) : setNavigationOpen(true)}>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" /></svg>
@@ -2840,6 +2881,7 @@ function App() {
             <button ref={settingsButton} data-action="view.settings" className="settings-button" aria-label="Settings" title="Settings" onClick={() => { setNavigationOpen(false); setSettingsDestination("general"); setShowSettings(true); }}><span aria-hidden="true">⚙</span></button>
           </div>
         </nav>
+        <PaneDivider pane="navigation" controls="workspace-navigation" width={effectivePaneWidths.navigation} preferredWidth={paneWidths.navigation} defaultWidth={DEFAULT_NAVIGATION_PANE_WIDTH} minimum={MINIMUM_NAVIGATION_PANE_WIDTH} maximum={navigationMaximum} enabled={!compactLayout} onPreview={(width) => previewPaneWidth("navigation", width)} onCommit={(width) => commitPaneWidth("navigation", width)} />
         {navigationOpen && <button type="button" className="navigation-scrim" aria-label="Close navigation" onClick={() => closeNavigation(true)} />}
 
         <main id="content" className="workspace-main" tabIndex={-1}>
@@ -2885,8 +2927,9 @@ function App() {
             onError={reportActionError}
           /> : <CommandCenter startup={state} projects={projects} runStates={runStates} onOpenTask={openTaskFromHome} onCreateTask={() => void createSelectedTask()} />}
         </main>
+        <PaneDivider pane="inspector" controls="workspace-inspector" width={effectivePaneWidths.inspector} preferredWidth={paneWidths.inspector} defaultWidth={DEFAULT_INSPECTOR_PANE_WIDTH} minimum={MINIMUM_INSPECTOR_PANE_WIDTH} maximum={inspectorMaximum} enabled={!compactLayout} onPreview={(width) => previewPaneWidth("inspector", width)} onCommit={(width) => commitPaneWidth("inspector", width)} />
 
-        <aside aria-label="Inspector" className={`inspector${showDetails ? " details-visible" : ""}`}>
+        <aside id="workspace-inspector" aria-label="Inspector" className={`inspector${showDetails ? " details-visible" : ""}`}>
           <InspectorTabs selected={inspectorView} changeCount={taskChanges?.files.length ?? 0} historyPaths={taskHistory?.pathCount ?? 0} onSelect={setInspectorView} />
           <button type="button" className="inspector-close" aria-label="Close Inspector" onClick={closeDetails}>×</button>
           {inspectorView === "details" ? <div id="inspector-details-panel" className="inspector-body" role="tabpanel" aria-labelledby="inspector-details-tab">

@@ -12,6 +12,14 @@ _Avoid_: PiLot profile, app account
 The desktop interface through which a user works with Pi agents and their projects.
 _Avoid_: Pi wrapper, Pi TUI wrapper
 
+**Navigation**:
+The pane where a user selects Projects and their active Tasks.
+_Avoid_: Left pane, sidebar, project browser
+
+**Inspector**:
+The contextual pane where a user reviews Details, Changes, and History for the current Project or Task.
+_Avoid_: Right pane, details pane, side panel
+
 **Available provider**:
 A provider in the Pi environment that currently exposes at least one model Pi can use.
 _Avoid_: Configured provider, connected provider

@@ -684,6 +684,240 @@ test("keeps theme controls and focus indicators distinguishable", async () => {
   }
 });
 
+test("provides accessible Navigation and Inspector dividers only in the wide layout", async () => {
+  const environment = await fixture();
+  const app = await launch(environment.agentDir);
+  try {
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const navigationDivider = app.window.getByRole("separator", { name: "Resize Navigation" });
+    const inspectorDivider = app.window.getByRole("separator", { name: "Resize Inspector" });
+
+    await expect(navigationDivider).toBeVisible();
+    await expect(inspectorDivider).toBeVisible();
+    await expect(navigationDivider).toHaveAttribute("aria-orientation", "vertical");
+    await expect(navigationDivider).toHaveAttribute("aria-valuenow", "230");
+    await expect(navigationDivider).toHaveAttribute("aria-valuetext", "230 pixels");
+    await expect(navigationDivider).toHaveAccessibleDescription(/double-click or press Enter to reset/i);
+    await expect(inspectorDivider).toHaveAttribute("aria-valuenow", "360");
+    await expect(inspectorDivider).toHaveAttribute("aria-valuetext", "360 pixels");
+    await expect(inspectorDivider).toHaveAccessibleDescription(/double-click or press Enter to reset/i);
+    await expect(navigation).toHaveCSS("width", "230px");
+    await expect(inspector).toHaveCSS("width", "360px");
+
+    const tooltip = navigationDivider.locator(".pane-divider-tooltip");
+    await navigationDivider.focus();
+    await expect(tooltip).toHaveCSS("opacity", "1");
+    await app.window.keyboard.press("Escape");
+    await expect(tooltip).toHaveCSS("opacity", "0");
+    await expect(navigationDivider).toBeFocused();
+    await app.window.getByRole("main").focus();
+    await navigationDivider.hover();
+    await expect(tooltip).toHaveCSS("opacity", "1");
+    await expect(tooltip).toHaveCSS("pointer-events", "auto");
+
+    await app.window.emulateMedia({ forcedColors: "active" });
+    await navigationDivider.focus();
+    expect(await navigationDivider.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { style: style.outlineStyle, width: style.outlineWidth };
+    })).toEqual({ style: "solid", width: "2px" });
+    await app.window.emulateMedia({ forcedColors: "none" });
+
+    await app.window.setViewportSize({ width: 1_080, height: 760 });
+    await expect(navigationDivider).toBeHidden();
+    await expect(inspectorDivider).toBeHidden();
+    await expect(navigation).toHaveCSS("width", "210px");
+    expect(await app.window.locator("body").ariaSnapshot()).not.toContain("Drag to resize; double-click or press Enter to reset.");
+
+    await app.window.setViewportSize({ width: 1_440, height: 900 });
+    await expect(navigationDivider).toBeVisible();
+    await expect(inspectorDivider).toBeVisible();
+    await expect(navigation).toHaveCSS("width", "230px");
+    await expect(inspector).toHaveCSS("width", "360px");
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("resizes and resets Navigation and Inspector from the keyboard", async () => {
+  const environment = await fixture();
+  const preferencesPath = path.join(environment.agentDir, "pilot-user-data", "preferences.json");
+  const app = await launch(environment.agentDir);
+  try {
+    await app.window.setViewportSize({ width: 1_440, height: 900 });
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const navigationDivider = app.window.getByRole("separator", { name: "Resize Navigation" });
+    const inspectorDivider = app.window.getByRole("separator", { name: "Resize Inspector" });
+
+    await navigationDivider.focus();
+    await expect(navigationDivider).toBeFocused();
+    await app.window.keyboard.press("ArrowRight");
+    await app.window.keyboard.press("Shift+ArrowRight");
+    await expect(navigation).toHaveCSS("width", "290px");
+    await expect(navigationDivider).toHaveAttribute("aria-valuenow", "290");
+    await expect.poll(async () => JSON.parse(await readFile(preferencesPath, "utf8").catch(() => "{}")).panes?.navigationWidth).toBe(290);
+    await app.window.keyboard.press("Enter");
+    await expect(navigation).toHaveCSS("width", "230px");
+
+    await inspectorDivider.focus();
+    await app.window.keyboard.press("ArrowLeft");
+    await app.window.keyboard.press("Shift+ArrowRight");
+    await expect(inspector).toHaveCSS("width", "320px");
+    await app.window.keyboard.press("Home");
+    await expect(inspector).toHaveCSS("width", "600px");
+    await app.window.keyboard.press("End");
+    await expect(inspector).toHaveCSS("width", "280px");
+    await app.window.keyboard.press("Enter");
+    await expect(inspector).toHaveCSS("width", "360px");
+    await expect.poll(async () => JSON.parse(await readFile(preferencesPath, "utf8").catch(() => "{}")).panes).toMatchObject({
+      navigationWidth: 230,
+      inspectorWidth: 360,
+    });
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("resizes live by pointer and resets only the double-clicked pane", async () => {
+  const environment = await fixture();
+  const preferencesPath = path.join(environment.agentDir, "pilot-user-data", "preferences.json");
+  const app = await launch(environment.agentDir);
+  try {
+    await app.window.setViewportSize({ width: 1_440, height: 900 });
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const navigationDivider = app.window.getByRole("separator", { name: "Resize Navigation" });
+    const inspectorDivider = app.window.getByRole("separator", { name: "Resize Inspector" });
+    const savedPanes = async () => JSON.parse(await readFile(preferencesPath, "utf8").catch(() => "{}")).panes;
+    await expect.poll(async () => (await savedPanes())?.navigationWidth).toBe(230);
+
+    let dividerBounds = await navigationDivider.boundingBox();
+    expect(dividerBounds).not.toBeNull();
+    let pointer = { x: dividerBounds!.x + dividerBounds!.width / 2, y: dividerBounds!.y + 120 };
+    await app.window.mouse.move(pointer.x, pointer.y);
+    await app.window.mouse.down();
+    await app.window.mouse.move(pointer.x + 37, pointer.y);
+    await expect(navigation).toHaveCSS("width", "267px");
+    await app.window.waitForTimeout(200);
+    expect((await savedPanes()).navigationWidth).toBe(230);
+    await app.window.keyboard.press("Escape");
+    await expect(navigation).toHaveCSS("width", "230px");
+    await app.window.mouse.up();
+
+    dividerBounds = await navigationDivider.boundingBox();
+    pointer = { x: dividerBounds!.x + dividerBounds!.width / 2, y: dividerBounds!.y + 120 };
+    await app.window.mouse.move(pointer.x, pointer.y);
+    await app.window.mouse.down();
+    await app.window.mouse.move(pointer.x + 37, pointer.y);
+    await app.window.mouse.up();
+    await expect(navigation).toHaveCSS("width", "267px");
+    await expect.poll(async () => (await savedPanes()).navigationWidth).toBe(267);
+
+    dividerBounds = await inspectorDivider.boundingBox();
+    pointer = { x: dividerBounds!.x + dividerBounds!.width / 2, y: dividerBounds!.y + 120 };
+    await app.window.mouse.move(pointer.x, pointer.y);
+    await app.window.mouse.down();
+    await app.window.mouse.move(pointer.x - 27, pointer.y);
+    await app.window.mouse.up();
+    await expect(inspector).toHaveCSS("width", "387px");
+    await expect.poll(async () => (await savedPanes()).inspectorWidth).toBe(387);
+
+    await navigationDivider.dblclick({ position: { x: 4, y: 120 } });
+    await expect(navigation).toHaveCSS("width", "230px");
+    await expect(inspector).toHaveCSS("width", "387px");
+    await inspectorDivider.dblclick({ position: { x: 4, y: 120 } });
+    await expect(inspector).toHaveCSS("width", "360px");
+    await expect.poll(savedPanes).toMatchObject({ navigationWidth: 230, inspectorWidth: 360 });
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("temporarily clamps remembered widths and restores them after responsive layout changes", async () => {
+  const environment = await fixture();
+  const userData = path.join(environment.root, "pilot-user-data");
+  const preferencesPath = path.join(userData, "preferences.json");
+  await mkdir(userData, { recursive: true });
+  await writeFile(preferencesPath, JSON.stringify({
+    panes: {
+      inspectorVisible: false,
+      inspectorView: "details",
+      navigationWidth: 360,
+      inspectorWidth: 600,
+    },
+  }));
+  const app = await launch(environment.agentDir, false, { PILOT_USER_DATA_DIR: userData });
+  try {
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    const content = app.window.getByRole("main");
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    const navigationDivider = app.window.getByRole("separator", { name: "Resize Navigation" });
+    const inspectorDivider = app.window.getByRole("separator", { name: "Resize Inspector" });
+
+    await app.window.setViewportSize({ width: 1_081, height: 760 });
+    await expect(navigation).toHaveCSS("width", "360px");
+    await expect(inspector).toHaveCSS("width", "281px");
+    await expect(content).toHaveCSS("width", "440px");
+    await expect.poll(async () => JSON.parse(await readFile(preferencesPath, "utf8")).panes).toMatchObject({
+      navigationWidth: 360,
+      inspectorWidth: 600,
+    });
+
+    await inspectorDivider.click({ position: { x: 4, y: 120 } });
+    await app.window.waitForTimeout(200);
+    expect(JSON.parse(await readFile(preferencesPath, "utf8")).panes.inspectorWidth).toBe(600);
+
+    await navigationDivider.focus();
+    await app.window.keyboard.press("ArrowLeft");
+    await expect(navigation).toHaveCSS("width", "350px");
+    await expect(inspector).toHaveCSS("width", "291px");
+    await app.window.keyboard.press("ArrowRight");
+    await expect(navigation).toHaveCSS("width", "360px");
+    await expect(inspector).toHaveCSS("width", "281px");
+
+    let dividerBounds = await navigationDivider.boundingBox();
+    let pointer = { x: dividerBounds!.x + dividerBounds!.width / 2, y: dividerBounds!.y + 120 };
+    await app.window.mouse.move(pointer.x, pointer.y);
+    await app.window.mouse.down();
+    await app.window.mouse.move(pointer.x - 10, pointer.y);
+    await expect(navigation).toHaveCSS("width", "350px");
+    await app.window.mouse.move(pointer.x, pointer.y);
+    await expect(navigation).toHaveCSS("width", "360px");
+    await app.window.mouse.up();
+
+    await app.window.setViewportSize({ width: 1_440, height: 900 });
+    await expect(navigation).toHaveCSS("width", "360px");
+    await expect(inspector).toHaveCSS("width", "600px");
+
+    dividerBounds = await navigationDivider.boundingBox();
+    pointer = { x: dividerBounds!.x + dividerBounds!.width / 2, y: dividerBounds!.y + 120 };
+    await app.window.mouse.move(pointer.x, pointer.y);
+    await app.window.mouse.down();
+    await app.window.mouse.move(pointer.x - 40, pointer.y);
+    await expect(navigation).toHaveCSS("width", "320px");
+    await app.window.setViewportSize({ width: 1_080, height: 760 });
+    await expect(navigationDivider).toBeHidden();
+    await expect(navigation).toHaveCSS("width", "210px");
+    await app.window.mouse.up();
+
+    await app.window.setViewportSize({ width: 1_440, height: 900 });
+    await expect(navigation).toHaveCSS("width", "360px");
+    await expect(inspector).toHaveCSS("width", "600px");
+    await expect.poll(async () => JSON.parse(await readFile(preferencesPath, "utf8")).panes).toMatchObject({
+      navigationWidth: 360,
+      inspectorWidth: 600,
+    });
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("keeps core surfaces stable across supported appearances and viewport breakpoints", async () => {
   const environment = await fixture();
   const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
