@@ -79,7 +79,7 @@ Playwright runs keep the Electron window hidden by default. Use `npm test -- --h
 
 The tests create temporary Pi and PiLot data, use fixture credentials, run serially, and remove their data afterward. They do not require your canonical `~/.pi/agent` environment.
 
-Generated output is written to `dist/` and Playwright failures to `test-results/`; both are ignored by Git.
+Generated output is written to `dist/`. Playwright failures and representative cross-theme/cross-viewport screenshots are written to `test-results/`; both directories are ignored by Git. The platform-smoke workflow uploads `test-results/` so the macOS and Windows UI evidence can be reviewed.
 
 ## Project structure
 

@@ -2386,6 +2386,8 @@ function useWindowActive() {
   return windowActive;
 }
 
+const COMPACT_LAYOUT_MEDIA = "(max-width: 1080px)";
+
 function App() {
   const [state, setState] = useState<StartupState>();
   const [projects, setProjects] = useState<ProjectsState>();
@@ -2405,7 +2407,7 @@ function App() {
   const [taskExternallyChanged, setTaskExternallyChanged] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
-  const [compactLayout, setCompactLayout] = useState(() => matchMedia("(max-width: 1040px)").matches);
+  const [compactLayout, setCompactLayout] = useState(() => matchMedia(COMPACT_LAYOUT_MEDIA).matches);
   const windowActive = useWindowActive();
   const [actionError, setActionError] = useState<ActionFailure>();
   const [taskDetails, setTaskDetails] = useState<TaskModelState>();
@@ -2695,7 +2697,7 @@ function App() {
     return () => window.removeEventListener("focusin", trackFocus);
   }, []);
   useEffect(() => {
-    const media = matchMedia("(max-width: 1040px)");
+    const media = matchMedia(COMPACT_LAYOUT_MEDIA);
     const updateLayout = () => {
       if (media.matches && focusWasInInspector.current) {
         detailsReturnFocus.current = document.getElementById("content");

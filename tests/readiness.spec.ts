@@ -684,6 +684,113 @@ test("keeps theme controls and focus indicators distinguishable", async () => {
   }
 });
 
+test("keeps core surfaces stable across supported appearances and viewport breakpoints", async () => {
+  const environment = await fixture();
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+  const appearances = [
+    { name: "light-override", label: "Light", value: "light", system: "dark", expected: "light" },
+    { name: "dark-override", label: "Dark", value: "dark", system: "light", expected: "dark" },
+    { name: "system-light", label: "System", value: "system", system: "light", expected: "light" },
+    { name: "system-dark", label: "System", value: "system", system: "dark", expected: "dark" },
+  ] as const;
+  const viewports = [
+    { name: "minimum", width: 320, height: 640 },
+    { name: "mobile-edge", width: 679, height: 720 },
+    { name: "two-pane-start", width: 680, height: 720 },
+    { name: "two-pane-edge", width: 1_080, height: 760 },
+    { name: "three-pane-start", width: 1_081, height: 760 },
+    { name: "wide", width: 1_440, height: 900 },
+  ] as const;
+  const layoutDefects = () => app.window.evaluate(() => {
+    const defects: string[] = [];
+    if (document.documentElement.scrollWidth > window.innerWidth + 1) {
+      defects.push(`document:${document.documentElement.scrollWidth}/${window.innerWidth}`);
+    }
+    for (const selector of [".shell", ".mobile-toolbar", ".navigation", ".workspace-main", ".inspector", ".task-page", ".task-composer", ".settings-shell", ".settings-navigation", ".settings-main"]) {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element || element.getClientRects().length === 0) continue;
+      const bounds = element.getBoundingClientRect();
+      if (bounds.left < -0.5 || bounds.right > window.innerWidth + 0.5 || element.scrollWidth > element.clientWidth + 1) {
+        defects.push(`${selector}:${element.scrollWidth}/${element.clientWidth}@${bounds.left}-${bounds.right}`);
+      }
+    }
+    return defects;
+  });
+  const evidenceCases = new Set([
+    "settings-light-override-minimum",
+    "settings-dark-override-wide",
+    "settings-system-light-two-pane-start",
+    "settings-system-dark-three-pane-start",
+    "task-light-override-wide",
+    "task-dark-override-minimum",
+    "task-system-light-three-pane-start",
+    "task-system-dark-two-pane-start",
+  ]);
+  const capture = async (surface: string, appearance: string, viewport: string) => {
+    const name = `${surface}-${appearance}-${viewport}`;
+    if (!evidenceCases.has(name)) return;
+    const screenshot = test.info().outputPath(`${name}.png`);
+    await app.window.screenshot({ path: screenshot, animations: "disabled" });
+    await test.info().attach(name, { path: screenshot, contentType: "image/png" });
+  };
+  const verifyMatrix = async (
+    surface: string,
+    appearance: typeof appearances[number],
+    verifyViewport?: (viewport: typeof viewports[number]) => Promise<void>,
+  ) => {
+    for (const viewport of viewports) {
+      await app.window.setViewportSize({ width: viewport.width, height: viewport.height });
+      await expect.poll(() => app.window.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(appearance.expected);
+      await verifyViewport?.(viewport);
+      expect(await layoutDefects()).toEqual([]);
+      await capture(surface, appearance.name, viewport.name);
+    }
+  };
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("main").getByRole("button", { name: "Untitled task", exact: true }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await expect(composer).toBeVisible();
+    await expect(composer.getByRole("button", { name: /Provider and model/ })).toBeVisible();
+
+    for (const appearance of appearances) {
+      await app.window.setViewportSize({ width: 1_180, height: 760 });
+      await app.window.emulateMedia({ colorScheme: appearance.system, reducedMotion: "reduce" });
+      await app.window.getByRole("button", { name: "Settings" }).click();
+      const settings = app.window.getByRole("main", { name: "Settings" });
+      const appearanceControl = settings.getByRole("group", { name: "Appearance" }).getByRole("radio", { name: appearance.label });
+      await appearanceControl.check();
+      await expect(appearanceControl).toBeChecked();
+      await expect.poll(() => app.window.evaluate(async () => (await (window as any).pilot.getPreferences()).appearance)).toBe(appearance.value);
+      await verifyMatrix("settings", appearance);
+
+      await app.window.setViewportSize({ width: 1_180, height: 760 });
+      await app.window.getByRole("button", { name: "Back to command center" }).click();
+      await expect(composer).toBeVisible();
+      expect(await app.window.evaluate(() => ({
+        reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
+        transitionDuration: getComputedStyle(document.querySelector(".skip-link")!).transitionDuration,
+      }))).toEqual({ reducedMotion: true, transitionDuration: "0s" });
+      await verifyMatrix("task", appearance, async (viewport) => {
+        if (viewport.width <= 679) {
+          await expect(app.window.locator(".mobile-toolbar")).toBeVisible();
+          await expect(app.window.getByRole("navigation", { name: "Projects and tasks" })).toBeHidden();
+        } else {
+          await expect(app.window.locator(".mobile-toolbar")).toBeHidden();
+          await expect(app.window.getByRole("navigation", { name: "Projects and tasks" })).toBeVisible();
+        }
+        if (viewport.width <= 1_080) await expect(app.window.getByRole("complementary", { name: "Inspector" })).toBeHidden();
+        else await expect(app.window.getByRole("complementary", { name: "Inspector" })).toBeVisible();
+      });
+    }
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("hides current-surface actions from the Command Palette", async () => {
   const environment = await fixture();
   const app = await launch(environment.agentDir);
@@ -3731,7 +3838,8 @@ test("layers explicit Project overrides over the captured login environment", as
     await composer.getByRole("combobox", { name: "Prompt" }).fill("!printf '%s|%s|%s|%s|' \"$PILOT_CAPTURED_ONLY\" \"$PILOT_LAYERED\" \"$CAPTURE_UNICODE_HOST\" \"${CAPTURE_SHOULD_UNSET-unset}\"; pilot-login-tool");
     await composer.getByRole("button", { name: "Send" }).click();
     const timeline = app.window.getByRole("region", { name: "Run timeline" });
-    await expect(timeline).toContainText("captured-from-login|project-override|captured-工具-ü|unset|tool-from-profile");
+    await expect(timeline).toContainText("captured-from-login|project-override|captured-工具-ü|unset|");
+    await expect(timeline).toContainText("tool-from-profile");
     await expect(timeline.getByRole("article").last()).toContainText("Settled");
 
     await writeFile(path.join(loginHome, ".bash_profile"), "export PILOT_CAPTURED_ONLY=changed-after-startup\n");
@@ -3740,7 +3848,8 @@ test("layers explicit Project overrides over the captured login environment", as
     const tool = timeline.locator('details[aria-label="bash tool, succeeded"]').last();
     await expect(tool).toBeVisible();
     await tool.locator("summary").click();
-    await expect(tool).toContainText("captured-from-login|project-override|captured-工具-ü|unset|tool-from-profile");
+    await expect(tool).toContainText("captured-from-login|project-override|captured-工具-ü|unset|");
+    await expect(tool).toContainText("tool-from-profile");
     await expect(timeline).toContainText("Environment checked.");
   } finally {
     await close(app);

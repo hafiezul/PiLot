@@ -33,4 +33,11 @@ jobs:
       - name: Exercise platform lifecycle, shells, and cleanup
         run: |
           npx playwright test tests/lifecycle.spec.ts
-          npx playwright test tests/readiness.spec.ts --grep "keeps the native title-bar shell fixed|continues an active Run after the last window closes|layers explicit Project overrides|blocks a Run with actionable configured-shell guidance|runs and aborts a Local Task|cleans up an inline command process tree before quitting"
+          npx playwright test tests/readiness.spec.ts --timeout 60000 --grep "keeps core surfaces stable across supported appearances and viewport breakpoints|keeps the native title-bar shell fixed|continues an active Run after the last window closes|layers explicit Project overrides|blocks a Run with actionable configured-shell guidance|runs and aborts a Local Task|cleans up an inline command process tree before quitting"
+      - name: Upload UI verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-smoke-${{ matrix.os }}
+          path: test-results
+          if-no-files-found: ignore
