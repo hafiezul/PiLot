@@ -70,6 +70,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
 main { min-height: 0; overflow-y: auto; background: #f7f7f6; padding: 32px 42px; }
 .topbar { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 72px; }
 .provider-setup button { border: 1px solid #c8c8c4; border-radius: 5px; padding: 6px 10px; color: inherit; background: #fdfdfc; cursor: pointer; }
+.provider-setup button:disabled { cursor: not-allowed; opacity: .55; }
 h1 { margin: 5px 0 0; font-size: 22px; line-height: 1.25; letter-spacing: -.02em; }
 h2 { margin: 5px 0 8px; font-size: 20px; letter-spacing: -.015em; }
 h3 { margin: 0 0 5px; font-size: 14px; }
@@ -538,6 +539,9 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .task-model-guidance { margin: 12px 0 0; }
 .key-form, .oauth-flow { margin: 0 0 20px; padding: 14px; background: #f1f1ef; }
 .key-form { display: grid; grid-template-columns: 1fr auto auto; align-items: end; gap: 8px; }
+.provider-login-status { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 12px; padding: 11px 0; border-top: 1px solid #e3e3df; border-bottom: 1px solid #e3e3df; }
+.provider-login-status p { margin: 0; color: var(--diff-hunk-text); font-size: 12px; line-height: 1.45; }
+.provider-login-status button { flex: none; }
 .oauth-flow p { margin: 7px 0; font-size: 12px; }
 .oauth-flow code { display: inline-block; margin-bottom: 10px; font-size: 18px; letter-spacing: .08em; }
 .oauth-flow button { margin: 6px 6px 0 0; }

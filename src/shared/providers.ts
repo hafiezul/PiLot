@@ -26,24 +26,44 @@ export type ModelSummary = {
   provider: string;
 };
 
+export type ProviderLoginFlow = {
+  id: string;
+  providerId: string;
+  providerName: string;
+};
+
 export type ProviderState = {
   models: ModelSummary[];
   providers: ProviderSummary[];
+  activeLogin?: ProviderLoginFlow;
 };
 
-export type OAuthEvent =
-  | { type: "auth"; providerName: string; instructions?: string; manualInput: boolean }
-  | { type: "device_code"; providerName: string; userCode: string; verificationUri: string }
-  | { type: "prompt"; providerName: string; message: string; placeholder?: string; allowEmpty?: boolean }
-  | { type: "select"; providerName: string; message: string; options: Array<{ id: string; label: string }> }
-  | { type: "progress"; providerName: string; message: string };
+type OAuthFlowEvent = {
+  flowId: string;
+  providerId: string;
+  providerName: string;
+};
+
+export type OAuthEvent = OAuthFlowEvent & (
+  | { type: "started" }
+  | { type: "auth"; instructions?: string; manualInput: false }
+  | { type: "auth"; instructions?: string; manualInput: true; requestId: string }
+  | { type: "device_code"; userCode: string; verificationUri: string }
+  | { type: "prompt"; requestId: string; message: string; placeholder?: string; allowEmpty?: boolean }
+  | { type: "select"; requestId: string; message: string; options: Array<{ id: string; label: string }> }
+  | { type: "progress"; message: string }
+  | { type: "success" }
+  | { type: "failure"; message: string }
+  | { type: "cancelled" }
+);
 
 export type PiLotApi = {
   getProviderState(): Promise<ProviderState>;
   setApiKey(provider: string, key: string): Promise<ProviderState>;
   removeApiKey(provider: string): Promise<ProviderState>;
   login(provider: string): Promise<ProviderState>;
+  cancelLogin(flowId: string): Promise<ProviderState>;
   logout(provider: string): Promise<ProviderState>;
-  respondToOAuth(value?: string): Promise<void>;
+  respondToOAuth(flowId: string, requestId: string, value?: string): Promise<boolean>;
   onOAuthEvent(listener: (event: OAuthEvent) => void): () => void;
 };

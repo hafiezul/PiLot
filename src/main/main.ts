@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadPreferences, saveAppearance, saveExpandThinking, saveGlobalRunCap, saveNotificationPreferences, savePanePreferences, savePreferredApplication, savePreferredTerminal, saveRecentSelection, saveWindowPreference } from "./preferences.js";
 import { getAgentSettings, saveAgentCompaction, saveAgentModelScope, saveAgentRetry, saveDefaultAgentModel, saveDefaultAgentThinking } from "./agent-settings.js";
 import { addProject, assertExecutionAllowed, assertProjectAdmitted, createTask, getProjectEnvironmentOverrides, getProjectsState, getTaskCreation, ProjectStateLoadError, removeProject, selectProject, setExecutionConsent, setProjectEnvironmentOverrides, setResourceTrust, setTaskArchived, withTaskExecution } from "./projects.js";
-import { getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
+import { cancelLogin, getProviderState, login, logout, removeApiKey, respondToOAuth, setApiKey } from "./providers.js";
 import { RunCoordinator } from "./runs.js";
 import { assertRunnableTask, getTaskModelState, recoverTaskWorktreeRemovals, setTaskModel, setTaskThinking } from "./tasks.js";
 import { getTaskResources } from "./resources.js";
@@ -445,6 +445,10 @@ app.whenReady().then(async () => {
   runCoordinator = runs;
   if (testLifecycle) {
     ipcMain.on("window:test-close", (event) => BrowserWindow.fromWebContents(event.sender)?.close());
+    ipcMain.on("window:test-recreate", (event) => {
+      BrowserWindow.fromWebContents(event.sender)?.destroy();
+      createWindow();
+    });
     ipcMain.handle("window:test-lifecycle-state", (event) => ({
       windowVisible: BrowserWindow.fromWebContents(event.sender)?.isVisible() ?? false,
       statusPresent: Boolean(backgroundTray && !backgroundTray.isDestroyed()),
@@ -511,9 +515,10 @@ app.whenReady().then(async () => {
   handleDiagnostic("providers:get", "auth.read", getProviderState);
   handleDiagnostic("providers:set-key", "auth.write", (_event, provider: string, key: string) => setApiKey(provider, key));
   handleDiagnostic("providers:remove-key", "auth.write", (_event, provider: string) => removeApiKey(provider));
-  handleDiagnostic("providers:login", "auth.login", (event, provider: string) => login(provider, event.sender));
+  handleDiagnostic("providers:login", "auth.login", (event, provider: unknown) => login(provider, event.sender));
+  handleDiagnostic("providers:cancel-login", "auth.login", (event, flowId: unknown) => cancelLogin(flowId, event.sender));
   handleDiagnostic("providers:logout", "auth.write", (_event, provider: string) => logout(provider));
-  handleDiagnostic("providers:oauth-reply", "auth.login", (_event, value?: string) => respondToOAuth(value));
+  handleDiagnostic("providers:oauth-reply", "auth.login", (event, flowId: unknown, requestId: unknown, value: unknown) => respondToOAuth(flowId, requestId, value, event.sender));
   handleDiagnostic("diagnostics:get", "diagnostics.preview", () => localDiagnostics.bundle());
   handleDiagnostic("diagnostics:export", "diagnostics.export-failed", async (event) => {
     let destination: string | undefined;
