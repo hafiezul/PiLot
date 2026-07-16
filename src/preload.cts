@@ -6,6 +6,7 @@ import type { PiLotApi } from "./shared/readiness.js";
 
 const lifecycleTestApi = process.argv.includes("--pilot-test-lifecycle-api") ? {
   closeWindow: () => ipcRenderer.send("window:test-close"),
+  recreateWindow: () => ipcRenderer.send("window:test-recreate"),
   getDesktopLifecycleState: () => ipcRenderer.invoke("window:test-lifecycle-state") as Promise<{ windowVisible: boolean; statusPresent: boolean }>,
 } : {};
 
@@ -42,8 +43,9 @@ const api: PiLotApi = {
   setApiKey: (provider, key) => ipcRenderer.invoke("providers:set-key", provider, key),
   removeApiKey: (provider) => ipcRenderer.invoke("providers:remove-key", provider),
   login: (provider) => ipcRenderer.invoke("providers:login", provider),
+  cancelLogin: (flowId) => ipcRenderer.invoke("providers:cancel-login", flowId),
   logout: (provider) => ipcRenderer.invoke("providers:logout", provider),
-  respondToOAuth: (value) => ipcRenderer.invoke("providers:oauth-reply", value),
+  respondToOAuth: (flowId, requestId, value) => ipcRenderer.invoke("providers:oauth-reply", flowId, requestId, value),
   onOAuthEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, value: OAuthEvent) => listener(value);
     ipcRenderer.on("providers:oauth-event", handler);

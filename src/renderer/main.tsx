@@ -44,21 +44,82 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
   const [providerId, setProviderId] = useState("");
   const [editingKey, setEditingKey] = useState(false);
   const [oauth, setOAuth] = useState<OAuthEvent>();
+  const [startingLogin, setStartingLogin] = useState(false);
+  const [cancellingLogin, setCancellingLogin] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const flowId = useRef<string | undefined>(undefined);
+  const settledFlowId = useRef<string | undefined>(undefined);
+  const mounted = useRef(false);
 
-  useEffect(() => {
-    void window.pilot.getProviderState().then((next) => {
-      setState(next);
-      setProviderId(next.providers.find(({ configured }) => configured)?.id ?? next.providers[0]?.id ?? "");
-    });
-    return window.pilot.onOAuthEvent(setOAuth);
+  const applyState = useCallback((next: ProviderState) => {
+    setState(next);
+    setProviderId((current) => next.activeLogin?.providerId
+      ?? (next.providers.some(({ id }) => id === current) ? current : next.providers.find(({ configured }) => configured)?.id ?? next.providers[0]?.id ?? ""));
   }, []);
 
+  useEffect(() => {
+    mounted.current = true;
+    void window.pilot.getProviderState().then((next) => {
+      if (!mounted.current) return;
+      flowId.current = next.activeLogin?.id;
+      applyState(next);
+    });
+    const stopListening = window.pilot.onOAuthEvent((event) => {
+      if (event.type === "started") {
+        flowId.current = event.flowId;
+        setStartingLogin(false);
+        setOAuth(undefined);
+        setMessage("");
+        setError("");
+        setState((current) => current ? { ...current, activeLogin: { id: event.flowId, providerId: event.providerId, providerName: event.providerName } } : current);
+        return;
+      }
+      if (event.flowId !== flowId.current) return;
+      if (event.type === "success" || event.type === "failure" || event.type === "cancelled") {
+        settledFlowId.current = event.flowId;
+        flowId.current = undefined;
+        setStartingLogin(false);
+        setCancellingLogin(false);
+        setOAuth(undefined);
+        setState((current) => {
+          if (!current || current.activeLogin?.id !== event.flowId) return current;
+          const { activeLogin: _activeLogin, ...idle } = current;
+          return idle;
+        });
+        if (event.type === "success") {
+          void window.pilot.getProviderState().then((next) => {
+            if (!mounted.current) return;
+            applyState(next);
+            setMessage(`Signed in to ${event.providerName}`);
+            setError("");
+            onChange();
+          }).catch((reason) => { if (mounted.current) setError(reason instanceof Error ? reason.message : String(reason)); });
+        } else if (event.type === "failure") {
+          setMessage("");
+          setError(event.message);
+        } else {
+          setMessage("Authentication cancelled");
+          setError("");
+        }
+        return;
+      }
+      setOAuth(event);
+    });
+    return () => {
+      mounted.current = false;
+      stopListening();
+      const activeFlowId = flowId.current;
+      flowId.current = undefined;
+      if (activeFlowId) void window.pilot.cancelLogin(activeFlowId);
+    };
+  }, [applyState, onChange]);
+
   const provider = state?.providers.find(({ id }) => id === providerId);
+  const activeLogin = state?.activeLogin;
+  const loginBusy = startingLogin || Boolean(activeLogin);
   const update = (next: ProviderState, notice: string) => {
-    setState(next);
-    setProviderId((current) => next.providers.some(({ id }) => id === current) ? current : next.providers.find(({ configured }) => configured)?.id ?? next.providers[0]?.id ?? "");
+    applyState(next);
     setOAuth(undefined);
     setMessage(notice);
     setError("");
@@ -70,22 +131,64 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
     setError("");
     try { update(await action(), notice); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
+  const startLogin = async () => {
+    if (!provider || loginBusy) return;
+    setStartingLogin(true);
+    setOAuth(undefined);
+    setMessage("");
+    setError("");
+    try {
+      const next = await window.pilot.login(provider.id);
+      if (!mounted.current) {
+        if (next.activeLogin) await window.pilot.cancelLogin(next.activeLogin.id).catch(() => undefined);
+        return;
+      }
+      if (next.activeLogin?.id === settledFlowId.current) return;
+      flowId.current = next.activeLogin?.id;
+      applyState(next);
+    } catch (reason) {
+      if (mounted.current) setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (mounted.current) setStartingLogin(false);
+    }
+  };
+  const cancelAuthentication = async () => {
+    if (!activeLogin || cancellingLogin) return;
+    setCancellingLogin(true);
+    setError("");
+    try {
+      const next = await window.pilot.cancelLogin(activeLogin.id);
+      if (flowId.current === activeLogin.id) flowId.current = undefined;
+      applyState(next);
+      setOAuth(undefined);
+      setMessage("Authentication cancelled");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setCancellingLogin(false);
+    }
+  };
+  const reply = (event: Extract<OAuthEvent, { type: "prompt" | "select" }> | Extract<OAuthEvent, { type: "auth"; manualInput: true }>, value?: string) => {
+    void window.pilot.respondToOAuth(event.flowId, event.requestId, value).then((accepted) => {
+      if (!accepted) setError("That authentication request is no longer active.");
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  };
 
   if (!state) return <section className="provider-setup" aria-label="Provider authentication"><p role="status">Loading providers…</p></section>;
 
   const providerModels = state.models.filter((model) => model.provider === providerId);
   return (
-    <section className="provider-setup" aria-label="Provider authentication">
+    <section className="provider-setup" aria-label="Provider authentication" aria-busy={startingLogin || cancellingLogin}>
       <div className="setup-heading">
         <div><p className="eyebrow">Pi environment</p><h2>Provider authentication</h2></div>
-        <div className="setup-controls"><span className="muted">Secrets stay in Pi's credential store.</span><button onClick={() => void attempt(() => window.pilot.getProviderState(), "Providers refreshed")}>Refresh providers</button></div>
+        <div className="setup-controls"><span className="muted">Secrets stay in Pi's credential store.</span><button disabled={loginBusy} onClick={() => void attempt(() => window.pilot.getProviderState(), "Providers refreshed")}>Refresh providers</button></div>
       </div>
       <ul className="credential-summary" aria-label="Detected credentials">
         {state.providers.filter(({ configured }) => configured).map((item) => <li key={item.id}><span>{item.name}</span><small>{item.sourceLabel}</small></li>)}
       </ul>
 
       <label>Provider
-        <select aria-label="Provider" value={providerId} onChange={(event) => { setProviderId(event.target.value); setEditingKey(false); setMessage(""); }}>
+        <select aria-label="Provider" value={providerId} disabled={loginBusy} onChange={(event) => { setProviderId(event.target.value); setEditingKey(false); setMessage(""); }}>
           {state.providers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select>
       </label>
@@ -94,10 +197,10 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
         <div className="provider-detail">
           <div><strong>{provider.name}</strong><span className={provider.configured ? "connected" : "muted"}>{provider.sourceLabel ?? "Not configured"}</span><span className="muted">{providerModels.length} model{providerModels.length === 1 ? "" : "s"} available</span></div>
           <div className="actions">
-            <button onClick={() => setEditingKey(true)}>{provider.credentialType === "api_key" ? "Replace API key" : "Add API key"}</button>
-            {provider.credentialType === "api_key" && <button onClick={() => void attempt(() => window.pilot.removeApiKey(provider.id), "API key removed")}>Remove API key</button>}
-            {provider.supportsOAuth && <button onClick={() => void attempt(() => window.pilot.login(provider.id), "Signed in")}>{provider.credentialType === "oauth" ? "Reauthenticate" : "Use subscription"}</button>}
-            {provider.credentialType === "oauth" && <button onClick={() => void attempt(() => window.pilot.logout(provider.id), "Logged out")}>Log out</button>}
+            <button disabled={loginBusy} onClick={() => setEditingKey(true)}>{provider.credentialType === "api_key" ? "Replace API key" : "Add API key"}</button>
+            {provider.credentialType === "api_key" && <button disabled={loginBusy} onClick={() => void attempt(() => window.pilot.removeApiKey(provider.id), "API key removed")}>Remove API key</button>}
+            {provider.supportsOAuth && <button disabled={loginBusy} onClick={() => void startLogin()}>{provider.credentialType === "oauth" ? "Reauthenticate" : "Use subscription"}</button>}
+            {provider.credentialType === "oauth" && <button disabled={loginBusy} onClick={() => void attempt(() => window.pilot.logout(provider.id), "Logged out")}>Log out</button>}
           </div>
         </div>
         <section className="model-inspection" aria-labelledby="available-models-title">
@@ -115,29 +218,37 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
         void attempt(() => window.pilot.setApiKey(provider.id, String(form.get("key") ?? "")), "API key saved");
         event.currentTarget.reset();
       }}>
-        <label>API key for {provider.name}<input name="key" aria-label={`API key for ${provider.name}`} type="password" autoComplete="off" required autoFocus /></label>
-        <button type="submit">Save API key</button>
-        <button type="button" onClick={() => setEditingKey(false)}>Cancel</button>
+        <label>API key for {provider.name}<input name="key" aria-label={`API key for ${provider.name}`} type="password" autoComplete="off" required autoFocus disabled={loginBusy} /></label>
+        <button type="submit" disabled={loginBusy}>Save API key</button>
+        <button type="button" disabled={loginBusy} onClick={() => setEditingKey(false)}>Cancel</button>
       </form>}
 
-      {oauth && <div className="oauth-flow" role="region" aria-label={`${oauth.providerName} authentication`}>
+      {(startingLogin || activeLogin) && <div className="provider-login-status">
+        <p role="status" aria-label="Authentication status">{activeLogin
+          ? `Authentication in progress for ${activeLogin.providerName}. Only one provider can sign in at a time.`
+          : `Starting authentication for ${provider?.name ?? "provider"}…`}</p>
+        {activeLogin && <button type="button" disabled={cancellingLogin} onClick={() => void cancelAuthentication()}>{cancellingLogin ? "Cancelling…" : "Cancel authentication"}</button>}
+      </div>}
+
+      {oauth && oauth.type !== "started" && oauth.type !== "success" && oauth.type !== "failure" && oauth.type !== "cancelled" && <div className="oauth-flow" role="region" aria-label={`${oauth.providerName} authentication`}>
         <strong>{oauth.providerName}</strong>
         {oauth.type === "device_code" && <><p>Enter this code in your browser:</p><code>{oauth.userCode}</code></>}
         {oauth.type === "auth" && <p>{oauth.instructions ?? "Finish signing in in your browser."}</p>}
         {oauth.type === "progress" && <p>{oauth.message}</p>}
-        {(oauth.type === "prompt" || (oauth.type === "auth" && oauth.manualInput)) && <form onSubmit={(event) => {
-          event.preventDefault();
-          const value = String(new FormData(event.currentTarget).get("oauth") ?? "");
-          void window.pilot.respondToOAuth(value);
+        {(oauth.type === "prompt" || (oauth.type === "auth" && oauth.manualInput)) && <form onSubmit={(formEvent) => {
+          formEvent.preventDefault();
+          const value = String(new FormData(formEvent.currentTarget).get("oauth") ?? "");
+          reply(oauth, value);
+          formEvent.currentTarget.reset();
         }}>
           <label>{oauth.type === "prompt" ? oauth.message : "Paste the redirect URL if the browser does not return automatically"}
-            <input name="oauth" placeholder={oauth.type === "prompt" ? oauth.placeholder : undefined} required={oauth.type === "prompt" ? !oauth.allowEmpty : true} />
+            <input name="oauth" type="password" autoComplete="off" placeholder={oauth.type === "prompt" ? oauth.placeholder : undefined} required={oauth.type === "prompt" ? !oauth.allowEmpty : true} />
           </label><button type="submit">Continue</button>
         </form>}
-        {oauth.type === "select" && <div><p>{oauth.message}</p>{oauth.options.map((option) => <button key={option.id} onClick={() => void window.pilot.respondToOAuth(option.id)}>{option.label}</button>)}</div>}
+        {oauth.type === "select" && <div><p>{oauth.message}</p>{oauth.options.map((option) => <button type="button" key={option.id} onClick={() => reply(oauth, option.id)}>{option.label}</button>)}</div>}
       </div>}
 
-      {message && <p className="success" role="status">{message}</p>}
+      {message && <p className="success" role="status" aria-label="Authentication status">{message}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
   );
