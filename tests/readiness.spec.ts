@@ -571,6 +571,119 @@ test("invokes native actions through menus and the Command Palette", async () =>
   }
 });
 
+test("keeps theme controls and focus indicators distinguishable", async () => {
+  const environment = await fixture();
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+  const contrast = (left: string, right: string) => {
+    const luminance = (value: string) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number).map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    }).reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    const values = [luminance(left), luminance(right)].sort((a, b) => b - a);
+    return (values[0] + 0.05) / (values[1] + 0.05);
+  };
+
+  try {
+    await app.window.getByRole("button", { name: "Settings" }).click();
+    for (const appearance of ["light", "dark"] as const) {
+      const metrics = await app.window.evaluate((nextAppearance) => {
+        document.documentElement.dataset.appearance = nextAppearance;
+        const back = document.querySelector<HTMLElement>(".back-button")!;
+        const navigation = document.querySelector<HTMLElement>(".settings-navigation")!;
+        const main = document.querySelector<HTMLElement>(".settings-main")!;
+        const input = document.querySelector<HTMLInputElement>('[aria-label="Active Run limit"]')!;
+        input.focus();
+        const rootStyle = getComputedStyle(document.documentElement);
+        const backStyle = getComputedStyle(back);
+        const navigationStyle = getComputedStyle(navigation);
+        const mainStyle = getComputedStyle(main);
+        const inputStyle = getComputedStyle(input);
+        return {
+          colorScheme: rootStyle.colorScheme,
+          backColor: backStyle.color,
+          navigationBackground: navigationStyle.backgroundColor,
+          controlBackground: inputStyle.backgroundColor,
+          controlBorder: inputStyle.borderColor,
+          focusColor: inputStyle.outlineColor,
+          focusSurface: mainStyle.backgroundColor,
+          focusWidth: Number.parseFloat(inputStyle.outlineWidth),
+        };
+      }, appearance);
+      expect(metrics.colorScheme).toBe(appearance);
+      expect(contrast(metrics.backColor, metrics.navigationBackground)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(metrics.controlBorder, metrics.controlBackground)).toBeGreaterThanOrEqual(3);
+      expect(metrics.focusWidth).toBeGreaterThanOrEqual(2);
+      expect(contrast(metrics.focusColor, metrics.focusSurface)).toBeGreaterThanOrEqual(3);
+    }
+
+    await app.window.getByRole("button", { name: "Providers", exact: true }).click();
+    const providerLabel = app.window.locator(".provider-setup > label").first();
+    await expect(providerLabel).toBeVisible();
+    for (const appearance of ["light", "dark"] as const) {
+      const metrics = await providerLabel.evaluate((label, nextAppearance) => {
+        document.documentElement.dataset.appearance = nextAppearance;
+        return {
+          text: getComputedStyle(label).color,
+          background: getComputedStyle(document.querySelector(".settings-main")!).backgroundColor,
+        };
+      }, appearance);
+      expect(contrast(metrics.text, metrics.background)).toBeGreaterThanOrEqual(4.5);
+    }
+
+    await app.window.getByRole("button", { name: "Back to command center" }).click();
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    const access = app.window.getByRole("dialog", { name: "Project access" });
+    const allowExecution = access.getByRole("button", { name: "Allow agent execution" });
+    for (const appearance of ["light", "dark"] as const) {
+      const metrics = await allowExecution.evaluate((button, nextAppearance) => {
+        document.documentElement.dataset.appearance = nextAppearance;
+        const buttonStyle = getComputedStyle(button);
+        const dialogStyle = getComputedStyle(button.closest("dialog")!);
+        return {
+          text: buttonStyle.color,
+          background: buttonStyle.backgroundColor,
+          border: buttonStyle.borderColor,
+          surrounding: dialogStyle.backgroundColor,
+        };
+      }, appearance);
+      expect(contrast(metrics.text, metrics.background)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(metrics.border, metrics.surrounding)).toBeGreaterThanOrEqual(3);
+    }
+
+    await allowExecution.click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const prompt = app.window.getByRole("combobox", { name: "Prompt" });
+    await prompt.focus();
+    for (const appearance of ["light", "dark"] as const) {
+      const metrics = await prompt.evaluate((textarea, nextAppearance) => {
+        document.documentElement.dataset.appearance = nextAppearance;
+        const composer = textarea.closest<HTMLElement>(".task-composer")!;
+        const composerStyle = getComputedStyle(composer);
+        const promptStyle = getComputedStyle(textarea);
+        const placeholderStyle = getComputedStyle(textarea, "::placeholder");
+        const mainStyle = getComputedStyle(document.querySelector("main")!);
+        return {
+          border: composerStyle.borderColor,
+          focusColor: composerStyle.outlineColor,
+          focusWidth: Number.parseFloat(composerStyle.outlineWidth),
+          promptOutlineWidth: Number.parseFloat(promptStyle.outlineWidth),
+          placeholder: placeholderStyle.color,
+          background: composerStyle.backgroundColor,
+          surrounding: mainStyle.backgroundColor,
+        };
+      }, appearance);
+      expect(contrast(metrics.border, metrics.surrounding)).toBeGreaterThanOrEqual(3);
+      expect(metrics.focusWidth).toBeGreaterThanOrEqual(2);
+      expect(contrast(metrics.focusColor, metrics.surrounding)).toBeGreaterThanOrEqual(3);
+      expect(metrics.promptOutlineWidth).toBe(0);
+      expect(contrast(metrics.placeholder, metrics.background)).toBeGreaterThanOrEqual(4.5);
+    }
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("hides current-surface actions from the Command Palette", async () => {
   const environment = await fixture();
   const app = await launch(environment.agentDir);
