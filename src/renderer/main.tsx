@@ -2370,6 +2370,7 @@ function App() {
   const [setupActive, setSetupActive] = useState(false);
   const [taskExternallyChanged, setTaskExternallyChanged] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const [compactLayout, setCompactLayout] = useState(() => matchMedia("(max-width: 1040px)").matches);
   const [actionError, setActionError] = useState<ActionFailure>();
   const [taskDetails, setTaskDetails] = useState<TaskModelState>();
@@ -2382,6 +2383,8 @@ function App() {
   const [taskRevision, setTaskRevision] = useState(0);
   const [historyDraft, setHistoryDraft] = useState<{ taskPath: string; text: string; version: number }>();
   const settingsButton = useRef<HTMLButtonElement>(null);
+  const mobileNavigationButton = useRef<HTMLButtonElement>(null);
+  const navigationPanel = useRef<HTMLElement>(null);
   const detailsReturnFocus = useRef<HTMLElement | null>(null);
   const lastInspectorFocus = useRef<HTMLElement | null>(null);
   const focusWasInInspector = useRef(false);
@@ -2430,7 +2433,17 @@ function App() {
   }), []);
   const closeSettings = useCallback(() => {
     setShowSettings(false);
-    requestAnimationFrame(() => settingsButton.current?.focus());
+    requestAnimationFrame(() => requestAnimationFrame(() => (
+      matchMedia("(max-width: 679px)").matches ? mobileNavigationButton.current : settingsButton.current
+    )?.focus()));
+  }, []);
+  const closeNavigation = useCallback((restoreFocus = false) => {
+    setNavigationOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => mobileNavigationButton.current?.focus());
+  }, []);
+  const closeNavigationToContent = useCallback(() => {
+    setNavigationOpen(false);
+    requestAnimationFrame(() => document.getElementById("content")?.focus());
   }, []);
   const closeProjectAccess = useCallback(() => setShowProjectAccess(false), []);
   const updateProjectAccess = useCallback((next: ProjectsState) => {
@@ -2518,6 +2531,8 @@ function App() {
   const selectedProject = projects?.selected;
   const surfaceProject = showHome ? undefined : selectedProject;
   const selectedTask = surfaceProject?.tasks.find(({ path }) => path === selectedTaskPath);
+  const mobileContextTitle = showHome ? "Command center" : selectedTask?.title ?? selectedProject?.name ?? "Workspace";
+  const mobileContextKind = showHome ? "PiLot" : selectedTask ? selectedProject?.name ?? "Task" : "Project";
   const removedWorktreeAt = selectedTask?.execution.kind === "worktree" ? selectedTask.execution.removedAt : undefined;
   const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
   const workspaceAvailable = !showSettings;
@@ -2643,6 +2658,26 @@ function App() {
     return () => media.removeEventListener("change", updateLayout);
   }, []);
   useEffect(() => {
+    const media = matchMedia("(max-width: 679px)");
+    const hideNavigationWhenWide = () => { if (!media.matches) setNavigationOpen(false); };
+    media.addEventListener("change", hideNavigationWhenWide);
+    return () => media.removeEventListener("change", hideNavigationWhenWide);
+  }, []);
+  useEffect(() => {
+    if (!navigationOpen) return;
+    const focusFrame = requestAnimationFrame(() => navigationPanel.current?.querySelector<HTMLElement>("button")?.focus());
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeNavigation(true);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [closeNavigation, navigationOpen]);
+  useEffect(() => {
     const openPalette = (event: KeyboardEvent) => {
       if ((window.pilot.platform === "darwin" ? event.metaKey : event.ctrlKey) && event.shiftKey && event.key.toLocaleLowerCase() === "p") {
         event.preventDefault();
@@ -2694,18 +2729,26 @@ function App() {
       <a className="skip-link" href="#content">Skip to content</a>
       <div className="window-bar" aria-hidden="true" />
       <div className="shell">
-        <nav aria-label="Projects and tasks" className="navigation">
+        <header className="mobile-toolbar">
+          <button ref={mobileNavigationButton} type="button" className="mobile-navigation-button" aria-label={navigationOpen ? "Close navigation" : "Open navigation"} aria-controls="workspace-navigation" aria-expanded={navigationOpen} onClick={() => navigationOpen ? closeNavigation(true) : setNavigationOpen(true)}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" /></svg>
+          </button>
+          <div className="mobile-context"><span>{mobileContextKind}</span><strong title={mobileContextTitle}>{mobileContextTitle}</strong></div>
+          <button type="button" className="mobile-details-button" aria-label={showDetails ? "Close Inspector" : "Open Inspector"} onClick={(event) => invokeAction("view.details", event.currentTarget)}>{showDetails ? "Hide" : "Details"}</button>
+        </header>
+        <nav id="workspace-navigation" ref={navigationPanel} aria-label="Projects and tasks" className={`navigation${navigationOpen ? " mobile-visible" : ""}`}>
           <header className="brand">
             <button type="button" className="brand-home" aria-label="Open command center" aria-current={showHome ? "page" : undefined} onClick={() => {
               setShowHome(true);
               setSelectedTaskPath(undefined);
               setTaskDetails(undefined);
               setShowDetails(false);
+              closeNavigationToContent();
             }}><span className="mark" aria-hidden="true">π</span><strong>PiLot</strong></button>
           </header>
           <div className="nav-heading">
             <span>Projects</span>
-            <button data-action="project.add" aria-label="Add project" title="Add Project" onClick={() => invokeAction("project.add")}>+</button>
+            <button data-action="project.add" aria-label="Add project" title="Add Project" onClick={() => { setNavigationOpen(false); invokeAction("project.add"); }}>+</button>
           </div>
           {projects?.projects.length ? (
             <ul className="project-list">
@@ -2719,6 +2762,7 @@ function App() {
                     setShowHome(false);
                     setSelectedTaskPath(recentTask?.path);
                     setTaskDetails(undefined);
+                    closeNavigationToContent();
                     void window.pilot.selectProject(project.path).then(setProjects).catch((reason) => reportActionError(reason, "Reload the Project list and try selecting it again."));
                   }}>
                     <span className="project-icon" aria-hidden="true">◇</span>
@@ -2728,7 +2772,7 @@ function App() {
                   {projects.selected?.path === project.path && <ul className="task-nav-list" aria-label={`Active Tasks in ${project.name}`}>
                     {project.tasks.filter(({ lifecycle }) => lifecycle === "active").map((task) => {
                       const status = taskAttentionStatus(task, runStates[task.path]);
-                      return <li key={task.path}><button aria-current={!showHome && selectedTaskPath === task.path ? "page" : undefined} onClick={() => { setShowHome(false); setTaskDetails(undefined); setSelectedTaskPath(task.path); }}>
+                      return <li key={task.path}><button aria-current={!showHome && selectedTaskPath === task.path ? "page" : undefined} onClick={() => { setShowHome(false); setTaskDetails(undefined); setSelectedTaskPath(task.path); closeNavigationToContent(); }}>
                         <span className="task-nav-title">{task.title}</span><TaskStateIndicator status={status} />
                       </button></li>;
                     })}
@@ -2740,10 +2784,11 @@ function App() {
             <p className="muted nav-empty">Projects with Pi tasks will appear here.</p>
           )}
           <div className="nav-footer">
-            <button type="button" className="command-center" data-action="view.commandPalette" onClick={() => invokeAction("view.commandPalette")}><span>Command Palette</span><kbd>{shortcutLabel("CommandOrControl+Shift+P")}</kbd></button>
-            <button ref={settingsButton} data-action="view.settings" className="settings-button" aria-label="Settings" title="Settings" onClick={() => { setSettingsDestination("general"); setShowSettings(true); }}><span aria-hidden="true">⚙</span></button>
+            <button type="button" className="command-center" data-action="view.commandPalette" onClick={() => { setNavigationOpen(false); invokeAction("view.commandPalette"); }}><span>Command Palette</span><kbd>{shortcutLabel("CommandOrControl+Shift+P")}</kbd></button>
+            <button ref={settingsButton} data-action="view.settings" className="settings-button" aria-label="Settings" title="Settings" onClick={() => { setNavigationOpen(false); setSettingsDestination("general"); setShowSettings(true); }}><span aria-hidden="true">⚙</span></button>
           </div>
         </nav>
+        {navigationOpen && <button type="button" className="navigation-scrim" aria-label="Close navigation" onClick={() => closeNavigation(true)} />}
 
         <main id="content" className="workspace-main" tabIndex={-1}>
           {surfaceProject ? <ProjectPage

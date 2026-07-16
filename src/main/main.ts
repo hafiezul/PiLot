@@ -66,6 +66,7 @@ const actionMenuItems = new Map<DesktopActionId, Electron.MenuItem>();
 const runAttentionPolicy = new RunAttentionPolicy();
 const liveNotifications = new Set<Notification>();
 const maximumLiveNotifications = 128;
+const minimumWindowWidth = 320;
 
 type LastWindowChoice = "background" | "stop" | "cancel";
 
@@ -306,7 +307,7 @@ function restoredWindowBounds() {
   const display = positioned
     ? screen.getDisplayMatching({ x: saved.x!, y: saved.y!, width: saved.width, height: saved.height })
     : screen.getPrimaryDisplay();
-  const width = Math.max(680, Math.min(saved.width, display.workArea.width));
+  const width = Math.max(minimumWindowWidth, Math.min(saved.width, display.workArea.width));
   const height = Math.max(520, Math.min(saved.height, display.workArea.height));
   return {
     width,
@@ -322,7 +323,7 @@ function createWindow() {
   const colors = chromeColors();
   const window = new BrowserWindow({
     ...restoredWindowBounds(),
-    minWidth: 680,
+    minWidth: minimumWindowWidth,
     minHeight: 520,
     backgroundColor: colors.background,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",

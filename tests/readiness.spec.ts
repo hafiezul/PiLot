@@ -3790,6 +3790,107 @@ test("blocks a Run with actionable configured-shell guidance", async () => {
   }
 });
 
+test("reflows at 320 px with resilient titles and touch-sized controls", async () => {
+  const environment = await fixture();
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+  const undersizedControls = () => app.window.evaluate(() => [...document.querySelectorAll<HTMLElement>(
+    'button, summary, select, textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="file"]), label:has(input[type="checkbox"]), label:has(input[type="radio"])',
+  )].filter((element) => element.getClientRects().length > 0).flatMap((element) => {
+    const bounds = element.getBoundingClientRect();
+    return bounds.width < 43.5 || bounds.height < 43.5
+      ? [`${element.tagName.toLocaleLowerCase()}.${element.className}:${bounds.width}x${bounds.height}`]
+      : [];
+  }));
+  const horizontalOverflow = () => app.window.evaluate(() => {
+    const selectors = ["html", "body", ".shell", "main"];
+    return selectors.flatMap((selector) => {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element) return [];
+      const bounds = element.getBoundingClientRect();
+      return element.scrollWidth > element.clientWidth + 1 || bounds.left < -0.5 || bounds.right > window.innerWidth + 0.5
+        ? [`${selector}:${element.scrollWidth}/${element.clientWidth}@${bounds.left}-${bounds.right}`]
+        : [];
+    });
+  });
+
+  try {
+    await app.window.evaluate(() => window.resizeTo(320, 640));
+    await expect.poll(() => app.window.evaluate(() => window.outerWidth)).toBe(320);
+    await expect(app.window.locator(".mobile-toolbar")).toBeVisible();
+    await expect(app.window.getByRole("navigation", { name: "Projects and tasks" })).toBeHidden();
+    expect(await horizontalOverflow()).toEqual([]);
+    expect(await undersizedControls()).toEqual([]);
+
+    const openNavigation = app.window.getByRole("button", { name: "Open navigation" });
+    await openNavigation.click();
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    await expect(navigation).toBeVisible();
+    await expect(navigation.getByRole("button", { name: "Open command center" })).toBeFocused();
+    await app.window.keyboard.press("Escape");
+    await expect(navigation).toBeHidden();
+    await expect(openNavigation).toBeFocused();
+
+    await openNavigation.click();
+    await navigation.getByRole("button", { name: "Add project" }).click();
+    const access = app.window.getByRole("dialog", { name: "Project access" });
+    await expect(access).toBeVisible();
+    const accessBounds = await access.boundingBox();
+    expect(accessBounds).toBeTruthy();
+    expect(accessBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(accessBounds!.x + accessBounds!.width).toBeLessThanOrEqual(320);
+    expect(await undersizedControls()).toEqual([]);
+    await access.getByRole("button", { name: "Allow agent execution" }).click();
+
+    const projectTitle = app.window.locator(".project-topbar h1");
+    await projectTitle.evaluate((heading) => { heading.textContent = "ExtremelyLongUnbrokenProjectTitleThatMustWrapWithoutEscapingTheNarrowWorkspace"; });
+    const projectTitleWidth = await projectTitle.evaluate((heading) => ({ scroll: heading.scrollWidth, client: heading.clientWidth }));
+    expect(projectTitleWidth.scroll).toBe(projectTitleWidth.client);
+    expect(await horizontalOverflow()).toEqual([]);
+
+    await app.window.getByRole("button", { name: "Untitled task", exact: true }).click();
+    const composer = app.window.getByRole("form", { name: "Task composer" });
+    await expect(composer).toBeVisible();
+    const taskTitle = app.window.locator(".task-topbar h1");
+    await taskTitle.evaluate((heading) => { heading.textContent = "LongTaskTitleWithoutNaturalBreakpointsStillStaysInsideThreeHundredTwentyPixels"; });
+    expect(await taskTitle.evaluate((heading) => heading.scrollWidth)).toBe(await taskTitle.evaluate((heading) => heading.clientWidth));
+    expect(await horizontalOverflow()).toEqual([]);
+    expect(await undersizedControls()).toEqual([]);
+    const composerOverlap = await app.window.evaluate(() => {
+      const action = [...document.querySelectorAll<HTMLButtonElement>("button")].find(({ textContent }) => textContent === "Compact context")!;
+      const composer = document.querySelector<HTMLElement>(".composer-dock")!;
+      const actionBounds = action.getBoundingClientRect();
+      const composerBounds = composer.getBoundingClientRect();
+      return actionBounds.bottom > composerBounds.top && actionBounds.top < composerBounds.bottom;
+    });
+    expect(composerOverlap).toBe(false);
+
+    await app.window.getByRole("button", { name: "Open Inspector" }).click();
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await expect(inspector).toBeVisible();
+    const inspectorBounds = await inspector.boundingBox();
+    expect(inspectorBounds).toMatchObject({ x: 0, width: 320 });
+    expect(await undersizedControls()).toEqual([]);
+    await inspector.getByRole("button", { name: "Close Inspector" }).click();
+
+    await app.window.getByRole("button", { name: "Open navigation" }).click();
+    await navigation.getByRole("button", { name: "Settings" }).click();
+    const settings = app.window.getByRole("main", { name: "Settings" });
+    await expect(settings).toBeVisible();
+    expect(await horizontalOverflow()).toEqual([]);
+    expect(await undersizedControls()).toEqual([]);
+    const settingsTabs = await app.window.getByRole("navigation", { name: "Settings" }).getByRole("button").evaluateAll((buttons) => buttons.map((button) => {
+      const bounds = button.getBoundingClientRect();
+      return { width: bounds.width, height: bounds.height, right: bounds.right };
+    }));
+    expect(settingsTabs.every(({ width, height, right }) => width >= 44 && height >= 44 && right <= 320)).toBe(true);
+    await app.window.getByRole("button", { name: "Back to command center" }).click();
+    await expect(app.window.getByRole("button", { name: "Open navigation" })).toBeFocused();
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("keeps the native title-bar shell fixed and inspector focus stable", async () => {
   const environment = await fixture();
   const app = await launch(environment.agentDir);
