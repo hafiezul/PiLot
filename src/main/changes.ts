@@ -13,6 +13,7 @@ const maximumGitOutputBytes = 32 * 1024 * 1024;
 type ChangeStats = { additions: number; deletions: number; binary: boolean };
 const untrackedStatsCache = new Map<string, ChangeStats & { mtimeMs: number; size: number }>();
 const taskChangesCache = new Map<string, TaskChanges>();
+const taskChangesRequests = new Map<string, Promise<TaskChanges>>();
 
 function taskChangesKey(projectPath: string, taskPath: string) {
   return `${path.resolve(projectPath)}\0${path.resolve(taskPath)}`;
@@ -143,7 +144,7 @@ async function hasHead(executionPath: string, environment: NodeJS.ProcessEnv) {
   }
 }
 
-export async function getTaskChanges(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv = process.env): Promise<TaskChanges> {
+async function readTaskChanges(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv): Promise<TaskChanges> {
   const { file, executionPath } = await assertRunnableTask(agentDir, projectPath, taskPath, environment);
   const checkedAt = Date.now();
   const finish = (changes: TaskChanges) => {
@@ -193,6 +194,17 @@ export async function getTaskChanges(agentDir: string, projectPath: string, task
     additions: files.reduce((total, change) => total + change.additions, 0),
     deletions: files.reduce((total, change) => total + change.deletions, 0),
   });
+}
+
+export function getTaskChanges(agentDir: string, projectPath: string, taskPath: string, environment: NodeJS.ProcessEnv = process.env): Promise<TaskChanges> {
+  const key = taskChangesKey(projectPath, taskPath);
+  const pending = taskChangesRequests.get(key);
+  if (pending) return pending;
+  const request = readTaskChanges(agentDir, projectPath, taskPath, environment).finally(() => {
+    if (taskChangesRequests.get(key) === request) taskChangesRequests.delete(key);
+  });
+  taskChangesRequests.set(key, request);
+  return request;
 }
 
 function parseUnifiedDiff(value: string) {

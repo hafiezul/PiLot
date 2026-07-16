@@ -12,6 +12,7 @@ const allNotifications: NotificationPreferences = {
 function state(status: RunStatus, id = "run-1", items: RunEvidenceItem[] = []): TaskRunState {
   return {
     taskPath: "/project/task.jsonl",
+    evidenceRevision: 0,
     activeRunId: status === "queued" || status === "preparing" || status === "running" ? id : undefined,
     runs: [{
       id,

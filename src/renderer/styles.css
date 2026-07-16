@@ -203,8 +203,9 @@ h3 { margin: 0 0 5px; font-size: 14px; }
 .interrupted-recovery { margin: 8px 0 0; padding: 11px 0; border-top: 1px solid #d8d8d4; color: #67430c; }
 .interrupted-recovery strong { font-size: 12px; }
 .interrupted-recovery p { max-width: 64ch; margin: 4px 0 0; font-size: 11px; line-height: 1.5; }
-.run-evidence { padding: 20px 0 24px; border-top: 1px solid #d8d8d4; }
+.run-evidence { padding: 20px 0 24px; border-top: 1px solid #d8d8d4; content-visibility: auto; contain-intrinsic-block-size: auto 320px; }
 .run-evidence:first-of-type { border-top: 0; }
+.run-evidence:last-of-type { content-visibility: visible; contain-intrinsic-block-size: none; }
 .run-heading { align-items: flex-start; }
 .run-heading > div { display: flex; align-items: baseline; gap: 9px; }
 .run-heading h3 { margin: 0; font-size: 13px; }

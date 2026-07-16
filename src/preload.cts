@@ -19,6 +19,12 @@ const api: PiLotApi = {
     ipcRenderer.on("actions:invoke", handler);
     return () => ipcRenderer.removeListener("actions:invoke", handler);
   },
+  getWindowActivity: () => ipcRenderer.invoke("window:get-activity"),
+  onWindowActivity: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, active: boolean) => listener(active);
+    ipcRenderer.on("window:activity", handler);
+    return () => ipcRenderer.removeListener("window:activity", handler);
+  },
   ...lifecycleTestApi,
   getDiagnosticPreview: () => ipcRenderer.invoke("diagnostics:get"),
   exportDiagnosticBundle: () => ipcRenderer.invoke("diagnostics:export"),

@@ -22,4 +22,6 @@ export type PiLotApi = ProviderApi & AgentSettingsApi & DiagnosticsApi & Prefere
   platform: "darwin" | "win32" | "linux";
   setActionState(states: DesktopActionState[]): void;
   onAction(listener: (id: DesktopActionId) => void): () => void;
+  getWindowActivity(): Promise<boolean>;
+  onWindowActivity(listener: (active: boolean) => void): () => void;
 };

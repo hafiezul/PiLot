@@ -283,7 +283,7 @@ async function deterministicProvider(root: string) {
       if (latestUser === "steer with keyboard") {
         setTimeout(() => {
           if (response.destroyed) return;
-          chunk({ index: 0, delta: { role: "assistant", content: "Steering received." }, finish_reason: null });
+          chunk({ index: 0, delta: { role: "assistant", content: `Steering received.\n${"Streaming detail remains visible.\n".repeat(200)}` }, finish_reason: null });
           chunk({ index: 0, delta: {}, finish_reason: "stop" });
           response.end("data: [DONE]\n\n");
         }, 400);
@@ -3971,12 +3971,23 @@ test("continues an active Run after the last window closes", async () => {
       windowVisible: true,
       statusPresent: false,
     });
+    await expect.poll(() => app.window.evaluate(() => (window as any).pilot.getWindowActivity())).toBe(true);
 
-    await app.window.evaluate(() => (window as any).pilot.closeWindow());
+    const becameInactive = app.window.evaluate(() => new Promise<boolean>((resolve) => {
+      const pilot = (window as any).pilot;
+      const stopListening = pilot.onWindowActivity((active: boolean) => {
+        if (active) return;
+        stopListening();
+        resolve(active);
+      });
+      pilot.closeWindow();
+    }));
+    await expect(becameInactive).resolves.toBe(false);
     await expect.poll(() => app.window.evaluate(() => (window as any).pilot.getDesktopLifecycleState())).toEqual({
       windowVisible: false,
       statusPresent: true,
     });
+    await expect.poll(() => app.window.evaluate(() => (window as any).pilot.getWindowActivity())).toBe(false);
     await expect.poll(() => app.window.isClosed()).toBe(false);
     expect(app.process.exitCode).toBeNull();
     expect(provider.activeConcurrent).toBe(1);

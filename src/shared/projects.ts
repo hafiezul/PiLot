@@ -196,6 +196,7 @@ export type RunEvidence = {
 export type TaskRunState = {
   taskPath: string;
   runs: RunEvidence[];
+  evidenceRevision: number;
   activeRunId?: string;
   externalChange?: true;
   queues?: {

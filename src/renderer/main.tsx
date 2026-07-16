@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, StrictMode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { desktopActions, type DesktopActionId } from "../shared/actions";
 import { diagnosticCategories, diagnosticCategoryLabels, type DiagnosticBundle, type DiagnosticCategory } from "../shared/diagnostics";
@@ -515,7 +515,7 @@ function CompactionBlock({ item }: { item: CompactionEvidence }) {
   </details>;
 }
 
-function RunBlock({ run, index, expandThinking, changePaths, onOpenChange }: { run: RunEvidence; index: number; expandThinking: boolean; changePaths: string[]; onOpenChange(path: string): void }) {
+const RunBlock = memo(function RunBlock({ run, index, expandThinking, changePaths, onOpenChange }: { run: RunEvidence; index: number; expandThinking: boolean; changePaths: string[]; onOpenChange(path: string): void }) {
   const status = run.status === "queued" ? "Waiting" : run.status[0].toUpperCase() + run.status.slice(1);
   const title = run.input.kind === "command" ? "Inline command" : run.input.kind === "compaction" ? "Context compaction" : "Agent run";
   return <article className={`run-evidence ${run.status}`} aria-labelledby={`run-${run.id}`}>
@@ -542,7 +542,11 @@ function RunBlock({ run, index, expandThinking, changePaths, onOpenChange }: { r
       })}
     </div>
   </article>;
-}
+});
+
+const RunList = memo(function RunList({ runs, expandThinking, changePaths, onOpenChange }: { runs: RunEvidence[]; expandThinking: boolean; changePaths: string[]; onOpenChange(path: string): void }) {
+  return runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />);
+});
 
 type InspectorView = PreferenceInspectorView;
 type DiffRow = { kind: "hunk"; text: string } | { kind: "line"; line: DiffLine };
@@ -1369,6 +1373,17 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   </div>;
 }
 
+function reconcileRunEvent(current: TaskRunState | undefined, next: TaskRunState) {
+  // IPC cloning loses references, but settled Runs stay immutable while one active Run streams.
+  if (!current || current.taskPath !== next.taskPath || (!current.activeRunId && !next.activeRunId)) return next;
+  const evidenceChanged = current.evidenceRevision !== next.evidenceRevision;
+  const changing = evidenceChanged
+    ? new Set([current.activeRunId, next.activeRunId].filter((id): id is string => Boolean(id)))
+    : new Set<string>();
+  const stable = new Map(current.runs.filter(({ id }) => !changing.has(id)).map((run) => [run.id, run]));
+  return { ...next, runs: next.runs.map((run) => stable.get(run.id) ?? run) };
+}
+
 function TaskPage({ project, task, reloadToken, revision, historyDraft, changePaths, onCreate, onFork, onDetails, onHistoryChange, onOpenSettings, onOpenChange, onRunChange, onSetupChange, onContinuityChange, onActionStart, onError }: {
   project: ProjectAccess;
   task: TaskSummary;
@@ -1459,7 +1474,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
       if (next.taskPath !== task.path) return;
       receivedRunEvent = true;
       if (next.recoveredInput) setDraft((current) => [next.recoveredInput, current].filter((value) => value?.trim()).join("\n\n"));
-      setTimeline(next);
+      setTimeline((current) => reconcileRunEvent(current, next));
     });
     void Promise.all([
       window.pilot.getTaskRun(project.path, task.path),
@@ -1529,7 +1544,6 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
   }, [task.path]);
 
   const latestRunEvidence = timeline?.runs.at(-1);
-  const latestEvidenceKey = latestRunEvidence ? JSON.stringify(latestRunEvidence) : "";
 
   useLayoutEffect(() => {
     if (!timeline) return;
@@ -1545,7 +1559,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
     } else if (scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 32) {
       setShowJumpLatest(true);
     }
-  }, [task.path, latestEvidenceKey]);
+  }, [task.path, latestRunEvidence]);
 
   const jumpToLatest = () => {
     const scroller = taskPage.current?.closest("main");
@@ -1697,7 +1711,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
         onActionStart();
         void window.pilot.compactTask(project.path, task.path).then(async () => { await refreshDetails(); onHistoryChange(); }).catch((reason) => onError(reason, "Add more Task history or check provider access, then try compacting again."));
       }} data-action="run.compact">Compact context</button></div></div>
-      {timeline?.runs.length ? timeline.runs.map((run, index) => <RunBlock key={run.id} run={run} index={index} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} />) : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
+      {timeline?.runs.length ? <RunList runs={timeline.runs} expandThinking={expandThinking} changePaths={changePaths} onOpenChange={onOpenChange} /> : <p className="muted">Submit a prompt or inline command to start this Task.</p>}
       {waitingForCapacity && <p className="queue-position" role="status"><strong>Waiting for capacity.</strong> Queue position {timeline?.queuePosition ?? 1} · global limit {timeline?.runLimit ?? 4} active Runs.</p>}
       {interrupted && <section className="interrupted-recovery" role="status" aria-label="Interrupted Run recovery"><strong>Run interrupted</strong><p>PiLot did not retry the interrupted input. Review the timeline and Changes before continuing.</p></section>}
       {actionNotice && <p className="success action-notice" role="status">{actionNotice}</p>}
@@ -2352,6 +2366,26 @@ function ActionError({ failure, onDismiss, onRetry }: { failure: ActionFailure; 
   </div>;
 }
 
+function useWindowActive() {
+  const [windowActive, setWindowActive] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    let receivedEvent = false;
+    const stopListening = window.pilot.onWindowActivity((active) => {
+      receivedEvent = true;
+      if (!cancelled) setWindowActive(active);
+    });
+    void window.pilot.getWindowActivity().then((active) => {
+      if (!cancelled && !receivedEvent) setWindowActive(active);
+    }).catch(() => { if (!cancelled && !receivedEvent) setWindowActive(false); });
+    return () => {
+      cancelled = true;
+      stopListening();
+    };
+  }, []);
+  return windowActive;
+}
+
 function App() {
   const [state, setState] = useState<StartupState>();
   const [projects, setProjects] = useState<ProjectsState>();
@@ -2372,6 +2406,7 @@ function App() {
   const [showDetails, setShowDetails] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [compactLayout, setCompactLayout] = useState(() => matchMedia("(max-width: 1040px)").matches);
+  const windowActive = useWindowActive();
   const [actionError, setActionError] = useState<ActionFailure>();
   const [taskDetails, setTaskDetails] = useState<TaskModelState>();
   const [inspectorView, setInspectorView] = useState<InspectorView>("details");
@@ -2390,6 +2425,8 @@ function App() {
   const focusWasInInspector = useRef(false);
   const taskCreationReturnFocus = useRef<HTMLElement | null>(null);
   const taskCreationPreviousTask = useRef<string | undefined>(undefined);
+  const taskChangesRef = useRef<TaskChanges | undefined>(undefined);
+  useLayoutEffect(() => { taskChangesRef.current = taskChanges; }, [taskChanges]);
   const loadDesktopState = useCallback(async (): Promise<LoadedDesktopState> => {
     const [startup, projectState, preferences] = await Promise.all([
       window.pilot.getStartupState(),
@@ -2494,14 +2531,14 @@ function App() {
     requestAnimationFrame(() => detailsReturnFocus.current?.focus());
   }, []);
   const openChange = useCallback((filePath: string) => {
-    const target = taskChanges?.files.find((file) => file.path === filePath || file.previousPath === filePath)?.path;
+    const target = taskChangesRef.current?.files.find((file) => file.path === filePath || file.previousPath === filePath)?.path;
     if (!target) return;
     detailsReturnFocus.current = document.activeElement as HTMLElement | null;
     setSelectedChangePath(target);
     setInspectorView("changes");
     setShowDetails(true);
     requestAnimationFrame(() => document.getElementById("inspector-changes-tab")?.focus());
-  }, [taskChanges]);
+  }, []);
   const clearActionError = useCallback(() => setActionError(undefined), []);
   const reportActionError = useCallback((reason: unknown, recovery: string) => {
     setActionError({ message: reason instanceof Error ? reason.message : String(reason), recovery });
@@ -2527,6 +2564,22 @@ function App() {
   const handleRunChange = useCallback((active: boolean) => setRunActive(active), []);
   const handleSetupChange = useCallback((active: boolean) => setSetupActive(active), []);
   const handleContinuityChange = useCallback((changed: boolean) => setTaskExternallyChanged(changed), []);
+  const applyTaskChanges = useCallback((next: TaskChanges) => {
+    setTaskChanges(next);
+    setChangesError("");
+    setSelectedChangePath((current) => current && next.files.some(({ path }) => path === current) ? current : next.files[0]?.path);
+  }, []);
+  const requestTaskChanges = useCallback(async (projectPath: string, taskPath: string, cancelled: () => boolean) => {
+    try {
+      const next = await window.pilot.getTaskChanges(projectPath, taskPath);
+      if (!cancelled()) applyTaskChanges(next);
+    } catch (reason) {
+      if (!cancelled()) {
+        setTaskChanges(undefined);
+        setChangesError(reason instanceof Error ? reason.message : String(reason));
+      }
+    }
+  }, [applyTaskChanges]);
 
   const selectedProject = projects?.selected;
   const surfaceProject = showHome ? undefined : selectedProject;
@@ -2537,31 +2590,28 @@ function App() {
   const needsProjectAccess = Boolean(selectedProject && (!selectedProject.executionConsent || (selectedProject.resourceTrust.required && selectedProject.resourceTrust.decision === null)));
   const workspaceAvailable = !showSettings;
   const taskAvailable = Boolean(workspaceAvailable && selectedTask && !removedWorktreeAt && !needsProjectAccess);
+  const taskChangesAvailable = Boolean(workspaceAvailable && selectedProject && selectedTask && !removedWorktreeAt && !needsProjectAccess);
+  const changesInspectorVisible = (!compactLayout || showDetails) && inspectorView === "changes";
+  const changesPollingInterval = changesInspectorVisible ? 1_500 : 3_000;
+  const changePathsKey = taskChanges?.files.flatMap(({ path, previousPath }) => previousPath ? [path, previousPath] : [path]).join("\0") ?? "";
+  const changePaths = useMemo(() => changePathsKey ? changePathsKey.split("\0") : [], [changePathsKey]);
   useEffect(() => {
-    let cancelled = false;
-    let timer = 0;
     setTaskChanges(undefined);
     setChangesError("");
     setSelectedChangePath(undefined);
-    if (!selectedProject || !selectedTask || removedWorktreeAt || needsProjectAccess) return;
+  }, [selectedProject?.path, selectedTask?.path, removedWorktreeAt, needsProjectAccess]);
+  useEffect(() => {
+    if (!taskChangesAvailable || !windowActive || !selectedProject || !selectedTask) return;
+    // Refresh on context/focus changes; use a faster cadence only while Changes is visible.
+    let cancelled = false;
+    let timer = 0;
     const refreshChanges = async () => {
-      try {
-        const next = await window.pilot.getTaskChanges(selectedProject.path, selectedTask.path);
-        if (cancelled) return;
-        setTaskChanges(next);
-        setChangesError("");
-        setSelectedChangePath((current) => current && next.files.some(({ path }) => path === current) ? current : next.files[0]?.path);
-      } catch (reason) {
-        if (!cancelled) {
-          setTaskChanges(undefined);
-          setChangesError(reason instanceof Error ? reason.message : String(reason));
-        }
-      }
-      if (!cancelled) timer = window.setTimeout(refreshChanges, 1_500);
+      await requestTaskChanges(selectedProject.path, selectedTask.path, () => cancelled);
+      if (!cancelled) timer = window.setTimeout(refreshChanges, changesPollingInterval);
     };
     void refreshChanges();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [selectedProject?.path, selectedTask?.path, removedWorktreeAt, needsProjectAccess]);
+  }, [selectedProject?.path, selectedTask?.path, taskChangesAvailable, taskRevision, changesPollingInterval, windowActive, requestTaskChanges]);
   useEffect(() => {
     let cancelled = false;
     setTaskHistory(undefined);
@@ -2798,7 +2848,7 @@ function App() {
             reloadToken={reloadToken}
             revision={taskRevision}
             historyDraft={historyDraft?.taskPath === selectedTaskPath ? historyDraft : undefined}
-            changePaths={taskChanges?.files.flatMap(({ path, previousPath }) => previousPath ? [path, previousPath] : [path]) ?? []}
+            changePaths={changePaths}
             onSelectTask={(path) => {
               setTaskDetails(undefined);
               setSelectedTaskPath(path);

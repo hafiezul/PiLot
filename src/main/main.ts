@@ -109,6 +109,19 @@ function destroyBackgroundTray() {
   backgroundStatusKey = undefined;
 }
 
+function windowActivity(window: BrowserWindow | null | undefined) {
+  if (!window || window.isDestroyed()) return false;
+  // Headless automation hides the native window but still drives it as the foreground surface.
+  if (testWindowHidden) return true;
+  return window.isVisible() && !window.isMinimized() && window.isFocused();
+}
+
+function publishWindowActivity(window: BrowserWindow) {
+  if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+    window.webContents.send("window:activity", windowActivity(window));
+  }
+}
+
 function restoreMainWindow() {
   backgroundMode = false;
   destroyBackgroundTray();
@@ -343,6 +356,13 @@ function createWindow() {
   mainWindow = window;
   window.webContents.on("render-process-gone", () => { void diagnostics?.record("app.window-load"); });
   window.on("unresponsive", () => { void diagnostics?.record("app.window-load"); });
+  const publishActivity = () => publishWindowActivity(window);
+  window.on("focus", publishActivity);
+  window.on("blur", publishActivity);
+  window.on("show", publishActivity);
+  window.on("hide", publishActivity);
+  window.on("minimize", publishActivity);
+  window.on("restore", publishActivity);
   if (preferences.window?.maximized) window.maximize();
   if (!testWindowHidden) window.once("ready-to-show", () => window.show());
 
@@ -444,6 +464,7 @@ app.whenReady().then(async () => {
     refreshBackgroundTray();
   }, environmentForProject, preferences.globalRunCap);
   runCoordinator = runs;
+  ipcMain.handle("window:get-activity", (event) => windowActivity(BrowserWindow.fromWebContents(event.sender)));
   if (testLifecycle) {
     ipcMain.on("window:test-close", (event) => BrowserWindow.fromWebContents(event.sender)?.close());
     ipcMain.on("window:test-recreate", (event) => {

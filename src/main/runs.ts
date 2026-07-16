@@ -212,6 +212,7 @@ function updateRun(active: ActiveRun, update: (run: RunEvidence) => RunEvidence)
   active.state = {
     ...active.state,
     runs: active.state.runs.map((run) => run.id === active.runId ? update(run) : run),
+    evidenceRevision: active.state.evidenceRevision + 1,
   };
 }
 
@@ -449,7 +450,7 @@ function savedState(taskPath: string, manager: SessionManager, executionPath: st
       run.status = run.items.some((item) => item.kind === "assistant" || item.kind === "tool") ? "settled" : "interrupted";
     }
   }
-  return { taskPath, runs };
+  return { taskPath, runs, evidenceRevision: 0 };
 }
 
 export class RunCoordinator {
