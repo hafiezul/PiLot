@@ -9,7 +9,8 @@
     "dev": "npm run typecheck && tsc -p tsconfig.main.json && node scripts/dev.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
-    "test": "npm run build && playwright test"
+    "test": "npm run build && playwright test",
+    "doctor": "npx react-doctor@latest"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",
