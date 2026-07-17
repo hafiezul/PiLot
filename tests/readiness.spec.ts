@@ -1,5 +1,5 @@
 import { getShellConfig, SessionManager } from "@earendil-works/pi-coding-agent";
-import { chromium, expect, test, type Browser, type Page } from "@playwright/test";
+import { chromium, expect, test, type Browser, type Locator, type Page } from "@playwright/test";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
@@ -157,6 +157,7 @@ async function launch(
     `--pilot-debug-port=${port}`,
     ...(test.info().project.use.headless === false || extraEnv.PILOT_TEST_WINDOW_VISIBLE === "1" ? [] : ["--pilot-test-hidden"]),
     ...(extraEnv.PILOT_TEST_CLOSE_RESPONSE ? ["--pilot-test-lifecycle"] : []),
+    ...(extraEnv.PILOT_TEST_IPC_TRACKING === "1" ? ["--pilot-test-ipc-tracking"] : []),
   ], {
     env: { ...env, HOME: testHome, PILOT_USER_DATA_DIR: path.join(agentDir, "pilot-user-data"), ...extraEnv, PI_CODING_AGENT_DIR: agentDir },
     stdio: "ignore",
@@ -191,6 +192,15 @@ async function terminate(app: { browser: Browser; process: ChildProcess }) {
   if (app.process.exitCode === null) app.process.kill("SIGKILL");
   await exit;
   await app.browser.close().catch(() => undefined);
+}
+
+async function fixedPickerAnchor(picker: Locator, trigger: Locator) {
+  const [pickerBounds, triggerBounds] = await Promise.all([picker.boundingBox(), trigger.boundingBox()]);
+  if (!pickerBounds || !triggerBounds) return undefined;
+  return {
+    left: Math.round(pickerBounds.x - triggerBounds.x),
+    above: Math.round(triggerBounds.y - pickerBounds.y - pickerBounds.height),
+  };
 }
 
 async function openCurrentTaskPathError(page: Page, filePath: string, application = "vscode") {
@@ -814,6 +824,8 @@ test("provides accessible Navigation and Inspector dividers only in the wide lay
     await expect(navigationDivider).toHaveAttribute("aria-valuenow", "230");
     await expect(navigationDivider).toHaveAttribute("aria-valuetext", "230 pixels");
     await expect(navigationDivider).toHaveAccessibleDescription(/double-click or press Enter to reset/i);
+    await expect(navigationDivider).toHaveCSS("width", "16px");
+    await expect.poll(() => navigationDivider.evaluate((element) => getComputedStyle(element, "::before").width)).toBe("2px");
     await expect(inspectorDivider).toHaveAttribute("aria-valuenow", "360");
     await expect(inspectorDivider).toHaveAttribute("aria-valuetext", "360 pixels");
     await expect(inspectorDivider).toHaveAccessibleDescription(/double-click or press Enter to reset/i);
@@ -1501,6 +1513,70 @@ test("creates a managed Worktree Task from a committed ref", async () => {
   } finally {
     await close(app);
     await provider.close();
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("avoids redundant discovery IPC when a Worktree Task regains focus", async () => {
+  test.setTimeout(45_000);
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  await execute("git", ["init"], { cwd: project });
+  await execute("git", ["config", "user.email", "pilot@example.test"], { cwd: project });
+  await execute("git", ["config", "user.name", "PiLot Test"], { cwd: project });
+  await writeFile(path.join(project, "tracked.txt"), "committed\n");
+  await execute("git", ["add", "."], { cwd: project });
+  await execute("git", ["commit", "-m", "fixture base"], { cwd: project });
+  const baseCommit = (await execute("git", ["rev-parse", "HEAD"], { cwd: project })).stdout.trim();
+  const app = await launch(environment.agentDir, false, {
+    PILOT_TEST_PROJECT_DIR: project,
+    PILOT_TEST_IPC_TRACKING: "1",
+  });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("button", { name: "New Task" }).click();
+    const create = app.window.getByRole("dialog", { name: "Create Task" });
+    await create.getByRole("radio", { name: "Worktree" }).check();
+    await create.getByRole("combobox", { name: "Branch or commit" }).fill(baseCommit);
+    await create.getByRole("button", { name: "Create Worktree Task" }).click();
+
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await inspector.getByRole("tab", { name: /Changes/ }).click();
+    const changes = inspector.getByRole("tabpanel", { name: /Changes/ });
+    const worktree = changes.getByRole("region", { name: "Worktree actions" });
+    await expect(worktree.getByRole("status", { name: "Branch status" })).toContainText("Detached");
+    const applicationChooser = changes.getByRole("button", { name: "Choose application for execution location" });
+    await expect(applicationChooser).toBeEnabled();
+
+    await app.window.evaluate(() => {
+      const pilot = (window as any).pilot;
+      pilot.resetIpcInvocationCounts();
+      for (let index = 0; index < 3; index++) window.dispatchEvent(new Event("focus"));
+    });
+    await app.window.waitForTimeout(250);
+    const focusCounts = await app.window.evaluate(() => (window as any).pilot.getIpcInvocationCounts());
+    expect({
+      applications: focusCounts["applications:get"] ?? 0,
+      worktree: focusCounts["tasks:get-worktree"] ?? 0,
+    }).toEqual({ applications: 0, worktree: 0 });
+
+    await app.window.evaluate(() => (window as any).pilot.resetIpcInvocationCounts());
+    await applicationChooser.click();
+    await expect(app.window.getByRole("menu", { name: "Applications" })).toBeVisible();
+    const applicationCounts = await app.window.evaluate(() => (window as any).pilot.getIpcInvocationCounts());
+    expect(applicationCounts["applications:get"]).toBe(1);
+    await app.window.keyboard.press("Escape");
+
+    await app.window.evaluate(() => (window as any).pilot.resetIpcInvocationCounts());
+    await worktree.getByRole("button", { name: "Remove worktree" }).click();
+    await expect(app.window.getByRole("dialog", { name: "Remove managed worktree" })).toBeVisible();
+    const removalCounts = await app.window.evaluate(() => (window as any).pilot.getIpcInvocationCounts());
+    expect(removalCounts["tasks:get-worktree"]).toBe(1);
+    await app.window.getByRole("dialog", { name: "Remove managed worktree" }).getByRole("button", { name: "Cancel" }).click();
+  } finally {
+    await close(app);
     await rm(environment.root, { recursive: true, force: true });
   }
 });
@@ -2862,6 +2938,9 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
     const editorMenu = app.window.getByRole("menu", { name: "Applications" });
     const configuredOption = editorMenu.getByRole("menuitemradio", { name: "Pi configured editor" });
     await expect(configuredOption).toBeFocused();
+    await expect.poll(() => editorMenu.evaluate((element) => Math.round(window.innerWidth - element.getBoundingClientRect().right))).toBe(12);
+    await app.window.setViewportSize({ width: 1_380, height: 760 });
+    await expect.poll(() => editorMenu.evaluate((element) => Math.round(window.innerWidth - element.getBoundingClientRect().right))).toBe(12);
     await configuredOption.press("ArrowDown");
     await expect(configuredOption).not.toBeFocused();
     await app.window.keyboard.press("Escape");
@@ -2869,6 +2948,7 @@ test("reviews aggregate Task changes through the Electron boundary", async () =>
     await editorChooser.click();
     await configuredOption.press("Tab");
     await expect(editorMenu).not.toBeVisible();
+    await app.window.setViewportSize({ width: 1_180, height: 760 });
     await configuredEditor.click();
     await editorChooser.click();
     await editorMenu.getByRole("menuitemradio", { name: "VS Code" }).click();
@@ -3334,6 +3414,15 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     await expect(picker).not.toContainText("Locked");
     const search = picker.getByRole("combobox", { name: "Search models" });
     await expect(search).toBeFocused();
+    await expect.poll(() => fixedPickerAnchor(picker, modelControl)).toEqual({ left: 0, above: 7 });
+    const navigationDivider = first.window.getByRole("separator", { name: "Resize Navigation" });
+    await navigationDivider.focus();
+    await navigationDivider.press("Shift+ArrowRight");
+    await expect(picker).toBeVisible();
+    await expect.poll(() => fixedPickerAnchor(picker, modelControl)).toEqual({ left: 0, above: 7 });
+    await navigationDivider.press("Enter");
+    await expect.poll(() => fixedPickerAnchor(picker, modelControl)).toEqual({ left: 0, above: 7 });
+    await search.focus();
     await search.fill("altrsn");
     await expect(picker.getByRole("tab")).toHaveCount(0);
     const alternate = picker.getByRole("option", { name: /Alternate Reasoning/ });
@@ -3361,11 +3450,22 @@ test("controls a Task model and shows usage through the Electron boundary", asyn
     await thinking.press("Enter");
     const thinkingPicker = first.window.getByRole("dialog", { name: "Choose thinking level" });
     await expect(thinkingPicker.getByRole("option").locator("strong")).toHaveText(["Off", "High", "Max"]);
+    await first.window.setViewportSize({ width: 600, height: 320 });
+    const taskScroller = first.window.getByRole("main");
+    await taskScroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect.poll(async () => (await fixedPickerAnchor(thinkingPicker, thinking))?.above).toBe(7);
+    const triggerTop = (await thinking.boundingBox())!.y;
+    const scrollTop = await taskScroller.evaluate((element) => element.scrollTop);
+    expect(scrollTop).toBeGreaterThan(0);
+    await taskScroller.evaluate((element) => { element.scrollTop = Math.max(0, element.scrollTop - 24); });
+    await expect.poll(async () => Math.round((await thinking.boundingBox())!.y)).not.toBe(Math.round(triggerTop));
+    await expect.poll(async () => (await fixedPickerAnchor(thinkingPicker, thinking))?.above).toBe(7);
     const maxThinking = thinkingPicker.getByRole("option", { name: "Max" });
     await maxThinking.focus();
     await maxThinking.press("Enter");
     await expect(thinkingPicker).toBeHidden();
     await expect(thinking).toContainText("Thinking · Max");
+    await first.window.setViewportSize({ width: 1_180, height: 760 });
 
     const prompt = composer.getByRole("combobox", { name: "Prompt" });
     await prompt.fill("model controls stats");

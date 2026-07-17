@@ -40,6 +40,7 @@ const developmentRenderer = !app.isPackaged && process.env.PILOT_DEV_SERVER === 
 const debuggingPort = process.argv.find((argument) => argument.startsWith("--pilot-debug-port="))?.split("=")[1];
 const testWindowHidden = process.argv.includes("--pilot-test-hidden");
 const testLifecycle = !app.isPackaged && process.argv.includes("--pilot-test-lifecycle");
+const testIpcTracking = !app.isPackaged && process.argv.includes("--pilot-test-ipc-tracking");
 const testCloseResponse = testLifecycle ? process.env.PILOT_TEST_CLOSE_RESPONSE : undefined;
 // The 32 px representations keep the status icon crisp at 2x display scale.
 const macTrayIcon = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAARElEQVR42mNgoBH4jwMTrZEseWJtwanuPwHn/0dTg1UzsQZgGPKfgDP/41AzagARMYEtZhjwpYP/lKZWipIyVTITyQAArBFUrN6dr4YAAAAASUVORK5CYII=";
@@ -349,7 +350,10 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       preload: path.join(directory, "../preload.cjs"),
-      ...(testLifecycle ? { additionalArguments: ["--pilot-test-lifecycle-api"] } : {}),
+      ...(testLifecycle || testIpcTracking ? { additionalArguments: [
+        ...(testLifecycle ? ["--pilot-test-lifecycle-api"] : []),
+        ...(testIpcTracking ? ["--pilot-test-ipc-tracking-api"] : []),
+      ] } : {}),
     },
   });
 

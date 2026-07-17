@@ -183,7 +183,7 @@ function ProviderSettings({ onChange }: { onChange(): void }) {
   return (
     <section className="provider-setup" aria-label="Provider authentication" aria-busy={startingLogin || cancellingLogin}>
       <div className="setup-heading">
-        <div><p className="eyebrow">Pi environment</p><h2>Provider authentication</h2></div>
+        <h2>Provider authentication</h2>
         <div className="setup-controls"><span className="muted">Secrets stay in Pi's credential store.</span><button disabled={loginBusy} onClick={() => void attempt(() => window.pilot.getProviderState(), "Providers refreshed")}>Refresh providers</button></div>
       </div>
       <ul className="credential-summary" aria-label="Detected credentials">
@@ -668,26 +668,33 @@ function VirtualDiff({ diff }: { diff: TaskFileDiff }) {
   </div>;
 }
 
-function ApplicationOpenControl({ targetLabel, state, disabled = false, onOpen }: {
+function ApplicationOpenControl({ targetLabel, state, disabled = false, onRefresh, onOpen }: {
   targetLabel: string;
   state?: ApplicationState;
   disabled?: boolean;
+  onRefresh(): Promise<ApplicationState | undefined>;
   onOpen(application: ApplicationId): void;
 }) {
   const picker = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [activeApplication, setActiveApplication] = useState<ApplicationId>();
+  useFixedPickerTracking(pickerOpen, picker, trigger, 220, true);
   const preferred = state?.available.find(({ id }) => id === state.preferred);
   const action = preferred?.kind === "file-manager" ? "Show" : "Open";
   const close = () => {
     if (picker.current?.matches(":popover-open")) picker.current.hidePopover();
     trigger.current?.focus();
   };
-  const show = () => {
-    if (!picker.current || !trigger.current || disabled || !state?.available.length) return;
+  const show = async () => {
+    if (!picker.current || !trigger.current || disabled || refreshing || !state?.available.length) return;
+    setRefreshing(true);
+    const refreshed = await onRefresh();
+    setRefreshing(false);
+    if (!refreshed?.available.length || !picker.current || !trigger.current) return;
     placePicker(picker.current, trigger.current, 220, true);
-    const active = state.preferred ?? state.available[0].id;
+    const active = refreshed.preferred ?? refreshed.available[0].id;
     setActiveApplication(active);
     if (!picker.current.matches(":popover-open")) picker.current.showPopover();
     requestAnimationFrame(() => picker.current?.querySelector<HTMLElement>(`[data-application-id="${active}"]`)?.focus());
@@ -705,7 +712,7 @@ function ApplicationOpenControl({ targetLabel, state, disabled = false, onOpen }
     <button type="button" className="editor-open-primary" aria-label={preferred ? `${action} ${targetLabel} in ${preferred.label}` : unavailable ? "No supported applications found" : "Finding installed applications"} disabled={disabled || !preferred} onClick={() => preferred && onOpen(preferred.id)}>
       {preferred ? <>{action} in <strong>{preferred.label}</strong></> : unavailable ? "No apps found" : "Finding apps…"}
     </button>
-    <button ref={trigger} type="button" className="editor-open-picker" aria-label={`Choose application for ${targetLabel}`} aria-haspopup="menu" aria-expanded={pickerOpen} disabled={disabled || !state?.available.length} onClick={show}><span aria-hidden="true">⌄</span></button>
+    <button ref={trigger} type="button" className="editor-open-picker" aria-label={refreshing ? "Finding installed applications" : `Choose application for ${targetLabel}`} aria-haspopup="menu" aria-expanded={pickerOpen} disabled={disabled || refreshing || !state?.available.length} onClick={() => void show()}><span aria-hidden="true">⌄</span></button>
     <div ref={picker} popover="auto" className="model-picker-popover editor-picker-popover" role="menu" aria-label="Applications" onToggle={(event) => setPickerOpen(event.currentTarget.matches(":popover-open"))} onKeyDown={(event) => {
       if (event.key === "Escape") { event.preventDefault(); close(); }
       if (event.key === "Tab") { picker.current?.hidePopover(); trigger.current?.focus(); }
@@ -788,15 +795,11 @@ function WorktreeActions({ project, task, disabled, onRemoved }: {
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => {
-      setError("");
-      void window.pilot.getTaskWorktree(project.path, task.path).then((next) => { if (!cancelled) setState(next); })
-        .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
-    };
     setState(undefined);
-    load();
-    window.addEventListener("focus", load);
-    return () => { cancelled = true; window.removeEventListener("focus", load); };
+    setError("");
+    void window.pilot.getTaskWorktree(project.path, task.path).then((next) => { if (!cancelled) setState(next); })
+      .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
+    return () => { cancelled = true; };
   }, [project.path, task.path]);
 
   const createBranch = async () => {
@@ -880,20 +883,25 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, disable
   const [applicationState, setApplicationState] = useState<ApplicationState>();
   const selected = changes?.files.find(({ path }) => path === selectedPath);
 
+  const loadApplications = async (cancelled: () => boolean = () => false) => {
+    setApplicationError("");
+    try {
+      const state = await window.pilot.getApplicationState(project.path, task.path);
+      if (!cancelled()) setApplicationState(state);
+      return state;
+    } catch (reason) {
+      if (!cancelled()) {
+        setApplicationState(undefined);
+        setApplicationError(reason instanceof Error ? reason.message : String(reason));
+      }
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     setApplicationState(undefined);
-    const loadApplications = () => {
-      setApplicationError("");
-      void window.pilot.getApplicationState(project.path, task.path).then((state) => {
-        if (!cancelled) setApplicationState(state);
-      }).catch((reason) => {
-        if (!cancelled) { setApplicationState(undefined); setApplicationError(reason instanceof Error ? reason.message : String(reason)); }
-      });
-    };
-    loadApplications();
-    window.addEventListener("focus", loadApplications);
-    return () => { cancelled = true; window.removeEventListener("focus", loadApplications); };
+    void loadApplications(() => cancelled);
+    return () => { cancelled = true; };
   }, [project.path, task.path]);
 
   useEffect(() => {
@@ -930,12 +938,12 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, disable
     : <p className="muted changes-loading" role="status">Reading Git changes…</p>;
   return <section ref={panel} className="changes-panel" aria-label="Task changes">
     <header className="changes-heading">
-      <div><p className="eyebrow">Working tree</p><h2>Task changes</h2></div>
+      <h2>Task changes</h2>
       <div className="change-totals" aria-label={`${changes.files.length} changed files, ${changes.additions} additions, ${changes.deletions} deletions`}>
         <strong>{changes.files.length} file{changes.files.length === 1 ? "" : "s"}</strong><span className="additions">+{changes.additions.toLocaleString()}</span><span className="deletions">−{changes.deletions.toLocaleString()}</span>
       </div>
     </header>
-    <div className="execution-editor-row"><code title={changes.executionPath}>{changes.executionPath}</code><ApplicationOpenControl targetLabel="execution location" state={applicationState} onOpen={(application) => open(application)} /></div>
+    <div className="execution-editor-row"><code title={changes.executionPath}>{changes.executionPath}</code><ApplicationOpenControl targetLabel="execution location" state={applicationState} onRefresh={loadApplications} onOpen={(application) => open(application)} /></div>
     {applicationState?.notice && <p className="editor-discovery-note" role="status">{applicationState.notice}</p>}
     {applicationState && !applicationState.available.length && <p className="editor-discovery-note" role="status">No supported external application was detected. Install an editor, then return to PiLot.</p>}
     {task.execution.kind === "worktree" && !task.execution.removedAt && <WorktreeActions project={project} task={task} disabled={disabled} onRemoved={onWorktreeRemoved} />}
@@ -950,7 +958,7 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, disable
             </button></li>)}
           </ul>
           {selected && <section className="file-diff" aria-labelledby="selected-change-title">
-            <header><div><span>{changeStatusLabels[selected.status]}</span><h3 id="selected-change-title">{selected.path}</h3></div><ApplicationOpenControl targetLabel={selected.path} state={applicationState} disabled={selected.status === "deleted"} onOpen={(application) => open(application, selected.path)} /></header>
+            <header><div><span>{changeStatusLabels[selected.status]}</span><h3 id="selected-change-title">{selected.path}</h3></div><ApplicationOpenControl targetLabel={selected.path} state={applicationState} disabled={selected.status === "deleted"} onRefresh={loadApplications} onOpen={(application) => open(application, selected.path)} /></header>
             {!diff && !diffError ? <p className="muted" role="status">Loading unified diff…</p>
               : diff?.binary ? <p className="muted">Binary file content is not shown.</p>
                 : diff?.truncated ? <p className="muted">This diff is too large to display. Open the file in your editor to review it.</p>
@@ -1330,9 +1338,10 @@ function modelSearchScore(provider: TaskProvider, model: TaskModel, query: strin
   return total;
 }
 
-function placePicker(popover: HTMLElement, trigger: HTMLElement, preferredWidth: number, adaptive = false) {
+function placePicker(popover: HTMLElement, trigger: HTMLElement, preferredWidth: number, adaptive = false, matchTriggerWidth = false) {
   const bounds = trigger.getBoundingClientRect();
-  const width = Math.min(preferredWidth, window.innerWidth - 24);
+  const desiredWidth = matchTriggerWidth ? Math.max(preferredWidth, trigger.offsetWidth) : preferredWidth;
+  const width = Math.min(desiredWidth, window.innerWidth - 24);
   popover.style.width = `${width}px`;
   popover.style.left = `${Math.max(12, Math.min(bounds.left, window.innerWidth - width - 12))}px`;
   if (!adaptive) { popover.style.top = `${bounds.top - 7}px`; return; }
@@ -1341,6 +1350,48 @@ function placePicker(popover: HTMLElement, trigger: HTMLElement, preferredWidth:
   popover.style.top = `${above ? bounds.top - 7 : bounds.bottom + 7}px`;
   popover.style.transform = above ? "translateY(-100%)" : "none";
   popover.style.maxHeight = `${Math.max(120, Math.min(320, above ? bounds.top - 19 : roomBelow))}px`;
+}
+
+function useFixedPickerTracking(
+  open: boolean,
+  popover: React.RefObject<HTMLElement | null>,
+  trigger: React.RefObject<HTMLElement | null>,
+  preferredWidth: number,
+  adaptive = false,
+  matchTriggerWidth = false,
+) {
+  useLayoutEffect(() => {
+    const picker = popover.current;
+    const anchor = trigger.current;
+    if (!open || !picker || !anchor) return;
+    let frame = 0;
+    const update = () => placePicker(picker, anchor, preferredWidth, adaptive, matchTriggerWidth);
+    const scheduleUpdate = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (picker.isConnected && anchor.isConnected) update();
+      });
+    };
+
+    update();
+    window.addEventListener("scroll", scheduleUpdate, { capture: true, passive: true });
+    window.addEventListener("resize", scheduleUpdate);
+    window.visualViewport?.addEventListener("scroll", scheduleUpdate, { passive: true });
+    window.visualViewport?.addEventListener("resize", scheduleUpdate);
+    const resizeObserver = new ResizeObserver(scheduleUpdate);
+    resizeObserver.observe(picker);
+    for (let element: HTMLElement | null = anchor; element; element = element.parentElement) resizeObserver.observe(element);
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      window.removeEventListener("scroll", scheduleUpdate, true);
+      window.removeEventListener("resize", scheduleUpdate);
+      window.visualViewport?.removeEventListener("scroll", scheduleUpdate);
+      window.visualViewport?.removeEventListener("resize", scheduleUpdate);
+    };
+  }, [adaptive, matchTriggerWidth, open, popover, preferredWidth, trigger]);
 }
 
 function thinkingLevelLabel(level: TaskModelState["thinkingLevel"]) {
@@ -1355,13 +1406,14 @@ function ThinkingPicker({ state, disabled, onSelect }: {
   const popover = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  useFixedPickerTracking(open, popover, trigger, 180, false, true);
   const close = () => {
     if (popover.current?.matches(":popover-open")) popover.current.hidePopover();
     trigger.current?.focus();
   };
   const show = () => {
     if (!popover.current || !trigger.current || disabled) return;
-    placePicker(popover.current, trigger.current, Math.max(180, trigger.current.offsetWidth));
+    placePicker(popover.current, trigger.current, 180, false, true);
     if (!popover.current.matches(":popover-open")) popover.current.showPopover();
     requestAnimationFrame(() => {
       const current = popover.current;
@@ -1418,6 +1470,7 @@ function TaskModelControls({ project, task, state, disabled, onChange, onOpenSet
   const [providerId, setProviderId] = useState("");
   const [query, setQuery] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
+  useFixedPickerTracking(pickerOpen, picker, pickerTrigger, 420);
   const providers = state?.providers.filter(({ models }) => models.length) ?? [];
   const selectedProvider = providers.find(({ id }) => id === state?.selected?.provider);
   const activeProvider = providers.find(({ id }) => id === providerId) ?? selectedProvider ?? providers[0];
@@ -1837,7 +1890,7 @@ function TaskPage({ project, task, reloadToken, revision, historyDraft, changePa
 
   return <div ref={taskPage} className="task-page">
     <header className="topbar task-topbar">
-      <div><p className="eyebrow">Active Task</p><h1>{task.title}</h1><span className="execution-location">{task.execution.kind === "worktree" ? `Worktree · ${task.execution.ref}` : "Local execution location"}</span></div>
+      <div><h1>{task.title}</h1><span className="execution-location">{task.execution.kind === "worktree" ? `Worktree · ${task.execution.ref}` : "Local execution location"}</span></div>
       <button className="new-task-button" data-action="task.new" onClick={onCreate}>New Task</button>
     </header>
     {setupState && <section className={`worktree-setup setup-${setupState.status}`} aria-label="Worktree setup">
@@ -2016,7 +2069,7 @@ function RemovedWorktreeTaskPage({ task, onCreate }: { task: TaskSummary; onCrea
   const removedAt = task.execution.kind === "worktree" ? task.execution.removedAt : undefined;
   return <div className="task-page removed-worktree-page">
     <header className="topbar task-topbar">
-      <div><p className="eyebrow">Archived Task</p><h1 id="removed-task-title" tabIndex={-1}>{task.title}</h1><span className="execution-location">Managed Worktree removed</span></div>
+      <div><h1 id="removed-task-title" tabIndex={-1}>{task.title}</h1><span className="execution-location">Managed Worktree removed</span></div>
       <button className="new-task-button" data-action="task.new" onClick={onCreate}>New Task</button>
     </header>
     <section className="removed-worktree-summary" aria-labelledby="removed-worktree-title">
@@ -2080,13 +2133,11 @@ function CommandCenter({ startup, projects, runStates, onOpenTask, onCreateTask 
 
     {!startup ? <p role="status" className="loading">Checking your Pi environment…</p>
       : startup.gaps.length > 0 ? <section className="readiness command-readiness" aria-labelledby="readiness-title" tabIndex={0}>
-        <p className="eyebrow">Action required</p>
         <h2 id="readiness-title">Readiness</h2>
         <p className="muted">Resolve these items before starting a Task.</p>
         <ol>{startup.gaps.map((gap) => <li key={gap.area}><span className="gap-mark" aria-hidden="true">!</span><div><h3>{gap.title}</h3><p>{gap.detail}</p></div></li>)}</ol>
       </section> : !attention.length && !recent.length ? <section className="ready" aria-label={`${startup.passed} readiness checks passed`}>
         <span className="ready-mark" aria-hidden="true">✓</span>
-        <p className="eyebrow">Environment ready</p>
         <h2>Ready to work</h2>
         <p className="muted">Your provider, shell, and Pi environment are ready.</p>
       </section> : null}
@@ -2124,7 +2175,7 @@ function ProjectPage({ project, needsAccess, selectedTaskPath, reloadToken, revi
   if (removedTask && !needsAccess) return <RemovedWorktreeTaskPage task={removedTask} onCreate={onCreateTask} />;
   return <>
     <header className="topbar project-topbar">
-      <div><p className="eyebrow">Project</p><h1>{project.name}</h1><code>{project.path}</code></div>
+      <div><h1>{project.name}</h1><code>{project.path}</code></div>
       <div className="project-top-actions"><span className="privacy"><i /> Local only</span><ProjectActions project={project} onOpenAccess={onOpenAccess} onChange={onChange} onActionStart={onActionStart} onError={onError} /></div>
     </header>
     {needsAccess ? <section className="project-empty" aria-live="polite">
@@ -2206,7 +2257,6 @@ function GeneralSettings() {
   };
 
   return <section className="general-settings" aria-labelledby="general-title">
-    <p className="eyebrow">Application</p>
     <h2 id="general-title">General</h2>
     <p className="muted">Choose how PiLot looks, presents Run evidence, and opens external tools on this device.</p>
     <fieldset disabled={!appearance}>
@@ -2310,7 +2360,7 @@ function DiagnosticsSettings() {
 
   return <section className="diagnostics-settings" aria-labelledby="diagnostics-title">
     <div className="settings-page-heading">
-      <div><p className="eyebrow">Support</p><h2 id="diagnostics-title">Diagnostics</h2></div>
+      <h2 id="diagnostics-title">Diagnostics</h2>
       <button type="button" disabled={loading || exporting} onClick={load}>Refresh preview</button>
     </div>
     <p className="settings-introduction">Inspect bounded local support events before choosing whether to export them.</p>
@@ -3106,11 +3156,9 @@ function App() {
           <button type="button" className="inspector-close" aria-label="Close Inspector" onClick={closeDetails}>×</button>
           {inspectorView === "details" ? <div id="inspector-details-panel" className="inspector-body" role="tabpanel" aria-labelledby="inspector-details-tab">
             {surfaceProject ? needsProjectAccess ? <>
-              <p className="eyebrow">Project</p>
               <h2>{surfaceProject.name}</h2>
               <p className="muted inspector-note">Complete the open access decision to continue.</p>
             </> : selectedTask && removedWorktreeAt ? <section className="task-details" aria-label="Removed Task details">
-              <p className="eyebrow">Archived Task</p>
               <h2>{selectedTask.title}</h2>
               <p className="muted inspector-note">Its managed Worktree was removed on {new Date(removedWorktreeAt).toLocaleString()}.</p>
               <dl>
@@ -3119,7 +3167,6 @@ function App() {
                 <div><dt>Run access</dt><dd>Unavailable</dd></div>
               </dl>
             </section> : selectedTask && taskDetails ? <section className="task-details" aria-label="Task details">
-              <p className="eyebrow">Task details</p>
               <h2>{selectedTask.title}</h2>
               <dl>
                 <div><dt>Model</dt><dd>{taskDetails.selected ? `${taskDetails.selected.provider}/${taskDetails.selected.id}` : "Unavailable"}</dd></div>
@@ -3130,7 +3177,6 @@ function App() {
                 <div><dt>Execution location</dt><dd>{selectedTask.execution.kind === "worktree" ? "Worktree" : "Local"}</dd></div>
               </dl>
             </section> : <section className="project-details" aria-label="Project details">
-              <p className="eyebrow">Project</p>
               <h2>{surfaceProject.name}</h2>
               <p className="muted inspector-note">{surfaceProject.path}</p>
               <dl>
@@ -3139,7 +3185,6 @@ function App() {
                 <div><dt>Execution location</dt><dd>Chosen per Task</dd></div>
               </dl>
             </section> : <>
-              <p className="eyebrow">Startup</p>
               <h2>Readiness</h2>
               <dl>
                 <div><dt>Checks passed</dt><dd>{state?.passed ?? "—"} / 3</dd></div>

@@ -10,6 +10,16 @@ const lifecycleTestApi = process.argv.includes("--pilot-test-lifecycle-api") ? {
   getDesktopLifecycleState: () => ipcRenderer.invoke("window:test-lifecycle-state") as Promise<{ windowVisible: boolean; statusPresent: boolean }>,
 } : {};
 
+const ipcInvocationCounts = process.argv.includes("--pilot-test-ipc-tracking-api") ? new Map<string, number>() : undefined;
+const trackedInvoke = (channel: string, ...args: unknown[]) => {
+  if (ipcInvocationCounts) ipcInvocationCounts.set(channel, (ipcInvocationCounts.get(channel) ?? 0) + 1);
+  return ipcRenderer.invoke(channel, ...args);
+};
+const ipcTrackingTestApi = ipcInvocationCounts ? {
+  getIpcInvocationCounts: () => Object.fromEntries(ipcInvocationCounts),
+  resetIpcInvocationCounts: () => ipcInvocationCounts.clear(),
+} : {};
+
 const api: PiLotApi = {
   getStartupState: () => ipcRenderer.invoke("startup:get"),
   platform: process.platform as "darwin" | "win32" | "linux",
@@ -26,6 +36,7 @@ const api: PiLotApi = {
     return () => ipcRenderer.removeListener("window:activity", handler);
   },
   ...lifecycleTestApi,
+  ...ipcTrackingTestApi,
   getDiagnosticPreview: () => ipcRenderer.invoke("diagnostics:get"),
   exportDiagnosticBundle: () => ipcRenderer.invoke("diagnostics:export"),
   getPreferences: () => ipcRenderer.invoke("preferences:get"),
@@ -43,7 +54,7 @@ const api: PiLotApi = {
   setAgentCompaction: (settings) => ipcRenderer.invoke("agent-settings:set-compaction", settings),
   getTerminalState: () => ipcRenderer.invoke("terminals:get"),
   setPreferredTerminal: (terminal) => ipcRenderer.invoke("terminals:set-preferred", terminal),
-  getApplicationState: (projectPath, taskPath) => ipcRenderer.invoke("applications:get", projectPath, taskPath),
+  getApplicationState: (projectPath, taskPath) => trackedInvoke("applications:get", projectPath, taskPath),
   setPreferredApplication: (projectPath, taskPath, application) => ipcRenderer.invoke("applications:set-preferred", projectPath, taskPath, application),
   getProviderState: () => ipcRenderer.invoke("providers:get"),
   setApiKey: (provider, key) => ipcRenderer.invoke("providers:set-key", provider, key),
@@ -86,7 +97,7 @@ const api: PiLotApi = {
   cloneTaskHistory: (projectPath, taskPath, request) => ipcRenderer.invoke("tasks:clone-history", projectPath, taskPath, request),
   getTaskChanges: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-changes", projectPath, taskPath),
   getTaskFileDiff: (projectPath, taskPath, filePath) => ipcRenderer.invoke("tasks:get-file-diff", projectPath, taskPath, filePath),
-  getTaskWorktree: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-worktree", projectPath, taskPath),
+  getTaskWorktree: (projectPath, taskPath) => trackedInvoke("tasks:get-worktree", projectPath, taskPath),
   createTaskWorktreeBranch: (projectPath, taskPath, branch) => ipcRenderer.invoke("tasks:create-worktree-branch", projectPath, taskPath, branch),
   openTaskWorktreeTerminal: (projectPath, taskPath) => ipcRenderer.invoke("tasks:open-worktree-terminal", projectPath, taskPath),
   removeTaskWorktree: (projectPath, taskPath, discard, expectedFiles) => ipcRenderer.invoke("tasks:remove-worktree", projectPath, taskPath, discard, expectedFiles),

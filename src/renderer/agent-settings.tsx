@@ -50,7 +50,7 @@ export function AgentSettings() {
   useEffect(() => { void reload(); }, []);
 
   if (!state) return <section className="agent-settings" aria-label="Agent defaults" aria-busy={Boolean(busy)}>
-    <div className="settings-page-heading"><div><p className="eyebrow">Pi environment</p><h2>Agent defaults</h2></div><button type="button" disabled={Boolean(busy)} onClick={reload}>Retry</button></div>
+    <div className="settings-page-heading"><h2>Agent defaults</h2><button type="button" disabled={Boolean(busy)} onClick={reload}>Retry</button></div>
     {error ? <p className="error settings-feedback" role="alert">{error}</p> : <p className="muted settings-feedback" role="status">Reading Pi settings…</p>}
   </section>;
 
@@ -63,7 +63,7 @@ export function AgentSettings() {
 
   return <section className="agent-settings" aria-labelledby="agent-settings-title" aria-busy={Boolean(busy)}>
     <div className="settings-page-heading">
-      <div><p className="eyebrow">Pi environment</p><h2 id="agent-settings-title">Agent defaults</h2></div>
+      <h2 id="agent-settings-title">Agent defaults</h2>
       <button type="button" disabled={Boolean(busy)} onClick={reload}>Reload Pi settings</button>
     </div>
     <p className="settings-introduction">These defaults are shared with compatible Pi interfaces. Existing Tasks keep their recorded model choices, and active Runs are not replaced underneath you.</p>
