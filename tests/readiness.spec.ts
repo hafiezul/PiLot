@@ -52,15 +52,22 @@ function historyUser(id: string, parentId: string, content: string, second: numb
   return { type: "message", id, parentId, timestamp: historyTimestamp(second), message: { role: "user", content, timestamp: Date.parse(historyTimestamp(second)) } };
 }
 
-function historyAssistant(id: string, parentId: string, content: string, second: number) {
+function historyAssistantEntry(id: string, parentId: string, content: object[], stopReason: "stop" | "toolUse" | "error", second: number, errorMessage?: string) {
   return {
     type: "message", id, parentId, timestamp: historyTimestamp(second),
     message: {
-      role: "assistant", content: [{ type: "text", text: content }], api: "openai-completions",
-      provider: "fixture", model: "fixture-model", usage: historyUsage, stopReason: "stop",
-      timestamp: Date.parse(historyTimestamp(second)),
+      role: "assistant", content, api: "openai-completions", provider: "fixture", model: "fixture-model",
+      usage: historyUsage, stopReason, ...(errorMessage ? { errorMessage } : {}), timestamp: Date.parse(historyTimestamp(second)),
     },
   };
+}
+
+function historyAssistant(id: string, parentId: string, content: string, second: number) {
+  return historyAssistantEntry(id, parentId, [{ type: "text", text: content }], "stop", second);
+}
+
+function historyErrorAssistant(id: string, parentId: string, errorMessage: string, second: number) {
+  return historyAssistantEntry(id, parentId, [], "error", second, errorMessage);
 }
 
 async function writeBranchedHistory(agentDir: string, project: string) {
@@ -2172,6 +2179,91 @@ test("opens a compatible legacy Task without reporting its migration as external
     await expect(continuity).toHaveCount(0);
     await expect(app.window.getByRole("form", { name: "Task composer" }).getByRole("combobox", { name: "Prompt" })).toBeEnabled();
     await expect.poll(async () => JSON.parse((await readFile(file, "utf8")).split("\n", 1)[0]).version).toBe(3);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
+test("settles an imported Run after a transient provider error recovers", async () => {
+  const environment = await fixture();
+  const project = await realpath(environment.project);
+  const taskMetadata = (id: string, title: string, second: number) => ({
+    type: "custom", customType: "pilot.task", id, parentId: null, timestamp: historyTimestamp(second),
+    data: { version: 1, title, lifecycle: "active" },
+  });
+  const header = (id: string) => ({ type: "session", version: 3, id, timestamp: historyTimestamp(0), cwd: project });
+
+  await writeSession(environment.agentDir, project, "recovered-provider-error", [
+    header("recovered-provider-error"),
+    taskMetadata("recovered-task", "Recovered imported Run", 1),
+    historyUser("recovered-prompt", "recovered-task", "Recover the provider connection", 2),
+    historyErrorAssistant("recovered-error", "recovered-prompt", "WebSocket error", 3),
+    historyAssistant("recovered-response", "recovered-error", "Recovered final response.", 4),
+  ]);
+  await writeSession(environment.agentDir, project, "unrecovered-provider-error", [
+    header("unrecovered-provider-error"),
+    taskMetadata("unrecovered-task", "Unrecovered imported Run", 5),
+    historyUser("unrecovered-prompt", "unrecovered-task", "Attempt the provider connection", 6),
+    historyErrorAssistant("unrecovered-error", "unrecovered-prompt", "Connection remained unavailable", 7),
+  ]);
+  await writeSession(environment.agentDir, project, "explicit-failed-provider-error", [
+    header("explicit-failed-provider-error"),
+    taskMetadata("explicit-failed-task", "Explicit failed imported Run", 8),
+    historyUser("explicit-failed-prompt", "explicit-failed-task", "Respect the terminal failure", 9),
+    historyErrorAssistant("explicit-failed-error", "explicit-failed-prompt", "Transient provider error", 10),
+    { type: "custom", customType: "pilot.run", id: "explicit-failed-outcome", parentId: "explicit-failed-error", timestamp: historyTimestamp(11), data: { version: 1, outcome: "failed" } },
+    historyAssistant("explicit-failed-response", "explicit-failed-outcome", "Later response must not replace explicit metadata.", 12),
+  ]);
+  await writeSession(environment.agentDir, project, "incomplete-tool-recovery", [
+    header("incomplete-tool-recovery"),
+    taskMetadata("incomplete-tool-task", "Incomplete imported recovery", 13),
+    historyUser("incomplete-tool-prompt", "incomplete-tool-task", "Continue after the provider reconnects", 14),
+    historyErrorAssistant("incomplete-tool-error", "incomplete-tool-prompt", "Provider disconnected", 15),
+    historyAssistantEntry("incomplete-tool-use", "incomplete-tool-error", [{
+      type: "toolCall", id: "incomplete-tool", name: "bash", arguments: { command: "printf pending" },
+    }], "toolUse", 16),
+  ]);
+  await writeSession(environment.agentDir, project, "explicit-settled-provider-error", [
+    header("explicit-settled-provider-error"),
+    taskMetadata("explicit-settled-task", "Explicit settled imported Run", 17),
+    historyUser("explicit-settled-prompt", "explicit-settled-task", "Respect the terminal success", 18),
+    { type: "custom", customType: "pilot.run", id: "explicit-settled-outcome", parentId: "explicit-settled-prompt", timestamp: historyTimestamp(19), data: { version: 1, outcome: "settled" } },
+    historyErrorAssistant("explicit-settled-error", "explicit-settled-outcome", "Recorded provider error", 20),
+  ]);
+
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: project });
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    const tasks = app.window.getByRole("list", { name: `Active Tasks in ${path.basename(project)}` });
+    const timeline = app.window.getByRole("region", { name: "Run timeline" });
+    const openRun = async (title: string) => {
+      await tasks.getByRole("button", { name: title, exact: true }).click();
+      return timeline.getByRole("article").last();
+    };
+
+    let run = await openRun("Recovered imported Run");
+    await expect(run.getByLabel("Run status: Settled")).toBeVisible();
+    await expect(run).toContainText("Pi failed");
+    await expect(run).toContainText("WebSocket error");
+    await expect(run).toContainText("Recovered final response.");
+
+    run = await openRun("Unrecovered imported Run");
+    await expect(run.getByLabel("Run status: Failed")).toBeVisible();
+    await expect(run).toContainText("Connection remained unavailable");
+
+    run = await openRun("Incomplete imported recovery");
+    await expect(run.getByLabel("Run status: Failed")).toBeVisible();
+    await expect(run.locator('details[aria-label="bash tool, running"]')).toBeVisible();
+
+    run = await openRun("Explicit failed imported Run");
+    await expect(run.getByLabel("Run status: Failed")).toBeVisible();
+    await expect(run).toContainText("Later response must not replace explicit metadata.");
+
+    run = await openRun("Explicit settled imported Run");
+    await expect(run.getByLabel("Run status: Settled")).toBeVisible();
+    await expect(run).toContainText("Recorded provider error");
   } finally {
     await close(app);
     await rm(environment.root, { recursive: true, force: true });

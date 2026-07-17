@@ -366,11 +366,17 @@ function savedState(taskPath: string, manager: SessionManager, executionPath: st
             });
           }
         }
-        if (message.stopReason === "error" && message.errorMessage) {
-          current.items.push({ id: `${entry.id}-error`, kind: "notice", tone: "error", title: "Pi failed", detail: message.errorMessage });
-          current.status = "failed";
+        const hasExplicitOutcome = completed.has(current.id);
+        if (message.stopReason === "error") {
+          if (message.errorMessage) {
+            current.items.push({ id: `${entry.id}-error`, kind: "notice", tone: "error", title: "Pi failed", detail: message.errorMessage });
+          }
+          if (!hasExplicitOutcome) current.status = "failed";
+        } else if (message.stopReason === "aborted") {
+          if (!hasExplicitOutcome) current.status = "aborted";
+        } else if (message.stopReason === "stop" && current.status === "failed" && !hasExplicitOutcome) {
+          current.status = "preparing";
         }
-        if (message.stopReason === "aborted") current.status = "aborted";
       } else if (message.role === "toolResult" && current && message.toolCallId) {
         const view = resultView({ content: message.content, details: message.details });
         current.items = current.items.map((item) => item.kind === "tool" && item.id === message.toolCallId ? {
