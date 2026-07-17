@@ -726,6 +726,79 @@ test("keeps theme controls and focus indicators distinguishable", async () => {
   }
 });
 
+test("scrolls Navigation items while keeping controls fixed and revealing the current Task", async () => {
+  const environment = await fixture();
+  for (let index = 1; index <= 24; index++) {
+    const timestamp = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+    await writeSession(environment.agentDir, environment.project, `navigation-${index}`, [
+      { type: "session", version: 3, id: `navigation-${index}`, timestamp, cwd: environment.project },
+      { type: "custom", customType: "pilot.task", id: `navigation-meta-${index}`, parentId: null, timestamp, data: { version: 1, title: `Navigation Task ${String(index).padStart(2, "0")}`, lifecycle: "active" } },
+    ]);
+  }
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+  try {
+    await app.window.setViewportSize({ width: 1_180, height: 520 });
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+
+    const navigation = app.window.getByRole("navigation", { name: "Projects and tasks" });
+    const scroller = navigation.locator(".navigation-scroll");
+    const taskButtons = navigation.getByRole("list", { name: "Active Tasks in fixture-project" }).getByRole("button");
+    await expect.poll(() => taskButtons.count()).toBeGreaterThanOrEqual(24);
+    const taskCount = await taskButtons.count();
+    const firstTask = taskButtons.first();
+    const lastTask = taskButtons.last();
+    const lastTaskTitle = (await lastTask.locator(".task-nav-title").textContent())!;
+    const fixedControlPositions = () => navigation.locator(":scope > .brand, :scope > .nav-heading, :scope > .nav-footer")
+      .evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().top));
+    const taskIsFullyVisible = () => lastTask.evaluate((element) => {
+      const scroll = element.closest<HTMLElement>(".navigation-scroll")!;
+      const itemBounds = element.getBoundingClientRect();
+      const scrollBounds = scroll.getBoundingClientRect();
+      return itemBounds.top >= scrollBounds.top && itemBounds.bottom <= scrollBounds.bottom;
+    });
+
+    expect(await scroller.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    const fixedBeforePointerScroll = await fixedControlPositions();
+    expect(fixedBeforePointerScroll).toHaveLength(3);
+    await scroller.hover();
+    await app.window.mouse.wheel(0, 10_000);
+    await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect.poll(taskIsFullyVisible).toBe(true);
+    expect(await fixedControlPositions()).toEqual(fixedBeforePointerScroll);
+
+    await scroller.evaluate((element) => { element.scrollTop = 0; });
+    await firstTask.focus();
+    for (let index = 1; index < taskCount; index++) await app.window.keyboard.press("Tab");
+    await expect(lastTask).toBeFocused();
+    await expect.poll(taskIsFullyVisible).toBe(true);
+
+    await scroller.evaluate((element) => { element.scrollTop = 0; });
+    await app.window.getByRole("main").getByRole("button", { name: lastTaskTitle, exact: true }).click();
+    await expect(lastTask).toHaveAttribute("aria-current", "page");
+    await expect.poll(taskIsFullyVisible).toBe(true);
+    expect(await lastTask.evaluate((element) => element === document.activeElement)).toBe(false);
+
+    await scroller.evaluate((element) => { element.scrollTop = 0; });
+    await app.window.setViewportSize({ width: 600, height: 520 });
+    await expect(navigation).toBeHidden();
+    await app.window.getByRole("button", { name: "Open navigation" }).click();
+    await expect(navigation).toBeVisible();
+    await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect.poll(taskIsFullyVisible).toBe(true);
+    expect(await navigation.evaluate((element) => getComputedStyle(element).overflowY)).toBe("hidden");
+    expect(await scroller.evaluate((element) => getComputedStyle(element).overflowY)).toBe("auto");
+    const fixedBeforeMobileScroll = await fixedControlPositions();
+    await scroller.hover();
+    await app.window.mouse.wheel(0, -10_000);
+    await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBe(0);
+    expect(await fixedControlPositions()).toEqual(fixedBeforeMobileScroll);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("provides accessible Navigation and Inspector dividers only in the wide layout", async () => {
   const environment = await fixture();
   const app = await launch(environment.agentDir);

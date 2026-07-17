@@ -72,14 +72,15 @@ body.pane-resizing { cursor: col-resize; user-select: none; }
 body.pane-resizing * { cursor: col-resize !important; }
 .navigation, .inspector { min-height: 0; overflow: hidden; background: var(--surface-chrome); }
 .navigation { display: flex; flex-direction: column; border-right: 1px solid var(--border-default); padding: 18px 12px 12px; }
-.brand { padding: 0 0 18px; font-size: 15px; }
+.brand { flex: none; padding: 0 0 18px; font-size: 15px; }
 .brand-home { display: flex; align-items: center; width: 100%; gap: 9px; border: 0; border-radius: 5px; padding: 7px 8px; color: inherit; background: transparent; cursor: pointer; text-align: left; }
 .brand-home:hover, .brand-home[aria-current="page"] { background: var(--surface-selected); }
 .mark { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid #a6a6a2; border-radius: 6px; font: 17px Georgia, serif; }
 .nav-heading, .tabs { display: flex; align-items: center; }
-.nav-heading { justify-content: space-between; padding: 0 8px 8px; color: var(--text-muted); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; }
+.nav-heading { flex: none; justify-content: space-between; padding: 0 8px 8px; color: var(--text-muted); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; }
 .nav-heading button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 18px; }
 .nav-heading button:hover { color: var(--text-primary); }
+.navigation-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
 .project-list { list-style: none; margin: 0; padding: 0; }
 .project-list li { margin: 0; padding: 0; }
 .project-list button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 4px; width: 100%; padding: 7px 8px; border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; font-size: 13px; text-align: left; }
@@ -99,7 +100,7 @@ body.pane-resizing * { cursor: col-resize !important; }
 .task-state-interrupted { color: #805814; }
 .project-icon { color: var(--text-secondary); }
 .nav-empty { padding: 0 8px; font-size: 12px; line-height: 1.5; }
-.nav-footer { display: flex; align-items: center; gap: 4px; margin-top: auto; padding: 8px 5px 0; border-top: 1px solid var(--border-default); color: var(--text-secondary); font-size: 12px; }
+.nav-footer { display: flex; align-items: center; flex: none; gap: 4px; padding: 8px 5px 0; border-top: 1px solid var(--border-default); color: var(--text-secondary); font-size: 12px; }
 .command-center { display: flex; align-items: center; justify-content: space-between; min-width: 0; flex: 1; gap: 8px; height: 28px; border: 0; border-radius: 5px; padding: 0 7px; color: inherit; background: transparent; cursor: pointer; text-align: left; }
 .command-center:hover { color: var(--text-primary); background: var(--surface-selected); }
 .command-center > span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -789,7 +790,7 @@ dt { color: var(--text-muted); } dd { margin: 0; font-weight: 600; }
   .mobile-context span { color: var(--text-muted); font-size: 10px; }
   .mobile-context strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-details-button { min-width: 44px; height: 44px; padding: 0 8px; font-size: 11px; font-weight: 650; }
-  .navigation { position: fixed; inset: 38px auto 0 0; z-index: var(--z-drawer); display: none; width: min(280px, calc(100% - 44px)); padding-top: 14px; overflow-y: auto; border-right: 1px solid var(--border-default); box-shadow: 4px 0 8px rgb(20 20 19 / 18%); }
+  .navigation { position: fixed; inset: 38px auto 0 0; z-index: var(--z-drawer); display: none; width: min(280px, calc(100% - 44px)); padding-top: 14px; border-right: 1px solid var(--border-default); box-shadow: 4px 0 8px rgb(20 20 19 / 18%); }
   .navigation.mobile-visible { display: flex; }
   .navigation-scrim { position: fixed; inset: 38px 0 0; z-index: var(--z-drawer-backdrop); display: block; width: 100%; height: auto; padding: 0; border: 0; background: rgb(20 20 19 / 34%); cursor: default; }
   .workspace-main { grid-row: 2; padding: 24px max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
