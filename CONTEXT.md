@@ -52,6 +52,14 @@ _Avoid_: Deleting a Project, deleting Tasks
 A durable, goal-oriented body of agent work belonging to a project. Tasks are the primary work items users start, monitor, and revisit. Existing compatible Pi sessions within admitted Projects are presented as tasks even when richer task metadata is absent.
 _Avoid_: Pi session, thread, chat
 
+**Task history**:
+The ordered, branching record of work within a Task. It preserves alternate paths while identifying the path from which work will continue.
+_Avoid_: Pi session tree, chat transcript
+
+**Current path**:
+The path through Task history from the Task's beginning to the entry from which the next Run will continue.
+_Avoid_: Active path, current leaf
+
 **Execution location**:
 The project checkout in which a task reads and changes files. It is either the user's local checkout or a managed worktree dedicated to that task.
 _Avoid_: Workspace, sandbox, task environment

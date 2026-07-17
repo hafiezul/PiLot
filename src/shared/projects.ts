@@ -254,6 +254,13 @@ export type TaskHistoryState = {
   pathCount: number;
 };
 
+export type TaskHistoryEntryDetail = {
+  taskPath: string;
+  entryId: string;
+  text: string;
+  truncated: boolean;
+};
+
 export type TaskHistoryNavigation = {
   history: TaskHistoryState;
   editorText?: string;
@@ -350,6 +357,7 @@ export type ProjectsApi = {
   getTaskModel(projectPath: string, taskPath: string): Promise<TaskModelState>;
   getTaskResources(projectPath: string, taskPath: string): Promise<TaskResourceState>;
   getTaskHistory(projectPath: string, taskPath: string): Promise<TaskHistoryState>;
+  getTaskHistoryEntry(projectPath: string, taskPath: string, entryId: string): Promise<TaskHistoryEntryDetail>;
   navigateTaskHistory(projectPath: string, taskPath: string, entryId: string, summarize: boolean, customInstructions?: string): Promise<TaskHistoryNavigation>;
   setTaskHistoryLabel(projectPath: string, taskPath: string, entryId: string, label?: string): Promise<TaskHistoryState>;
   forkTaskFromHistory(projectPath: string, taskPath: string, entryId: string, request: TaskCreationRequest): Promise<TaskHistoryTaskResult>;

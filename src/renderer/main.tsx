@@ -5,7 +5,7 @@ import { diagnosticCategories, diagnosticCategoryLabels, type DiagnosticBundle, 
 import type { ApplicationId, ApplicationState, TerminalState } from "../shared/editors";
 import { DEFAULT_INSPECTOR_PANE_WIDTH, DEFAULT_NAVIGATION_PANE_WIDTH, MAXIMUM_GLOBAL_RUN_CAP, MAXIMUM_INSPECTOR_PANE_WIDTH, MAXIMUM_NAVIGATION_PANE_WIDTH, MINIMUM_GLOBAL_RUN_CAP, MINIMUM_INSPECTOR_PANE_WIDTH, MINIMUM_NAVIGATION_PANE_WIDTH, MINIMUM_PRIMARY_PANE_WIDTH, type Appearance, type PreferenceInspectorView, type NotificationPreferences, type Preferences, type RecentSelection } from "../shared/preferences";
 import type { OAuthEvent, ProviderState } from "../shared/providers";
-import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectEnvironmentOverride, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
+import { detectSupportedImageMimeType, IMAGE_MIME_LABELS, MAXIMUM_IMAGE_BYTES, MAXIMUM_IMAGES, type ChangedFile, type CommandEvidence, type CompactionEvidence, type DiffLine, type ImageAttachment, type LiveInputMode, type ProjectAccess, type ProjectEnvironmentOverride, type ProjectsState, type RetryEvidence, type RunEvidence, type RunStatus, type TaskChanges, type TaskCreationRequest, type TaskCreationState, type TaskFileDiff, type TaskHistoryEntryDetail, type TaskHistoryNode, type TaskHistoryState, type TaskHistoryTaskResult, type TaskModelState, type TaskResourceState, type TaskRunState, type TaskSetupState, type TaskSummary, type TaskWorktreeState, type ToolEvidence } from "../shared/projects";
 import type { StartupState } from "../shared/readiness";
 import { AgentSettings } from "./agent-settings";
 import { COMPACT_LAYOUT_MEDIA, DEFAULT_PANE_WIDTHS, PaneDivider, constrainedPaneWidths, type PaneName, type PaneShellStyle, type PaneWidths } from "./panes";
@@ -573,7 +573,7 @@ function InspectorTabs({ selected, changeCount, historyPaths, onSelect }: { sele
     event.preventDefault();
   };
   return <div className="tabs" role="tablist" aria-label="Inspector views">
-    {tabs.map(({ id, label }) => <button key={id} id={`inspector-${id}-tab`} role="tab" data-action={id === "details" ? "view.details" : undefined} aria-controls={`inspector-${id}-panel`} aria-selected={selected === id} aria-label={id === "changes" ? `Changes, ${changeCount} changed file${changeCount === 1 ? "" : "s"}` : id === "history" ? `History, ${historyPaths} active path${historyPaths === 1 ? "" : "s"}` : label} tabIndex={selected === id ? 0 : -1} onClick={() => onSelect(id)} onKeyDown={(event) => {
+    {tabs.map(({ id, label }) => <button key={id} id={`inspector-${id}-tab`} role="tab" data-action={id === "details" ? "view.details" : undefined} aria-controls={`inspector-${id}-panel`} aria-selected={selected === id} aria-label={id === "changes" ? `Changes, ${changeCount} changed file${changeCount === 1 ? "" : "s"}` : id === "history" ? `History, ${historyPaths} path${historyPaths === 1 ? "" : "s"}` : label} tabIndex={selected === id ? 0 : -1} onClick={() => onSelect(id)} onKeyDown={(event) => {
       if (event.key === "ArrowLeft") move(event, -1);
       else if (event.key === "ArrowRight") move(event, 1);
       else if (event.key === "Home") move(event, -tabs.findIndex(({ id: value }) => value === selected));
@@ -962,8 +962,21 @@ function ChangesPanel({ project, task, changes, loadError, selectedPath, disable
   </section>;
 }
 
-type FlatHistoryNode = { node: TaskHistoryNode; depth: number; parentId?: string; position: number; setSize: number };
+type HistoryRail = { lane: number; current: boolean };
+type FlatHistoryNode = {
+  node: TaskHistoryNode;
+  level: number;
+  branchParentId?: string;
+  lane: number;
+  parentLane?: number;
+  throughRails: HistoryRail[];
+  lineStart: boolean;
+  lineEnd: boolean;
+  currentPath: boolean;
+};
 type HistoryTaskCreationAction = { kind: "clone" } | { kind: "fork"; entryId: string };
+const maximumCachedHistoryEntryDetails = 12;
+const maximumVisibleHistoryRailLanes = 6;
 
 function HistoryPanel({ project, task, history, loadError, disabled, readOnly = false, onChange, onNavigate, onTaskCreated }: {
   project: ProjectAccess;
@@ -987,6 +1000,9 @@ function HistoryPanel({ project, task, history, loadError, disabled, readOnly = 
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [creation, setCreation] = useState<{ state: TaskCreationState; action: HistoryTaskCreationAction }>();
+  const detailCache = useRef(new Map<string, TaskHistoryEntryDetail>());
+  const [entryDetail, setEntryDetail] = useState<TaskHistoryEntryDetail>();
+  const [detailError, setDetailError] = useState("");
   const allNodes = useMemo(() => {
     const values: TaskHistoryNode[] = [];
     const visit = (nodes: TaskHistoryNode[]) => nodes.forEach((node) => { values.push(node); visit(node.children); });
@@ -994,31 +1010,139 @@ function HistoryPanel({ project, task, history, loadError, disabled, readOnly = 
     return values;
   }, [history]);
 
+  const currentPathIds = useMemo(() => {
+    const path: string[] = [];
+    const findCurrent = (nodes: TaskHistoryNode[]): boolean => {
+      for (const node of nodes) {
+        path.push(node.id);
+        if (node.current || findCurrent(node.children)) return true;
+        path.pop();
+      }
+      return false;
+    };
+    findCurrent(history?.roots ?? []);
+    return new Set(path);
+  }, [history]);
+
   useEffect(() => {
-    setExpanded(new Set(allNodes.filter(({ children }) => children.length).map(({ id }) => id)));
+    setExpanded(new Set(allNodes.filter(({ children }) => children.length > 1).map(({ id }) => id)));
     setSelectedId((current) => allNodes.some(({ id }) => id === current) ? current : history?.currentLeafId ?? allNodes[0]?.id ?? "");
   }, [history?.taskPath, history?.currentLeafId, history?.pathCount]);
   const selected = allNodes.find(({ id }) => id === selectedId);
-  useEffect(() => setLabel(selected?.label ?? ""), [selected?.id, selected?.label]);
+  useEffect(() => setLabel(selected?.label ?? ""), [selected?.id]);
+  useEffect(() => {
+    detailCache.current.clear();
+    setEntryDetail(undefined);
+  }, [history]);
+  useEffect(() => {
+    let cancelled = false;
+    setDetailError("");
+    if (!selected) {
+      setEntryDetail(undefined);
+      return;
+    }
+    const cached = detailCache.current.get(selected.id);
+    if (cached) {
+      detailCache.current.delete(selected.id);
+      detailCache.current.set(selected.id, cached);
+      setEntryDetail(cached);
+      return;
+    }
+    setEntryDetail(undefined);
+    void window.pilot.getTaskHistoryEntry(project.path, task.path, selected.id).then((detail) => {
+      if (cancelled) return;
+      detailCache.current.set(detail.entryId, detail);
+      while (detailCache.current.size > maximumCachedHistoryEntryDetails) {
+        const oldest = detailCache.current.keys().next().value;
+        if (oldest === undefined) break;
+        detailCache.current.delete(oldest);
+      }
+      setEntryDetail(detail);
+    }).catch((reason) => {
+      if (!cancelled) setDetailError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => { cancelled = true; };
+  }, [project.path, task.path, selected?.id, history]);
   useLayoutEffect(() => {
     requestAnimationFrame(() => tree.current?.querySelector<HTMLElement>('[data-current="true"]')?.scrollIntoView({ block: "nearest" }));
   }, [history?.taskPath, history?.currentLeafId]);
 
   const flat = useMemo(() => {
     const values: FlatHistoryNode[] = [];
-    const visit = (nodes: TaskHistoryNode[], depth: number, parentId?: string) => nodes.forEach((node, index) => {
-      values.push({ node, depth, parentId, position: index + 1, setSize: nodes.length });
-      if (expanded.has(node.id)) visit(node.children, depth + 1, node.id);
-    });
-    visit(history?.roots ?? [], 1);
+    const visibleRails = (rails: HistoryRail[]) => {
+      const lanes = new Map<number, boolean>();
+      for (const rail of rails) lanes.set(rail.lane, Boolean(lanes.get(rail.lane)) || rail.current);
+      return [...lanes].map(([lane, current]) => ({ lane, current }));
+    };
+    const visit = (
+      node: TaskHistoryNode,
+      lane: number,
+      level: number,
+      branchParentId: string | undefined,
+      throughRails: HistoryRail[],
+      lineStart: boolean,
+      parentLane?: number,
+    ) => {
+      const branchPoint = node.children.length > 1;
+      values.push({
+        node,
+        level,
+        branchParentId,
+        lane,
+        parentLane,
+        throughRails: visibleRails(throughRails),
+        lineStart,
+        lineEnd: node.children.length === 0 || (branchPoint && !expanded.has(node.id)),
+        currentPath: currentPathIds.has(node.id),
+      });
+      if (node.children.length === 1) {
+        visit(node.children[0], lane, level, branchParentId, throughRails, false);
+        return;
+      }
+      if (!branchPoint || !expanded.has(node.id)) return;
+      const last = node.children.length - 1;
+      const currentChildIndex = node.children.findIndex(({ id }) => currentPathIds.has(id));
+      const occupiedLanes = new Set([lane, ...throughRails.map((rail) => rail.lane)]);
+      let alternateLane = 0;
+      while (occupiedLanes.has(alternateLane)) alternateLane++;
+      node.children.forEach((child, index) => {
+        const childLane = index === last ? lane : alternateLane;
+        const childRails = index < last
+          ? [...throughRails, { lane, current: currentPathIds.has(node.id) && currentChildIndex > index }]
+          : throughRails;
+        visit(child, childLane, level + 1, node.id, childRails, true, lane);
+      });
+    };
+    for (const root of history?.roots ?? []) visit(root, 0, 1, undefined, [], true);
     return values;
-  }, [history, expanded]);
+  }, [history, expanded, currentPathIds]);
+  const historyLaneCount = Math.max(1, flat.reduce((maximum, item) => Math.max(maximum, item.lane, item.parentLane ?? 0, ...item.throughRails.map(({ lane }) => lane)), 0) + 1);
+  const visibleHistoryLaneCount = Math.min(historyLaneCount, maximumVisibleHistoryRailLanes);
+  const historyRailsCompressed = historyLaneCount > maximumVisibleHistoryRailLanes;
+  const historyLaneX = (lane: number) => {
+    const visibleLane = Math.min(lane, maximumVisibleHistoryRailLanes - 1);
+    return visibleHistoryLaneCount === 1 ? 12 : 8 + (visibleLane / (visibleHistoryLaneCount - 1)) * 28;
+  };
+  const focusNode = (id: string) => requestAnimationFrame(() => {
+    const item = [...(tree.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [])]
+      .find((candidate) => candidate.dataset.historyId === id);
+    item?.focus();
+  });
   const focusIndex = (index: number) => {
     const next = Math.max(0, Math.min(flat.length - 1, index));
     const id = flat[next]?.node.id;
     if (!id) return;
     setSelectedId(id);
-    requestAnimationFrame(() => tree.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[next]?.focus());
+    focusNode(id);
+  };
+  const toggleBranch = (id: string, open: boolean) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (open) next.add(id); else next.delete(id);
+      return next;
+    });
+    setSelectedId(id);
+    focusNode(id);
   };
   const attempt = async (operation: () => Promise<void>) => {
     setBusy(true);
@@ -1046,41 +1170,72 @@ function HistoryPanel({ project, task, history, loadError, disabled, readOnly = 
     : <p className="muted history-loading" role="status">Reading Task history…</p>;
 
   return <section className="history-panel" aria-label="Task history inspector" aria-busy={busy}>
-    <header className="history-heading"><div><p className="eyebrow">Pi session tree</p><h2>Task history</h2></div><div><span>{history.pathCount} path{history.pathCount === 1 ? "" : "s"}</span>{readOnly ? <span>Read only</span> : <button type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "clone" })}>Clone active path</button>}</div></header>
-    {readOnly && <p className="history-root-branch" role="note">History remains available after Worktree removal. Editing and navigation actions are unavailable.</p>}
+    <header className="history-heading"><div><h2>Task history</h2></div><div><span className="history-path-count">{history.pathCount} path{history.pathCount === 1 ? "" : "s"}</span>{readOnly ? <span>Read only</span> : <button type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "clone" })}>Clone current path</button>}</div></header>
+    {readOnly && <p className="history-root-branch" role="note">History remains available after Worktree removal. Editing and path actions are unavailable.</p>}
     {!history.roots.length ? <div className="history-empty"><strong>No history entries yet</strong><p>{readOnly ? "This Task has no recorded Run history." : "Submit a prompt to begin this Task's history."}</p></div> : <>
-      {history.roots.length > 1 && <p className="history-root-branch" role="note">Task start · {history.roots.length} branches</p>}
+      {history.roots.length > 1 && <p className="history-root-branch" role="note">Task start · {history.roots.length} paths</p>}
+      {historyRailsCompressed && <p className="history-root-branch" role="note">Deep nesting · {historyLaneCount} branch lanes are compressed into {maximumVisibleHistoryRailLanes} rails.</p>}
       <div ref={tree} className="history-tree" role="tree" aria-label="Task history">
-        {flat.map(({ node, depth, parentId, position, setSize }, index) => <button key={node.id} type="button" role="treeitem" data-current={node.current || undefined} aria-level={depth} aria-posinset={position} aria-setsize={setSize} aria-selected={node.id === selectedId} aria-expanded={node.children.length ? expanded.has(node.id) : undefined} tabIndex={node.id === selectedId ? 0 : -1} style={{ paddingInlineStart: `${8 + (depth - 1) * 17}px` }} onFocus={() => setSelectedId(node.id)} onClick={() => setSelectedId(node.id)} onKeyDown={(event) => {
-          if (event.key === "ArrowDown") focusIndex(index + 1);
-          else if (event.key === "ArrowUp") focusIndex(index - 1);
-          else if (event.key === "Home") focusIndex(0);
-          else if (event.key === "End") focusIndex(flat.length - 1);
-          else if (event.key === "ArrowRight" && node.children.length) {
-            if (!expanded.has(node.id)) setExpanded((current) => new Set(current).add(node.id));
-            else focusIndex(index + 1);
-          } else if (event.key === "ArrowLeft") {
-            if (node.children.length && expanded.has(node.id)) setExpanded((current) => { const next = new Set(current); next.delete(node.id); return next; });
-            else if (parentId) focusIndex(flat.findIndex(({ node: candidate }) => candidate.id === parentId));
-          } else return;
-          event.preventDefault();
-        }}>
-          <span className={`history-marker history-${node.kind}`} aria-hidden="true">{node.children.length ? expanded.has(node.id) ? "−" : "+" : "·"}</span>
-          <span className="history-entry-copy"><span><strong>{node.title}</strong>{node.label && <span className="history-label">{node.label}</span>}</span>{node.description && <small>{node.description}</small>}<span className="history-entry-meta"><time dateTime={node.timestamp}>{new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{node.children.length > 1 && <span>{node.children.length} branches</span>}{node.current && <span className="history-current">Current leaf</span>}</span></span>
-        </button>)}
+        {flat.map(({ node, level, branchParentId, lane, parentLane, throughRails, lineStart, lineEnd, currentPath }, index) => {
+          const branchPoint = node.children.length > 1;
+          const nodeX = historyLaneX(lane);
+          const parentX = parentLane === undefined ? undefined : historyLaneX(parentLane);
+          const connectorLeft = parentX === undefined ? 0 : Math.min(nodeX, parentX);
+          const connectorWidth = parentX === undefined ? 0 : Math.abs(nodeX - parentX);
+          const expandedBranch = branchPoint && expanded.has(node.id);
+          return <div key={node.id} role="treeitem" className="history-entry" data-history-id={node.id} data-current={node.current || undefined} data-current-path={currentPath || undefined} data-branch-level={level} data-dense-rails={historyLaneCount > 4 || undefined} aria-current={node.current ? "step" : undefined} aria-level={level} aria-selected={node.id === selectedId} aria-expanded={branchPoint ? expandedBranch : undefined} tabIndex={node.id === selectedId ? 0 : -1} onFocus={() => setSelectedId(node.id)} onClick={(event) => { event.currentTarget.focus(); setSelectedId(node.id); }} onKeyDown={(event) => {
+            let handled = true;
+            if (event.key === "ArrowDown") focusIndex(index + 1);
+            else if (event.key === "ArrowUp") focusIndex(index - 1);
+            else if (event.key === "Home") focusIndex(0);
+            else if (event.key === "End") focusIndex(flat.length - 1);
+            else if (event.key === "ArrowRight" && branchPoint) {
+              if (!expandedBranch) toggleBranch(node.id, true);
+              else focusIndex(index + 1);
+            } else if (event.key === "ArrowLeft") {
+              if (branchPoint && expandedBranch) toggleBranch(node.id, false);
+              else if (branchParentId) focusIndex(flat.findIndex(({ node: candidate }) => candidate.id === branchParentId));
+              else handled = false;
+            } else if (event.key === "Enter" || event.key === " ") setSelectedId(node.id);
+            else handled = false;
+            if (handled) event.preventDefault();
+          }}>
+            <span className={`history-rail history-${node.kind}`}>
+              {throughRails.map((rail) => <span key={rail.lane} className={`history-rail-line${rail.current ? " is-current" : ""}`} style={{ left: `${historyLaneX(rail.lane)}px` }} aria-hidden="true" />)}
+              <span className={`history-rail-line history-node-line${currentPath ? " is-current" : ""}${lineStart ? " line-start" : ""}${lineEnd ? " line-end" : ""}`} style={{ left: `${nodeX}px` }} aria-hidden="true" />
+              {connectorWidth > 0 && <span className={`history-rail-connector${currentPath ? " is-current" : ""}`} style={{ left: `${connectorLeft}px`, width: `${connectorWidth}px` }} aria-hidden="true" />}
+              {branchPoint ? <button type="button" className="history-disclosure" tabIndex={-1} aria-label={`${expandedBranch ? "Collapse" : "Expand"} ${node.children.length} branches after ${node.title}`} onClick={(event) => { event.stopPropagation(); toggleBranch(node.id, !expandedBranch); }}>
+                <span className={`history-disclosure-mark${expandedBranch ? " is-expanded" : ""}`} style={{ left: `${nodeX}px` }} aria-hidden="true"><svg viewBox="0 0 12 12"><path d="m4 2.5 3.5 3.5L4 9.5" /></svg></span>
+              </button> : <span className="history-node-marker" style={{ left: `${nodeX}px` }} aria-hidden="true" />}
+            </span>
+            <span className="history-entry-copy">
+              <span className="history-entry-main"><strong>{node.title}</strong>{node.label && <span className="history-label">{node.label}</span>}{node.description && <small title={node.description}>{node.description}</small>}</span>
+              <span className="history-entry-meta">{branchPoint && <span>{node.children.length} branches</span>}{node.current && <span className="history-current">Current</span>}<time dateTime={node.timestamp}>{new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></span>
+            </span>
+          </div>;
+        })}
       </div>
-      {selected && !readOnly && <section className="history-actions" aria-label={`Actions for ${selected.title}`}>
-        {selected.kind === "prompt" && <button className="history-fork" type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "fork", entryId: selected.id })}>Fork from prompt</button>}
-        <form onSubmit={(event) => { event.preventDefault(); void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id, label); onChange(next); setNotice("Label saved"); }); }}>
-          <label>History label<input aria-label="History label" value={label} maxLength={80} disabled={disabled || busy} onChange={(event) => setLabel(event.target.value)} /></label>
-          <div><button type="submit" disabled={disabled || busy || !label.trim()}>Save label</button><button type="button" disabled={disabled || busy || !selected.label} onClick={() => void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id); onChange(next); setLabel(""); setNotice("Label cleared"); })}>Clear label</button></div>
-        </form>
-        <fieldset disabled={disabled || busy || selected.current}>
-          <legend>Continue from this entry</legend>
-          <label className="history-summary-choice"><input type="checkbox" checked={summarize} onChange={(event) => setSummarize(event.target.checked)} />Summarize abandoned branch</label>
-          {summarize && <label>Summary focus<input aria-label="Summary focus" value={summaryFocus} maxLength={2000} placeholder="Optional instructions" onChange={(event) => setSummaryFocus(event.target.value)} /></label>}
-          <button type="button" onClick={() => void attempt(async () => { const result = await window.pilot.navigateTaskHistory(project.path, task.path, selected.id, summarize, summaryFocus.trim() || undefined); onChange(result.history); onNavigate(result.editorText); setNotice("History position changed"); })}>Navigate here</button>
-        </fieldset>
+      {selected && <section className="history-detail" aria-label={`Selected history entry: ${selected.title}`} aria-busy={entryDetail?.entryId !== selected.id && !detailError}>
+        <header><div><strong>{selected.title}</strong>{selected.label && <span className="history-label">{selected.label}</span>}</div><time dateTime={selected.timestamp}>{new Date(selected.timestamp).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</time></header>
+        {entryDetail?.entryId === selected.id ? <><p className="history-detail-copy">{entryDetail.text}</p>{entryDetail.truncated && <p className="history-detail-bound" role="note">This entry exceeds the selected-detail limit. The beginning is shown; review the Run timeline or export the Task for the remainder.</p>}</>
+          : detailError ? <p className="error history-detail-error" role="alert">Could not read the complete entry. {detailError}</p>
+            : <p className="muted history-detail-empty">Reading complete entry…</p>}
+        {!readOnly && <div className="history-actions" aria-label={`Actions for ${selected.title}`}>
+          {selected.kind === "prompt" && <button className="history-fork" type="button" disabled={disabled || busy} onClick={() => chooseExecution({ kind: "fork", entryId: selected.id })}>Fork from prompt</button>}
+          <form onSubmit={(event) => { event.preventDefault(); void attempt(async () => { const savedLabel = label.trim(); const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id, savedLabel); onChange(next); setLabel(savedLabel); setNotice("Label saved"); }); }}>
+            <label>History label<input aria-label="History label" value={label} maxLength={80} disabled={disabled || busy} onChange={(event) => setLabel(event.target.value)} /></label>
+            <div><button type="submit" disabled={disabled || busy || !label.trim()}>Save label</button><button type="button" disabled={disabled || busy || !selected.label} onClick={() => void attempt(async () => { const next = await window.pilot.setTaskHistoryLabel(project.path, task.path, selected.id); onChange(next); setLabel(""); setNotice("Label cleared"); })}>Clear label</button></div>
+          </form>
+          <fieldset disabled={disabled || busy}>
+            <legend>Continue from this entry</legend>
+            {selected.current ? <p className="history-path-note">This entry is already on the Current path.</p> : <>
+              <label className="history-summary-choice"><input type="checkbox" checked={summarize} onChange={(event) => setSummarize(event.target.checked)} />Summarize the path being left</label>
+              {summarize && <label>Summary focus<input aria-label="Summary focus" value={summaryFocus} maxLength={2000} placeholder="Optional instructions" onChange={(event) => setSummaryFocus(event.target.value)} /></label>}
+              <p className="history-path-note">Later entries stay available as another path.</p>
+              <button type="button" className="history-continue" onClick={() => void attempt(async () => { const result = await window.pilot.navigateTaskHistory(project.path, task.path, selected.id, summarize, summaryFocus.trim() || undefined); onChange(result.history); onNavigate(result.editorText); setNotice("Current path changed"); })}>Continue from here</button>
+            </>}
+          </fieldset>
+        </div>}
       </section>}
     </>}
     {creation && <TaskCreationDialog project={project} state={creation.state} contextNote="Task history is copied, but uncommitted files are never transferred between Execution locations." onCreate={(request) => createFromHistory(creation.action, request)} onClose={() => {
@@ -2997,7 +3152,7 @@ function App() {
                 setHistoryDraft((current) => ({ taskPath: result.task.path, text: result.draft ?? "", version: (current?.version ?? 0) + 1 }));
                 setTaskRevision((value) => value + 1);
               }} />
-              : <div className="history-empty"><strong>Select a Task</strong><p>Choose a Task to inspect its Pi history.</p></div>}
+              : <div className="history-empty"><strong>Select a Task</strong><p>Choose a Task to inspect its Task history.</p></div>}
           </div>}
         </aside>
       </div>

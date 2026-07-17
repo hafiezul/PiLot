@@ -719,6 +719,8 @@ app.whenReady().then(async () => {
   });
   handleDiagnostic("tasks:get-history", "session.read", async (_event, projectPath: unknown, taskPath: unknown) =>
     runs.getTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath)));
+  handleDiagnostic("tasks:get-history-entry", "session.read", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown) =>
+    runs.getTaskHistoryEntry(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId)));
   handleDiagnostic("tasks:navigate-history", "session.write", async (_event, projectPath: unknown, taskPath: unknown, entryId: unknown, summarize: unknown, customInstructions: unknown) => {
     if (typeof summarize !== "boolean" || (customInstructions !== undefined && typeof customInstructions !== "string")) throw new Error("Choose valid history navigation options");
     return runs.navigateTaskHistory(requireProjectPath(projectPath), requireTaskPath(taskPath), requireHistoryEntry(entryId), summarize, customInstructions as string | undefined);

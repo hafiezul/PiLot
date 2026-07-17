@@ -79,6 +79,7 @@ const api: PiLotApi = {
   getTaskModel: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-model", projectPath, taskPath),
   getTaskResources: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-resources", projectPath, taskPath),
   getTaskHistory: (projectPath, taskPath) => ipcRenderer.invoke("tasks:get-history", projectPath, taskPath),
+  getTaskHistoryEntry: (projectPath, taskPath, entryId) => ipcRenderer.invoke("tasks:get-history-entry", projectPath, taskPath, entryId),
   navigateTaskHistory: (projectPath, taskPath, entryId, summarize, customInstructions) => ipcRenderer.invoke("tasks:navigate-history", projectPath, taskPath, entryId, summarize, customInstructions),
   setTaskHistoryLabel: (projectPath, taskPath, entryId, label) => ipcRenderer.invoke("tasks:set-history-label", projectPath, taskPath, entryId, label),
   forkTaskFromHistory: (projectPath, taskPath, entryId, request) => ipcRenderer.invoke("tasks:fork-history", projectPath, taskPath, entryId, request),

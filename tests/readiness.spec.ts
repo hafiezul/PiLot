@@ -45,6 +45,8 @@ async function writeSession(agentDir: string, project: string, name: string, ent
 
 const historyTimestamp = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`;
 const historyUsage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+const completeHistoryPrompt = `Choose an architecture\n\n${"Preserve complete selected-entry detail without widening the history row. ".repeat(6)}FULL-PROMPT-END`;
+const oversizedHistoryPrompt = `Implement branch E\n\n${"Bound oversized selected-entry output. ".repeat(2_000)}OVERSIZED-PROMPT-END`;
 
 function historyUser(id: string, parentId: string, content: string, second: number) {
   return { type: "message", id, parentId, timestamp: historyTimestamp(second), message: { role: "user", content, timestamp: Date.parse(historyTimestamp(second)) } };
@@ -65,18 +67,51 @@ async function writeBranchedHistory(agentDir: string, project: string) {
   return writeSession(agentDir, project, "history", [
     { type: "session", version: 3, id: "history-fixture", timestamp: historyTimestamp(0), cwd: project },
     { type: "custom", customType: "pilot.task", id: "task-meta", parentId: null, timestamp: historyTimestamp(1), data: { version: 1, title: "History fixture", lifecycle: "active" } },
-    historyUser("root-prompt", "task-meta", "Choose an architecture", 2),
+    historyUser("root-prompt", "task-meta", completeHistoryPrompt, 2),
     historyAssistant("shared-answer", "root-prompt", "Shared answer", 3),
     historyUser("branch-a-prompt", "shared-answer", "Implement branch A", 4),
     historyAssistant("branch-a-answer", "branch-a-prompt", "Branch A done", 5),
     { type: "compaction", id: "compaction-a", parentId: "branch-a-answer", timestamp: historyTimestamp(6), summary: "Earlier branch A context", firstKeptEntryId: "branch-a-prompt", tokensBefore: 12000 },
     { type: "model_change", id: "model-a", parentId: "compaction-a", timestamp: historyTimestamp(7), provider: "fixture", modelId: "fixture-model" },
     { type: "thinking_level_change", id: "thinking-a", parentId: "model-a", timestamp: historyTimestamp(8), thinkingLevel: "high" },
-    historyUser("branch-b-prompt", "shared-answer", "Implement branch B", 9),
-    historyAssistant("branch-b-answer", "branch-b-prompt", "Branch B done", 10),
-    { type: "label", id: "label-b", parentId: "branch-b-answer", timestamp: historyTimestamp(11), targetId: "branch-b-prompt", label: "Preferred route" },
-    { type: "custom", customType: "pilot.run", id: "run-b", parentId: "label-b", timestamp: historyTimestamp(12), data: { version: 1, outcome: "settled" } },
+    historyUser("branch-c-prompt", "shared-answer", "Implement branch C", 9),
+    historyAssistant("branch-c-answer", "branch-c-prompt", "Branch C done", 10),
+    historyUser("branch-d-prompt", "shared-answer", "Implement branch D", 11),
+    historyAssistant("branch-d-answer", "branch-d-prompt", "Branch D done", 12),
+    historyUser("branch-e-prompt", "shared-answer", oversizedHistoryPrompt, 13),
+    historyAssistant("branch-e-answer", "branch-e-prompt", "Branch E done", 14),
+    historyUser("branch-b-prompt", "shared-answer", "Implement branch B", 15),
+    historyAssistant("branch-b-answer", "branch-b-prompt", "Branch B done", 16),
+    { type: "label", id: "label-b", parentId: "branch-b-answer", timestamp: historyTimestamp(17), targetId: "branch-b-prompt", label: "Preferred route" },
+    { type: "custom", customType: "pilot.run", id: "run-b", parentId: "label-b", timestamp: historyTimestamp(18), data: { version: 1, outcome: "settled" } },
   ]);
+}
+
+async function writeDeepBranchedHistory(agentDir: string, project: string) {
+  const entries: object[] = [
+    { type: "session", version: 3, id: "deep-history-fixture", timestamp: historyTimestamp(0), cwd: project },
+    { type: "custom", customType: "pilot.task", id: "deep-task-meta", parentId: null, timestamp: historyTimestamp(1), data: { version: 1, title: "Deep history fixture", lifecycle: "active" } },
+    historyUser("deep-root-prompt", "deep-task-meta", "Explore nested paths", 2),
+    historyAssistant("deep-shared-0", "deep-root-prompt", "Shared level 0", 3),
+  ];
+  let second = 4;
+  const addNestedFork = (parentId: string, depth: number) => {
+    if (depth === 7) {
+      entries.push(historyUser("deep-leaf-prompt", parentId, "Deep leaf", second++));
+      entries.push(historyAssistant("deep-leaf-answer", "deep-leaf-prompt", "Deep leaf done", second++));
+      return;
+    }
+    const deepPrompt = `deep-${depth}-prompt`;
+    const deepAnswer = `deep-${depth}-answer`;
+    entries.push(historyUser(deepPrompt, parentId, `Continue through level ${depth + 1}`, second++));
+    entries.push(historyAssistant(deepAnswer, deepPrompt, `Shared level ${depth + 1}`, second++));
+    addNestedFork(deepAnswer, depth + 1);
+    const sidePrompt = `side-${depth}-prompt`;
+    entries.push(historyUser(sidePrompt, parentId, `Leave at level ${depth + 1}`, second++));
+    entries.push(historyAssistant(`side-${depth}-answer`, sidePrompt, `Side path ${depth + 1} done`, second++));
+  };
+  addNestedFork("deep-shared-0", 0);
+  return writeSession(agentDir, project, "deep-history", entries);
 }
 
 async function childSession(directory: string, parentSession: string) {
@@ -1291,7 +1326,7 @@ test("creates a managed Worktree Task from a committed ref", async () => {
     expect((await execute("git", ["worktree", "list", "--porcelain"], { cwd: project })).stdout).toContain(task.execution.path);
     const inspector = app.window.getByRole("complementary", { name: "Inspector" });
     await inspector.getByRole("tab", { name: /History/ }).click();
-    await inspector.getByRole("button", { name: "Clone active path" }).click();
+    await inspector.getByRole("button", { name: "Clone current path" }).click();
     const cloneDialog = app.window.getByRole("dialog", { name: "Create Task" });
     await expect(cloneDialog.getByRole("note")).toContainText("uncommitted files are never transferred");
     await cloneDialog.getByRole("radio", { name: "Worktree" }).check();
@@ -1550,7 +1585,7 @@ test("finishes and removes managed Worktree Tasks explicitly", async () => {
     await expect(removedInspector.getByRole("tab", { name: /History/ })).toBeFocused();
     const removedHistory = removedInspector.getByRole("tabpanel", { name: /History/ });
     await expect(removedHistory).toContainText("Read only");
-    await expect(removedHistory.getByRole("button", { name: "Clone active path" })).toHaveCount(0);
+    await expect(removedHistory.getByRole("button", { name: "Clone current path" })).toHaveCount(0);
     const restoreError = await app.window.evaluate(async ({ projectPath, taskPath }) => {
       try {
         await (window as any).pilot.setTaskArchived(projectPath, taskPath, false);
@@ -2823,6 +2858,30 @@ test("recognizes configured GUI editor commands through the Electron boundary", 
   }
 });
 
+test("compresses deeply nested Task history rails without shifting entries", async () => {
+  const environment = await fixture();
+  await writeDeepBranchedHistory(environment.agentDir, environment.project);
+  const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
+
+  try {
+    await app.window.getByRole("button", { name: "Add project" }).click();
+    await app.window.getByRole("dialog", { name: "Project access" }).getByRole("button", { name: "Allow agent execution" }).click();
+    await app.window.getByRole("navigation", { name: "Projects and tasks" }).getByRole("button", { name: "Deep history fixture", exact: true }).click();
+    const inspector = app.window.getByRole("complementary", { name: "Inspector" });
+    await inspector.getByRole("tab", { name: /History/ }).click();
+    await expect(inspector.getByRole("note", { name: "" }).filter({ hasText: /branch lanes are compressed into 6 rails/ })).toBeVisible();
+    const tree = inspector.getByRole("tree", { name: "Task history" });
+    await expect(tree.locator('[aria-level="8"]')).not.toHaveCount(0);
+    const entryLefts = await tree.locator(".history-entry-copy").evaluateAll((entries) => entries.map((entry) => Math.round(entry.getBoundingClientRect().left * 10) / 10));
+    expect(new Set(entryLefts).size).toBe(1);
+    const treeWidth = await tree.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(treeWidth.scroll).toBeLessThanOrEqual(treeWidth.client);
+  } finally {
+    await close(app);
+    await rm(environment.root, { recursive: true, force: true });
+  }
+});
+
 test("renders and navigates branched Task history through the Electron boundary", async () => {
   const environment = await fixture();
   const provider = await deterministicProvider(environment.root);
@@ -2850,14 +2909,43 @@ test("renders and navigates branched Task history through the Electron boundary"
     const inspector = app.window.getByRole("complementary", { name: "Inspector" });
     await inspector.getByRole("tab", { name: /History/ }).click();
     const tree = inspector.getByRole("tree", { name: "Task history" });
-    await expect(tree.getByRole("treeitem", { name: /Shared answer/ })).toContainText("2 branches");
-    await expect(tree.getByRole("treeitem", { name: /Branch B done/ })).toContainText("Current leaf");
+    await expect(tree.getByRole("treeitem", { name: /Shared answer/ })).toContainText("5 branches");
+    await expect(tree.getByRole("treeitem", { name: /Branch B done/ })).toContainText("Current");
     await expect(tree.getByRole("treeitem", { name: /Implement branch B/ })).toContainText("Preferred route");
     await expect(tree.getByRole("treeitem", { name: /Compaction/ })).toContainText("12,000 tokens");
     await expect(tree.getByRole("treeitem", { name: /Model change/ })).toContainText("fixture/fixture-model");
     await expect(tree.getByRole("treeitem", { name: /Thinking change/ })).toContainText("High");
 
+    const rootPrompt = tree.getByRole("treeitem", { name: /Choose an architecture/ });
     const branchPoint = tree.getByRole("treeitem", { name: /Shared answer/ });
+    await expect(rootPrompt).not.toHaveAttribute("aria-expanded");
+    await expect(rootPrompt).toHaveAttribute("aria-level", "1");
+    await expect(branchPoint).toHaveAttribute("aria-level", "1");
+    await expect(tree.getByRole("button", { name: /Collapse 5 branches after Pi response/ })).toHaveCount(1);
+    await rootPrompt.focus();
+    await rootPrompt.press("Enter");
+    await expect(rootPrompt).not.toContainText("FULL-PROMPT-END");
+    await expect(inspector.getByRole("region", { name: "Selected history entry: Prompt" })).toContainText("FULL-PROMPT-END");
+    const oversizedPrompt = tree.getByRole("treeitem", { name: /Implement branch E/ });
+    await oversizedPrompt.focus();
+    await oversizedPrompt.press("Enter");
+    const oversizedDetail = inspector.getByRole("region", { name: "Selected history entry: Prompt" });
+    await expect(oversizedDetail.getByRole("note")).toContainText("exceeds the selected-detail limit");
+    await expect(oversizedDetail).not.toContainText("OVERSIZED-PROMPT-END");
+    await expect(tree.getByRole("treeitem", { name: /Branch A done/ })).not.toHaveAttribute("data-current-path");
+    await expect(tree.getByRole("treeitem", { name: /Branch B done/ })).toHaveAttribute("data-current-path", "true");
+    const entryLefts = await tree.locator(".history-entry-copy").evaluateAll((entries) => entries.map((entry) => Math.round(entry.getBoundingClientRect().left * 10) / 10));
+    expect(new Set(entryLefts).size).toBe(1);
+    const reusedBranchLaneXs = await tree.locator('.history-entry[data-branch-level="2"] .history-node-marker').evaluateAll((markers) => [...new Set(markers.map((marker) => (marker as HTMLElement).style.left))]);
+    expect(reusedBranchLaneXs).toHaveLength(2);
+    const treeWidth = await tree.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(treeWidth.scroll).toBeLessThanOrEqual(treeWidth.client);
+    await app.window.setViewportSize({ width: 320, height: 760 });
+    await expect(inspector).toBeVisible();
+    const narrowTreeWidth = await tree.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(narrowTreeWidth.scroll).toBeLessThanOrEqual(narrowTreeWidth.client);
+    await app.window.setViewportSize({ width: 1_440, height: 900 });
+
     await branchPoint.focus();
     await branchPoint.press("ArrowLeft");
     await expect(branchPoint).toHaveAttribute("aria-expanded", "false");
@@ -2902,14 +2990,14 @@ test("renders and navigates branched Task history through the Electron boundary"
     await branchA.press("Tab");
     await expect(label).toBeFocused();
     await label.press("Tab");
-    const summarizeBranch = inspector.getByRole("checkbox", { name: "Summarize abandoned branch" });
+    const summarizeBranch = inspector.getByRole("checkbox", { name: "Summarize the path being left" });
     await expect(summarizeBranch).toBeFocused();
     await summarizeBranch.press("Tab");
-    const navigate = inspector.getByRole("button", { name: "Navigate here" });
+    const navigate = inspector.getByRole("button", { name: "Continue from here" });
     await expect(navigate).toBeFocused();
     await navigate.press("Enter");
-    await expect(inspector.getByRole("status")).toContainText("History position changed");
-    await expect(tree.getByRole("treeitem", { name: /Navigation point/ })).toContainText("Current leaf");
+    await expect(inspector.getByRole("status")).toContainText("Current path changed");
+    await expect(tree.getByRole("treeitem", { name: /Navigation point/ })).toContainText("Current");
     await expect(tree.getByRole("treeitem", { name: /Branch A done/ })).toBeVisible();
     await expect(tree.getByRole("treeitem", { name: /Branch B done/ })).toBeVisible();
 
@@ -2927,15 +3015,26 @@ test("renders and navigates branched Task history through the Electron boundary"
     await summaryFocus.press("Tab");
     await expect(navigate).toBeFocused();
     await navigate.press("Enter");
-    await expect(inspector.getByRole("status")).toContainText("History position changed");
-    await expect(tree.getByRole("treeitem", { name: /Branch summary/ })).toContainText("Current leaf");
+    await expect(inspector.getByRole("status")).toContainText("Current path changed");
+    await expect(tree.getByRole("treeitem", { name: /Branch summary/ })).toContainText("Current");
     await expect(tree.getByRole("treeitem", { name: /Branch A done/ })).toBeVisible();
     expect(provider.requests.some((request) => latestUserText(request).startsWith("<conversation>"))).toBe(true);
 
     const saved = await readFile(historyFile, "utf8");
     expect(saved).toContain('"type":"branch_summary"');
     expect(saved).toContain("Branch B done");
-    expect(() => SessionManager.open(historyFile).getTree()).not.toThrow();
+    const savedManager = SessionManager.open(historyFile);
+    expect(() => savedManager.getTree()).not.toThrow();
+    await writeFile(historyFile, `${saved}${JSON.stringify({ type: "custom", customType: "pilot.external-test", id: "external-detail-change", parentId: savedManager.getLeafId(), timestamp: new Date().toISOString(), data: { version: 1 } })}\n`);
+    const staleDetailError = await app.window.evaluate(async ({ projectPath, taskPath }) => {
+      try {
+        await (window as any).pilot.getTaskHistoryEntry(projectPath, taskPath, "root-prompt");
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    }, { projectPath: environment.project, taskPath: historyFile });
+    expect(staleDetailError).toContain("changed outside PiLot");
   } finally {
     await close(app);
     await provider.close();
@@ -2943,7 +3042,7 @@ test("renders and navigates branched Task history through the Electron boundary"
   }
 });
 
-test("forks prompts and clones active paths as standard Pi Tasks", async () => {
+test("forks prompts and clones current paths as standard Pi Tasks", async () => {
   const environment = await fixture();
   const historyFile = await writeBranchedHistory(environment.agentDir, environment.project);
   const app = await launch(environment.agentDir, false, { PILOT_TEST_PROJECT_DIR: environment.project });
@@ -2974,7 +3073,7 @@ test("forks prompts and clones active paths as standard Pi Tasks", async () => {
     expect(forkContent).toContain("Shared answer");
     expect(forkContent).not.toContain('"id":"branch-b-prompt"');
 
-    const clone = inspector.getByRole("button", { name: "Clone active path" });
+    const clone = inspector.getByRole("button", { name: "Clone current path" });
     await clone.focus();
     await clone.press("Enter");
     await expect(taskNavigation.getByRole("button")).toHaveCount(4);

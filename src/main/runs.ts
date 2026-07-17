@@ -22,7 +22,7 @@ import { assertExecutionAllowed } from "./projects.js";
 import { loadTaskResources } from "./resources.js";
 import { assertReadableTask, assertRunnableTask, forkChangedTask as forkTaskSnapshot, getTaskSessionSelection, withTaskWrite } from "./tasks.js";
 import { assertTaskCurrent, getTaskContinuity, guardTaskManager, reloadTaskContinuity, watchTask } from "./continuity.js";
-import { cloneActivePath, forkFromPrompt, historyLabel, historyNavigationType, navigateWithoutSummary, taskHistoryState } from "./history.js";
+import { cloneCurrentPath, forkFromPrompt, historyLabel, historyNavigationType, navigateWithoutSummary, taskHistoryEntryDetail, taskHistoryState } from "./history.js";
 import { mergeEnvironments, prepareProjectShellRuntime, withBashEnvironment, type PreparedShellRuntime } from "./environment.js";
 
 const runMetadataType = "pilot.run";
@@ -789,6 +789,16 @@ export class RunCoordinator {
     return history;
   }
 
+  async getTaskHistoryEntry(projectPath: string, taskPath: string, entryId: string) {
+    await this.getTaskHistory(projectPath, taskPath);
+    const readable = await assertReadableTask(this.agentDir, projectPath, taskPath);
+    assertTaskCurrent(readable.file);
+    const manager = this.activeTasks.get(readable.file)?.manager ?? SessionManager.open(readable.file);
+    const detail = taskHistoryEntryDetail(readable.file, manager, entryId);
+    assertTaskCurrent(readable.file);
+    return detail;
+  }
+
   async setTaskHistoryLabel(projectPath: string, taskPath: string, entryId: string, value?: string) {
     const label = historyLabel(value);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file }) => {
@@ -810,7 +820,7 @@ export class RunCoordinator {
   async cloneTaskHistory(projectPath: string, taskPath: string, execution: TaskExecutionLocation, setupCommand?: string) {
     await assertExecutionAllowed(this.userData, projectPath);
     return this.mutateTaskHistory(projectPath, taskPath, async ({ file, project }) =>
-      cloneActivePath(file, project, execution, taskSetup(setupCommand), guardTaskManager(file, SessionManager.open(file))));
+      cloneCurrentPath(file, project, execution, taskSetup(setupCommand), guardTaskManager(file, SessionManager.open(file))));
   }
 
   async navigateTaskHistory(projectPath: string, taskPath: string, entryId: string, summarize: boolean, customInstructions?: string) {

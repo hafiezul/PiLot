@@ -1,11 +1,12 @@
 import { SessionManager, type SessionEntry, type SessionTreeNode } from "@earendil-works/pi-coding-agent";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { TaskExecutionLocation, TaskHistoryKind, TaskHistoryNode, TaskHistoryState, TaskSetupState, TaskSummary } from "../shared/projects.js";
+import type { TaskExecutionLocation, TaskHistoryEntryDetail, TaskHistoryKind, TaskHistoryNode, TaskHistoryState, TaskSetupState, TaskSummary } from "../shared/projects.js";
 import { safeTaskTitle } from "./tasks.js";
 
 export const historyNavigationType = "pilot.history-navigation";
 const taskMetadataType = "pilot.task";
+const maximumHistoryEntryDetailCharacters = 64_000;
 
 function contentText(content: unknown) {
   if (typeof content === "string") return content;
@@ -54,8 +55,52 @@ function entryView(entry: SessionEntry): { kind: TaskHistoryKind; title: string;
   if (entry.type === "custom" && !entry.customType.startsWith("pilot.")) return { kind: "custom", title: "Custom entry", description: entry.customType };
 }
 
+function messageDetail(entry: Extract<SessionEntry, { type: "message" }>) {
+  const message = entry.message as unknown as {
+    role: string;
+    content?: unknown;
+    command?: string;
+    output?: string;
+    toolName?: string;
+    isError?: boolean;
+  };
+  if (message.role === "bashExecution") return [`$ ${message.command ?? ""}`, message.output ?? ""].filter(Boolean).join("\n\n");
+  const text = contentText(message.content).trim();
+  if (text) return text;
+  if (message.role === "assistant" && Array.isArray(message.content)) {
+    const tools = message.content.flatMap((part) => part && typeof part === "object" && (part as { type?: string }).type === "toolCall" && typeof (part as { name?: unknown }).name === "string"
+      ? [(part as { name: string }).name]
+      : []);
+    if (tools.length) return `Requested ${tools.join(", ")}`;
+  }
+  if (message.role === "toolResult") return `${message.toolName || "Tool"} ${message.isError ? "failed without output" : "returned no output"}`;
+  return "";
+}
+
+function entryDetail(entry: SessionEntry) {
+  if (entry.type === "message") return messageDetail(entry);
+  if (entry.type === "compaction") return `${entry.tokensBefore.toLocaleString()} tokens before\n\n${entry.summary}`;
+  if (entry.type === "branch_summary") return entry.summary;
+  if (entry.type === "model_change") return `${entry.provider}/${entry.modelId}`;
+  if (entry.type === "thinking_level_change") return entry.thinkingLevel[0]?.toUpperCase() + entry.thinkingLevel.slice(1);
+  if (entry.type === "session_info") return entry.name || "Task name cleared";
+  if (entry.type === "custom_message") return contentText(entry.content).trim();
+  const view = entryView(entry);
+  return view?.description ?? "";
+}
+
 function visibleEntry(entry: SessionEntry) {
   return entryView(entry) !== undefined;
+}
+
+export function taskHistoryEntryDetail(taskPath: string, manager: SessionManager, entryId: string): TaskHistoryEntryDetail {
+  const entry = manager.getEntry(entryId);
+  const view = entry && entryView(entry);
+  if (!entry || !view) throw new Error("Choose an available history entry");
+  const detail = entryDetail(entry) || view.description || view.title;
+  const truncated = detail.length > maximumHistoryEntryDetailCharacters;
+  const text = truncated ? `${detail.slice(0, maximumHistoryEntryDetailCharacters - 1).trimEnd()}…` : detail;
+  return { taskPath, entryId, text, truncated };
 }
 
 export function taskHistoryState(taskPath: string, manager: SessionManager): TaskHistoryState {
@@ -140,6 +185,6 @@ export async function forkFromPrompt(file: string, project: string, execution: T
   return { task: await persistTask(file, entries, safeTaskTitle(draft), project, execution, setup), draft };
 }
 
-export async function cloneActivePath(file: string, project: string, execution: TaskExecutionLocation, setup: Omit<TaskSetupState, "taskPath"> | undefined, manager: SessionManager) {
+export async function cloneCurrentPath(file: string, project: string, execution: TaskExecutionLocation, setup: Omit<TaskSetupState, "taskPath"> | undefined, manager: SessionManager) {
   return { task: await persistTask(file, manager.getBranch(), currentTaskTitle(manager), project, execution, setup) };
 }
