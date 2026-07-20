@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-20T00:00:00.000Z",
+  "title": "Design System: PiLot",
+  "extensions": {
+    "colorMeta": {
+      "signal-blue": { "role": "primary", "displayName": "Signal Blue", "canonical": "light-dark(#1668d4, #72aef4)", "tonalRamp": ["#0a2c52", "#0e3f74", "#0e57b7", "#145fbf", "#1668d4", "#438eea", "#9bc3f0", "#d8e8fb"] },
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "light-dark(#20211f, #e8e8e5)", "tonalRamp": ["#101110", "#1a1b19", "#20211f", "#2c2d2b", "#43443f", "#686864", "#aaa9a4", "#e8e8e5"] },
+      "chalk-canvas": { "role": "neutral", "displayName": "Chalk Canvas", "canonical": "light-dark(#f4f4f3, #1d1e1c)", "tonalRamp": ["#1d1e1c", "#242523", "#292a27", "#30312e", "#3a3b38", "#dededb", "#ebebea", "#f4f4f3"] },
+      "fog-chrome": { "role": "neutral", "displayName": "Fog", "canonical": "light-dark(#ebebea, #242523)", "tonalRamp": ["#1d1e1c", "#242523", "#30312e", "#3a3b38", "#858681", "#d7d7d4", "#e3e3df", "#ebebea"] },
+      "cloud-control": { "role": "neutral", "displayName": "Cloud", "canonical": "light-dark(#fdfdfc, #30312e)", "tonalRamp": ["#242523", "#292a27", "#30312e", "#3a3b38", "#454642", "#d8d8d5", "#efefed", "#fdfdfc"] },
+      "harbor-blue-text": { "role": "info", "displayName": "Harbor Blue", "canonical": "light-dark(#315d91, #9bc3f0)", "tonalRamp": ["#182d47", "#22406a", "#315d91", "#3f74b3", "#7d91aa", "#9bc3f0", "#c8def5", "#edf1f5"] },
+      "amber-caution-text": { "role": "warning", "displayName": "Amber Caution", "canonical": "light-dark(#805814, #f1c46b)", "tonalRamp": ["#40290a", "#67430c", "#805814", "#a57a31", "#9b702c", "#d7c49f", "#eee7d8", "#f7f3e9"] },
+      "rust-alert-text": { "role": "danger", "displayName": "Rust Alert", "canonical": "light-dark(#a12c2c, #ff9b9b)", "tonalRamp": ["#4a1414", "#6d2020", "#912f2f", "#a12c2c", "#b98c8c", "#c46c6c", "#e8c4c4", "#fff7f7"] },
+      "moss-confirm": { "role": "success", "displayName": "Moss Confirm", "canonical": "#287c47", "tonalRamp": ["#123a20", "#1c5a32", "#287c47", "#3a9a5f", "#5cb47d", "#8f9890", "#c3e6d0", "#e9f7ee"] },
+      "diff-add": { "role": "diff", "displayName": "Diff Green", "canonical": "light-dark(#1f6b3b, #8ad4a4)", "tonalRamp": ["#0e3319", "#164d2b", "#1f6b3b", "#2c8a4e", "#5aa876", "#8ad4a4", "#c2e9d1", "#edf7f0"] },
+      "diff-delete": { "role": "diff", "displayName": "Diff Red", "canonical": "light-dark(#963434, #ff9b9b)", "tonalRamp": ["#451717", "#6c2323", "#963434", "#b34d4d", "#c97a7a", "#ff9b9b", "#ffd0d0", "#fff0f0"] }
+    },
+    "typographyMeta": {
+      "page-title": { "displayName": "Page Title", "purpose": "Command-center and settings page h1. One per page." },
+      "section-title": { "displayName": "Section Title", "purpose": "Project/task page h2 headings." },
+      "subsection-title": { "displayName": "Subsection Title", "purpose": "Run headings, dialog headings, settings group headings (h3)." },
+      "body": { "displayName": "Body", "purpose": "Task copy, form labels, run evidence text. Caps at 62-72ch." },
+      "label": { "displayName": "Label", "purpose": "Uppercase tracked chrome labels: nav section headers, fieldset legends. Never body copy." },
+      "mono": { "displayName": "Mono", "purpose": "File paths, commands, diffs, model identifiers, token/byte figures." }
+    },
+    "shadows": [
+      { "name": "shadow-tooltip", "value": "0 2px 6px rgb(20 20 19 / 15%)", "purpose": "Pane-divider resize hint." },
+      { "name": "shadow-popover", "value": "0 4px 8px rgb(20 20 19 / 16%)", "purpose": "Menus, model picker, composer completions." },
+      { "name": "shadow-command", "value": "0 12px 28px rgb(20 20 19 / 24%)", "purpose": "Command palette — the deepest surface in the app." },
+      { "name": "shadow-toast", "value": "0 4px 10px rgb(20 20 19 / 18%)", "purpose": "Bottom-right action-error toast." },
+      { "name": "shadow-inspector", "value": "-8px 0 18px rgb(20 20 19 / 20%)", "purpose": "Inspector floating over content at narrow widths." },
+      { "name": "shadow-drawer", "value": "4px 0 8px rgb(20 20 19 / 18%)", "purpose": "Mobile navigation drawer." }
+    ],
+    "motion": [
+      { "name": "focus-transition", "value": "160ms ease", "purpose": "Skip-link reveal on focus." },
+      { "name": "tooltip-transition", "value": "150ms ease", "purpose": "Pane-divider tooltip opacity." },
+      { "name": "state-transition", "value": "150-200ms", "purpose": "General rule for state-change transitions (hover, active); removed under prefers-reduced-motion." }
+    ],
+    "breakpoints": [
+      { "name": "compact", "value": "1080px" },
+      { "name": "mobile", "value": "679px" },
+      { "name": "coarse-pointer", "value": "(pointer: coarse)" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button (Send)",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Composer send action — the one filled, accent-colored button in the system.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\" aria-label=\"Send\"><svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"M8 12V4M4.75 7.25 8 4l3.25 3.25\" /></svg></button>",
+      "css": ".ds-btn-primary { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid #1668d4; border-radius: 50%; padding: 0; color: #fff; background: #1668d4; cursor: pointer; transition: filter 0.15s ease, transform 0.1s ease; } .ds-btn-primary svg { width: 16px; height: 16px; fill: none; stroke: currentcolor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; } .ds-btn-primary:hover { filter: brightness(0.9); } .ds-btn-primary:focus-visible { outline: 2px solid #1668d4; outline-offset: 2px; } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:disabled { cursor: not-allowed; opacity: 0.52; filter: grayscale(1); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "The default bordered control button used for every routine action (New Task, refresh, dialog footers).",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">New Task</button>",
+      "css": ".ds-btn-secondary { border: 1px solid #898a85; border-radius: 5px; padding: 6px 10px; color: #20211f; background: #fdfdfc; cursor: pointer; font-size: 12px; transition: background 0.15s ease; } .ds-btn-secondary:hover { background: #ededeb; } .ds-btn-secondary:focus-visible { outline: 2px solid #1668d4; outline-offset: 2px; } .ds-btn-secondary:disabled { cursor: not-allowed; opacity: 0.55; }"
+    },
+    {
+      "name": "Navigation Item",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "A project row in the sidebar list — transparent by default, selected background with bold weight when current.",
+      "html": "<button class=\"ds-nav-item\" type=\"button\" aria-current=\"page\"><span class=\"ds-nav-icon\" aria-hidden=\"true\">&#9671;</span><span>PiLot</span><small>3</small></button>",
+      "css": ".ds-nav-item { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 4px; width: 100%; padding: 7px 8px; border: 0; border-radius: 5px; color: #20211f; background: transparent; cursor: pointer; font-size: 13px; text-align: left; } .ds-nav-item:hover { background: #e3e3e0; } .ds-nav-item[aria-current='page'] { background: #dededb; font-weight: 650; } .ds-nav-item small { color: #555651; } .ds-nav-icon { color: #555651; }"
+    },
+    {
+      "name": "Status Badge",
+      "kind": "custom",
+      "refersTo": "status-badge",
+      "description": "Run/task state indicator — bordered text, never a filled color chip. Border and text color together carry the state.",
+      "html": "<span class=\"ds-status-badge ds-status-running\">Running</span>",
+      "css": ".ds-status-badge { padding: 3px 7px; border: 1px solid #898a85; border-radius: 4px; color: #5f605b; font-size: 11px; font-weight: 650; } .ds-status-badge.ds-status-running { border-color: #7d91aa; color: #315d91; } .ds-status-badge.ds-status-queued { border-color: #a57a31; color: #805814; } .ds-status-badge.ds-status-failed { border-color: #b98c8c; color: #912f2f; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Labeled single-line input used across settings and worktree/dialog forms.",
+      "html": "<label class=\"ds-field\"><span>Branch name</span><input type=\"text\" placeholder=\"feature/my-task\" /></label>",
+      "css": ".ds-field { display: grid; gap: 6px; color: #686864; font-size: 12px; font-weight: 650; } .ds-field input { width: 100%; min-height: 34px; border: 1px solid #898a85; border-radius: 4px; padding: 6px 8px; color: #20211f; background: #fff; font: inherit; } .ds-field input:focus-visible { outline: 2px solid #1668d4; outline-offset: 2px; } .ds-field input::placeholder { color: #686864; opacity: 1; }"
+    },
+    {
+      "name": "Toggle Row",
+      "kind": "input",
+      "refersTo": "toggle-row",
+      "description": "Full-width radio/checkbox settings row — two-line label with the control at the leading edge.",
+      "html": "<label class=\"ds-toggle-row\"><input type=\"radio\" name=\"appearance\" checked /><span><strong>System</strong><small>Follow your operating system</small></span></label>",
+      "css": ".ds-toggle-row { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 9px 10px; border-top: 1px solid #dededb; cursor: pointer; } .ds-toggle-row input { width: 16px; height: 16px; margin: 0; accent-color: #1668d4; } .ds-toggle-row span { display: grid; gap: 3px; } .ds-toggle-row strong { font-size: 13px; } .ds-toggle-row small { color: #686864; font-size: 12px; }"
+    },
+    {
+      "name": "Inspector Tabs",
+      "kind": "nav",
+      "refersTo": "tabs",
+      "description": "Underline-style tabs for the inspector pane (Changes / History) — no background change, 2px bottom border marks the active tab.",
+      "html": "<div class=\"ds-tabs\" role=\"tablist\"><button class=\"ds-tab\" role=\"tab\" aria-selected=\"true\">Changes</button><button class=\"ds-tab\" role=\"tab\">History</button></div>",
+      "css": ".ds-tabs { display: flex; gap: 16px; height: 48px; padding: 0 16px; border-bottom: 1px solid #d7d7d4; } .ds-tab { display: flex; align-items: center; height: 100%; padding: 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #666762; font-size: 12px; cursor: pointer; } .ds-tab[aria-selected='true'] { border-bottom-color: #30312e; color: #20211f; font-weight: 650; }"
+    },
+    {
+      "name": "The π Mark",
+      "kind": "custom",
+      "refersTo": "brand-mark",
+      "description": "Signature brand glyph — a literal pi character in Georgia serif, the only serif and only non-system-font element in PiLot. Used once, in the sidebar brand button.",
+      "html": "<button class=\"ds-brand-home\" type=\"button\"><span class=\"ds-mark\" aria-hidden=\"true\">π</span><strong>PiLot</strong></button>",
+      "css": ".ds-brand-home { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; border-radius: 5px; padding: 7px 8px; color: inherit; background: transparent; cursor: pointer; text-align: left; font-size: 15px; } .ds-brand-home:hover { background: #dededb; } .ds-mark { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid #a6a6a2; border-radius: 6px; font: 17px Georgia, serif; }"
+    },
+    {
+      "name": "Provider Icon (generic)",
+      "kind": "custom",
+      "refersTo": "provider-icon",
+      "description": "Fallback glyph for custom (non-built-in) model providers. Built-in providers instead render their official simple-icons mark in the provider's own brand color — the system's sanctioned exception to the Signal-Only Color Rule.",
+      "html": "<svg class=\"ds-provider-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"6\" r=\"2.5\" /><circle cx=\"6\" cy=\"17\" r=\"2.5\" /><circle cx=\"18\" cy=\"17\" r=\"2.5\" /><path d=\"m10.7 8.2-3.4 6.6m6-6.6 3.4 6.6M8.5 17h7\" /></svg>",
+      "css": ".ds-provider-icon { width: 16px; height: 16px; overflow: visible; fill: none; stroke: currentcolor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; color: #555651; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Dispatch Desk",
+    "overview": "PiLot presents several active jobs without making the interface feel busy. The composition is compact, orderly, and calm: routine activity recedes, while exceptions, decisions, handoffs, and evidence become immediately legible. Codex desktop informs project and task orchestration, Linear informs hierarchy and state clarity, and GitHub Desktop informs focused change review and external-tool integration. The shipped implementation carries this through faithfully: a three-pane shell built from light-dark() tokens, a single accent reserved for meaning, and a run timeline instead of chat bubbles.\n\nThe interface is focused, capable, and transparent. It feels at home on macOS and Windows rather than imposing a browser-product skin. It explicitly rejects terminal emulators, generic chatbot shells, and the persistent file trees, editor tabs, minimaps, and panel density of a VS Code clone.",
+    "keyCharacteristics": [
+      "Near-monochrome surfaces (ink, chalk canvas, fog, cloud) with one accent — Signal Blue (#1668d4) — reserved for focus, links, and primary action",
+      "An adaptive three-pane shell (navigation / task / inspector) that collapses the inspector before task navigation on narrower widths",
+      "A run-centric timeline instead of conversation bubbles",
+      "Compact but breathable information density: a 10-22px fixed type scale, not fluid clamp()",
+      "Native OS chrome: a draggable 38px window bar, platform-conventional dialogs, focus rings, and menu placement",
+      "Readable task state via bordered text badges, never color alone",
+      "Motion that explains state changes (150-200ms) and then gets out of the way",
+      "Official provider brand marks for built-in providers; one generic glyph for custom providers"
+    ],
+    "rules": [
+      { "name": "The Signal-Only Color Rule", "body": "Color is reserved for selection, focus, links, warnings, errors, success, active run state, and official provider marks. Provider marks may use their own brand color for recognition; every other surface stays neutral.", "section": "colors" },
+      { "name": "The True Neutral Rule", "body": "Base backgrounds carry no hue lean — not cream, not blue-gray, not green-tinted. Brand character comes from composition, typography, and the rare accent, not a tinted canvas.", "section": "colors" },
+      { "name": "The Light-Dark Parity Rule", "body": "Every color is authored once through light-dark(light, dark) on a single semantic token. There is no second, independently-maintained dark theme.", "section": "colors" },
+      { "name": "The Native Type Rule", "body": "UI labels, buttons, menus, and task metadata use the host system sans. Monospace never spreads into general navigation or prose simply to signal that PiLot is a developer tool.", "section": "typography" },
+      { "name": "The Fixed Scale Rule", "body": "Every size in the hierarchy is a literal px value, never a fluid clamp(). PiLot is viewed at consistent desktop DPI inside a resizable window, not a responsive marketing viewport.", "section": "typography" },
+      { "name": "The Structural Elevation Rule", "body": "A shadow must explain which surface temporarily sits above another. Static cards and routine panels do not earn decorative drop shadows — they're bordered, not lifted.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do author every color as light-dark(light, dark) on a single semantic token — never a second dark-mode override block.",
+      "Do keep multiple task states scannable without forcing every detail onto the screen.",
+      "Do keep navigation, the focused task, and a collapsible contextual inspector spatially stable.",
+      "Do organize transcript content into runs with compact evidence rows and expandable <details>.",
+      "Do use platform-standard menu placement, keyboard behavior, native <dialog>/popover elements, focus treatment, and window lifecycle.",
+      "Do make running, queued, interrupted, failed, and externally-changed states distinguishable by border + text color together, never color alone.",
+      "Do use legible, theme-adaptive official brand marks for built-in providers and the one generic glyph for custom providers.",
+      "Do delegate editing and full terminal work to the user's chosen tools.",
+      "Do keep transitions between 150-200ms and remove nonessential motion under prefers-reduced-motion.",
+      "Do cap border-radius at 8px anywhere in the system; most controls sit at 4-7px."
+    ],
+    "donts": [
+      "Don't build a terminal emulator and call it a desktop interface.",
+      "Don't present PiLot as a generic chatbot with a conversation list and undifferentiated message bubbles.",
+      "Don't make PiLot a VS Code clone; no persistent editor tabs, minimap, IDE file tree, or competing editor chrome.",
+      "Don't copy Codex desktop visually; borrow its project/task workflow while keeping PiLot's own restrained language.",
+      "Don't use color as decoration, gradient text, glassmorphism, oversized radii, nested cards, or wide soft shadows.",
+      "Don't animate content merely because it entered the viewport or the application started.",
+      "Don't fill a status badge with a saturated background — state badges are bordered text, not colored chips.",
+      "Don't introduce a second font family. The pi mark's Georgia serif is a one-time signature, not a pattern to extend."
+    ]
+  }
+}
